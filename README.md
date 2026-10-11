@@ -98,10 +98,24 @@ The tool prints three groups at the end: **changes**, **parts bound**, and
 python3 test_converter.py
 ```
 
-46 checks. The important one is the **reference fidelity check**: it converts the
+515 checks. The important one is the **reference fidelity check**: it converts the
 Volkswagen Parati (a mod already known to work in Car Mode) and asserts the
 generated `car_dealer` binding covers every accessory the original binds, and
 that every `data_path` it emits resolves to a real file.
+
+Those checks drive real mod files. They are third-party assets and are not
+redistributed with this repository, so on a fresh clone the fixture-backed
+checks are reported as **skipped** and the rest still run. Point the suite at a
+directory containing them to run everything:
+
+```bash
+CARUTIL_FIXTURES=/path/to/mods python3 test_converter.py
+```
+
+It expects `Volkswagen_Parati_1994.scs`,
+`Mercedes-Benz W223 S-Class V2.3 1.61.scs`,
+`Honda Pilot YG2 2025 V1.6 1.61.scs`, `porsche-cayenne/`, `release/output/`
+and a password-protected archive.
 
 ## Physics — making it drive like a car
 
