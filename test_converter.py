@@ -1472,10 +1472,38 @@ def test_brand_logo() -> None:
           not any("MOD" in k for k in logo))
 
     # .tobj path must be length-prefixed and absolute.
-    tobj = C._synth_tobj("material/ui/car_brand_logo/mod.dds")
+    # The game reported "Failed reading map name from file" when the string was
+    # written at 44 instead of 48, and again when the path lost its leading
+    # slash, so both are asserted here.
+    want = "/material/ui/car_brand_logo/mod.dds"
+    tobj = C._synth_tobj(want)
     ln = struct.unpack("<I", tobj[40:44])[0]
-    check("synth tobj length prefix", ln == len("material/ui/car_brand_logo/mod.dds"))
-    check("synth tobj path", tobj[44:44 + ln] == b"material/ui/car_brand_logo/mod.dds")
+    check("synth tobj length prefix", ln == len(want), str(ln))
+    check("synth tobj has 4 padding bytes", tobj[44:48] == b"\x00\x00\x00\x00",
+          tobj[44:48].hex())
+    check("synth tobj string starts at 48", tobj[48:48 + ln] == want.encode())
+    check("synth tobj is exactly header+string", len(tobj) == 48 + ln)
+    check("synth tobj adds a slash if missing",
+          C._synth_tobj("material/ui/x.dds")[48:] == b"/material/ui/x.dds")
+
+    # Patching a real template must keep that layout and not double the suffix.
+    if need(W223, "tobj patching"):
+        import sys as _sys
+        src = C.ModSource(W223)
+        tpl = src.read_bytes("material/ui/brand_logo/merc.tobj")
+        out = C._patch_tobj(tpl, "/material/ui/car_brand_logo/mod.dds")
+        check("patched tobj not None", out is not None)
+        if out is not None:
+            ln = struct.unpack("<I", out[40:44])[0]
+            check("patched tobj keeps 4 padding bytes",
+                  out[44:48] == b"\x00\x00\x00\x00", out[44:48].hex())
+            check("patched tobj string at 48",
+                  out[48:48 + ln] == want.encode(),
+                  out[48:48 + ln].decode("ascii", "replace"))
+            check("patched tobj size is consistent", len(out) == 48 + ln)
+            check("no doubled .dds suffix", b".ddsdds" not in out)
+        # A missing template still yields a usable file via _synth_tobj.
+        check("_patch_tobj(None) returns None", C._patch_tobj(None, want) is None)
 
     # End to end: the Mercedes conversion must carry the mod's real logo into
     # car_brand_logo/ rather than inventing a grey placeholder.
@@ -1502,7 +1530,8 @@ def test_brand_logo() -> None:
             t = z.read("material/ui/car_brand_logo/mod.tobj")
             ln = struct.unpack("<I", t[40:44])[0]
             check("output tobj points at the car_brand_logo dds",
-                  t[44:44 + ln] == b"material/ui/car_brand_logo/mod.dds")
+                  t[48:48 + ln] == b"/material/ui/car_brand_logo/mod.dds",
+                  t[48:48 + ln].decode("ascii", "replace"))
             mat = z.read("material/ui/car_brand_logo/mod.mat").decode()
             check("output mat references mod.tobj", 'texture : "mod.tobj"' in mat)
 

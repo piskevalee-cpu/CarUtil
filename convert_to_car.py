@@ -1484,24 +1484,35 @@ def _mip_chain(width: int, height: int) -> list[tuple[int, int]]:
     return levels
 
 
+_TOBJ_LEN_AT = 40      # u32 length of the texture path
+_TOBJ_PATH_AT = 48     # the path string itself; bytes 44-47 are padding
+
+
 def _patch_tobj(template: bytes, path: str) -> bytes | None:
     """Point a .tobj at a new texture path.
 
     A .tobj stores a length-prefixed absolute texture path: u32 at offset 40
-    is the string length, the string starts at 44. Only that changes when the
-    texture is renamed, which is all the reference converter does.
+    is the string length, four zero bytes follow at 44-47, and the string
+    starts at offset 48. The path is absolute, i.e. it starts with "/".
+
+    Writing the string at 44 instead corrupts the padding and the game then
+    reports "Failed reading map name from file ...".
     """
-    if template is None or len(template) < 48:
+    if template is None or len(template) < _TOBJ_PATH_AT:
         return None
-    old_len = struct.unpack("<I", template[40:44])[0]
-    if 44 + old_len > len(template):
+    if not path.startswith("/"):
+        path = "/" + path
+    old_len = struct.unpack("<I", template[_TOBJ_LEN_AT:_TOBJ_LEN_AT + 4])[0]
+    if _TOBJ_PATH_AT + old_len > len(template):
         return None
-    data = bytearray(template)
+
+    # template[:48] already carries the header, the length field and its
+    # 4 padding bytes, so only the length and the string itself are rewritten.
+    data = bytearray(template[:_TOBJ_PATH_AT])
     raw = path.encode("ascii")
-    data[40:44] = struct.pack("<I", len(raw))
-    data[44:44 + len(raw)] = raw
-    if len(raw) != old_len:
-        data = data[:44 + len(raw)] + data[44 + old_len:]
+    data[_TOBJ_LEN_AT:_TOBJ_LEN_AT + 4] = struct.pack("<I", len(raw))
+    data += raw
+    data += template[_TOBJ_PATH_AT + old_len:]
     return bytes(data)
 
 
@@ -1531,7 +1542,7 @@ def build_brand_logo(name: str, tobj_template: bytes | None,
             '\ttexture_name : "texture"\n'
             "}\n"
         ).encode("utf-8")
-        tobj = _patch_tobj(tobj_template, f"{root}.dds")
+        tobj = _patch_tobj(tobj_template, f"/{root}.dds")
         if tobj is not None:
             out[f"{root}.tobj"] = tobj
     return out
@@ -1540,11 +1551,19 @@ def build_brand_logo(name: str, tobj_template: bytes | None,
 def _synth_tobj(path: str) -> bytes:
     """Build a minimal .tobj pointing at `path`, for when no template exists.
 
-    Layout taken from the reference converter's output: a 40-byte header, then a
-    u32 length at offset 40 and the ASCII path from offset 44.
+    Layout copied from a logo file the game itself ships: a 40-byte header, a
+    u32 length at offset 40, four zero bytes, then the absolute ASCII path
+    from offset 48.
     """
+    if not path.startswith("/"):
+        path = "/" + path
     raw = path.encode("ascii")
-    return bytes(40) + struct.pack("<I", len(raw)) + raw
+    return (
+        bytes(40)
+        + struct.pack("<I", len(raw))
+        + b"\x00\x00\x00\x00"
+        + raw
+    )
 
 
 def find_mod_folders() -> list[Path]:
