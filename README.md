@@ -30,7 +30,9 @@ python3 convert_to_car.py \
 | Flag | Meaning |
 |---|---|
 | `--type` | Vehicle type written as `tags[]` in `data.sii`. Required. |
-| `--extra-tags` | Comma-separated extra types, e.g. `pickup,sedan`. Adds further `tags[]` entries so the car can satisfy more than one job category. |
+| `--extra-tags` | Comma-separated extra types, e.g. `pickup,sedan`. Adds further `tags[]` entries so the car can haul more cargo. |
+| `--brand-logo` | Logo image (PNG/WebP/SVG) for this car. Overrides the bundled `logos/` and the mod's own. |
+| `--brand-logo-dir` | Directory to look for `<brand>.png` in, instead of the bundled `logos/`. |
 | `--brand` | Brand name, used for the dealer folder and `info[]`. |
 | `--slug` | Vehicle identifier. Defaults to the input filename stem. |
 | `--asset-root` | Explicit model root. Default: `/vehicle/car/<slug>`. |
@@ -41,25 +43,50 @@ python3 convert_to_car.py \
 | `--force-physics` | Overwrite chassis physics even when the mod already has car-sane values. |
 | `--keep-physics` | Keep the global truck `physics.sii`. **Off by default** — see below. |
 
-### Vehicle types and job tags
+### Vehicle types and cargo
 
-Road Trip matches a car's `tags[]` against `car_job vehicle_types[]` to decide
-which jobs it can take. The seven presets are `pickup`, `suv`, `sedan`,
-`muscle`, `classic`, `sports`, `offroad`.
+Road Trip has two separate job markets, and confusing them is the most common
+reason a converted car looks "missing":
 
-`--type` is **not restricted** to those seven. Common alternative spellings are
+- **Quick Job** — the company *lends you* a vehicle. Your own car is never
+  listed there, by design.
+- **Dispatch Market** — you drive a vehicle from your own garage. Your
+  converted car appears here, once you own it.
+
+So a car that is absent from Quick Jobs but works for jobs is working
+correctly. `tags[]` does not decide whether a car shows up at all; it decides
+which **cargo** the car qualifies to haul, and only `muscle`, `classic` and
+`sports` are restricted from certain cargoes.
+
+The seven presets are `pickup`, `suv`, `sedan`, `muscle`, `classic`, `sports`,
+`offroad`. `--type` is not restricted to them: alternative spellings are
 normalised (`off-road`→`offroad`, `crossover`→`suv`, `wagon`→`sedan`,
-`coupe`→`sports`), and anything unrecognised is written through as given. That
-is deliberate: the exact token spellings the base game accepts can only be
-confirmed in-game, and an untested token is a question, not an error.
+`coupe`→`sports`) and anything unrecognised is written through as given.
 
-If a converted car does not show up in jobs, try giving it more than one type:
+`--extra-tags` adds further types so a car qualifies for more cargo:
 
 ```
 python3 convert_to_car.py mod.scs --type suv --extra-tags pickup,sedan --brand honda
 ```
 
-A car carrying several tags can match more than one job category.
+### Brand logos
+
+`--brand` selects the name the Car Dealer files the car under, and the logo it
+shows. Omit it and the guided prompt lists the brands in `brands.py`.
+
+Logos live in `logos/` and may be PNG, WebP or SVG — the game never reads those
+directly. Each is letterboxed onto the 256×64 canvas and converted to the DXT1
+DDS the game actually wants (`logo.py`, which uses ImageMagick). White-on-
+transparent artwork is composited onto a dark plate so it stays visible.
+
+The logo is written to both `material/ui/car_brand_logo/<dealer>.{dds,mat,tobj}`
+— the directory Car Mode reads — and `material/ui/truck_brand_logo/<brand>.*`.
+Missing a logo is not an error: a flat placeholder is used instead.
+
+Brands with no logo file yet: `bmw`, `honda`, `jeep`, `ram`. Add the image to
+`logos/` and it is picked up with no code change. `--brand-logo` uses a specific
+file, `--brand-logo-dir` a directory of your own.
+
 | `--dry-run` | Report what would change; write nothing. |
 
 The tool prints three groups at the end: **changes**, **parts bound**, and

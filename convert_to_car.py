@@ -35,6 +35,8 @@ from sii import (  # noqa: E402
     set_key,
     set_tag,
 )
+import brands as _brands
+import logo as _logo
 
 # The seven vehicle types, per the Truck Simulator Wiki's Road Trip page.
 VEHICLE_TYPES = ["pickup", "suv", "sedan", "muscle", "classic", "sports", "offroad"]
@@ -760,6 +762,11 @@ TYPE_HELP = {
 
 RT_PREFIX = "rt"
 
+# Folder the converted car is filed under in def/vehicle/car_dealer/. The Car
+# Dealer looks the brand logo up by this name, so the logo files and the
+# registration path must agree on it.
+DEALER_FOLDER = "mod"
+
 
 def _tty() -> bool:
     return sys.stdin.isatty()
@@ -815,23 +822,41 @@ def prompt_type() -> str:
 
 
 def prompt_brand(slug: str) -> str:
-    """Ask which brand to file it under."""
+    """Ask which brand to file it under, from the shipped logo set."""
     # Skip leading year/version noise: "2021_porsche_cayenne" -> "porsche".
     guess = ""
     for tok in re.split(r"[_\s]+", slug or ""):
         if tok and not tok.isdigit() and not re.fullmatch(r"v?\d+[a-z]?", tok):
             guess = re.sub(r"[^a-z0-9]", "", tok.lower())
             break
-    guess = guess or "custom"
+    guess = _brands.normalise(guess) or "other"
+    if _brands.logo_path(guess) is None:
+        guess = "other"
 
     print()
-    print(f"  Brand folder to file it under? [{guess}]")
-    print("    e.g. porsche, volkswagen, ford -- custom is fine.")
+    print("  Which brand is it? The Car Dealer shows this name and logo.")
     print()
-    raw = _ask("  Brand: ").strip().lower()
-    if raw in ("q", "quit", "exit"):
-        raise SystemExit("cancelled")
-    return re.sub(r"[^a-z0-9]+", "", raw) or guess
+    have = _brands.available()
+    for i in range(0, len(_brands.BRANDS), 4):
+        row = _brands.BRANDS[i:i + 4]
+        cells = []
+        for j, (name, label, _stem) in enumerate(row, start=i + 1):
+            mark = "" if name in have else " (no logo)"
+            cells.append(f"{j:2d}. {label}{mark}")
+        print("    " + "".join(c.ljust(30) for c in cells).rstrip())
+    print()
+    while True:
+        raw = _ask(f"  Brand [{guess}]: ").strip().lower()
+        if raw in ("q", "quit", "exit"):
+            raise SystemExit("cancelled")
+        if not raw:
+            return guess
+        if raw.isdigit() and 1 <= int(raw) <= len(_brands.BRANDS):
+            return _brands.BRANDS[int(raw) - 1][0]
+        key = _brands.normalise(raw)
+        if key and key != raw:
+            return key
+        print("  -> pick a number, or type a brand name")
 
 
 def prompt_weight(vtype: str, preset: str | None) -> list[int] | None:
@@ -1102,6 +1127,7 @@ def convert(
     mass: list[int] | None = None,
     force_physics: bool = False,
     tags: list[str] | None = None,
+    logo_dds: bytes | None = None,
 ) -> Report:
     rep = Report()
     if src.wrapper_note:
@@ -1266,7 +1292,7 @@ def convert(
     )
     car_binding = build_binding(parts, ".car", header)
     bindings = {
-        f"def/vehicle/car_dealer/mod/{slug}.sii": car_binding,
+        f"def/vehicle/car_dealer/{DEALER_FOLDER}/{slug}.sii": car_binding,
         f"def/vehicle/car_desktop/{slug}.sii": car_binding,
         f"def/vehicle/car_company/{slug}.sii": car_binding,
         f"def/vehicle/truck_desktop/{slug}.sii": build_binding(
@@ -1311,11 +1337,15 @@ def convert(
     if dry_run:
         rep.warn("dry run -- nothing written")
     else:
-        # 4. brand logo. Without it the Car Dealer logs
-        # "No logo found for brand 'x'!" and cannot load a UI material.
-        # The brand folder the mod already uses for its own truck dealer is
-        # what the reference converter reuses for the logo ("merc", not
-        # "mercedes").
+        # 4. brand logo. Without it the Car Dealer logs "No logo found for
+        # brand 'x'!" and cannot load a UI material.
+        #
+        # Two different lookups are in play:
+        #   truck_brand_logo/<brand>   -- what the reference converter adds
+        #   car_brand_logo/<dealer>   -- what Car Mode reads; the game asked
+        #                                 for "/material/ui/car_brand_logo/mod.mat"
+        # The <brand> stem is the folder the mod uses for its own truck dealer
+        # ("merc", not "mercedes"), matching the reference.
         logo_brand = brand.lower()
         for n in sorted(src.readable):
             m = re.match(r"^def/vehicle/truck_dealer/([^/]+)/", n)
@@ -1325,15 +1355,41 @@ def convert(
 
         tobj_tpl = next(
             (src.read_bytes(n) for n in sorted(src.readable)
+             if re.match(r"^material/ui/(car_|truck_)?brand_logo/[^/]+\.tobj$", n)
+             and src.read_bytes(n)),
+            None,
+        ) or next(
+            (src.read_bytes(n) for n in sorted(src.readable)
              if n.endswith(".tobj") and src.read_bytes(n)),
             None,
         )
-        logo = build_brand_logo(logo_brand, tobj_tpl)
+
+        # Prefer a logo we were given (--brand-logo / --brand-logo-dir), then
+        # the mod's own texture, then a flat placeholder.
+        src_dds = None
+        if logo_dds is not None:
+            src_dds = logo_dds
+            logo_source = "selected logo"
+        else:
+            logo_source = "the mod's own logo"
+            src_dds = next(
+                (src.read_bytes(n) for n in sorted(src.readable)
+                 if re.match(r"^material/ui/(car_|truck_)?brand_logo/[^/]+\.dds$", n)
+                 and src.read_bytes(n)),
+                None,
+            )
+            if src_dds is None:
+                logo_source = "a flat placeholder"
+
+        logo = build_brand_logo(logo_brand, tobj_tpl, src_dds,
+                                dirs=(_TRUCK_LOGO_DIR,))
+        logo.update(build_brand_logo(DEALER_FOLDER, tobj_tpl, src_dds,
+                                     dirs=(_CAR_LOGO_DIR,)))
         if logo:
             assets.update(logo)
             rep.action(
-                f"generated material/ui/truck_brand_logo/{logo_brand}"
-                ".{dds,mat,tobj}"
+                f"brand logo ({logo_source}): {_TRUCK_LOGO_DIR}/{logo_brand}.* "
+                f"and {_CAR_LOGO_DIR}/{DEALER_FOLDER}.*"
             )
 
         _write_scs(files, out_path, assets)
@@ -1347,38 +1403,85 @@ def convert(
 # Brand logo
 # ---------------------------------------------------------------------------
 # The Car Dealer logs "No logo found for brand 'x'!" and cannot open a UI
-# material without these three files. The reference converter emits them under
-# material/ui/truck_brand_logo/<brand>.{dds,mat,tobj}.
+# material without these three files. Car Mode reads them from
+# material/ui/car_brand_logo/<dealer folder>.{dds,mat,tobj} -- that directory is
+# the one the game actually asks for, and the name it asks for is the *dealer
+# folder* ("mod"), not the brand. Writing only brand_logo/ and
+# truck_brand_logo/ is why the game logged "Can not open
+# '/material/ui/car_brand_logo/mod.mat'".
 
-_LOGO_SIZE = 64
+# Measured from the reference converter's working logo
+# (material/ui/brand_logo/merc.dds): 256x64, DXT1, no mipmaps.
+_LOGO_W = 256
+_LOGO_H = 64
+# The header value the game's own logo files advertise. The chain stored is the
+# full one (9 levels for 256x64), which is what the reference file does too.
+_LOGO_MIPS = 6
+
+# The reference converter adds truck_brand_logo/<brand>.{dds,mat,tobj} and
+# leaves the mod's own brand_logo/<brand>.* untouched. Car Mode reads a third
+# directory and resolves it by the *dealer folder*, which is why the game asked
+# for "/material/ui/car_brand_logo/mod.mat" and found nothing.
+_TRUCK_LOGO_DIR = "material/ui/truck_brand_logo"
+_CAR_LOGO_DIR = "material/ui/car_brand_logo"
 
 
-def _make_dds(size: int = _LOGO_SIZE) -> bytes:
-    """A minimal, valid 64x64 RGBA DDS filled with mid-grey."""
-    import struct as _s
+def _dxt1_block(r: int, g: int, b: int) -> bytes:
+    """Encode one 4x4 RGB block as DXT1.
 
-    header = bytearray()
-    header += b"DDS "
-    header += _s.pack("<I", 124)                       # dwSize
-    header += _s.pack("<I", 0x1 | 0x2 | 0x4 | 0x1000 | 0x80000)  # caps,size,pf,pitch
-    header += _s.pack("<I", size)                      # height
-    header += _s.pack("<I", size)                      # width
-    header += _s.pack("<I", size * 4)                  # pitch
-    header += _s.pack("<I", 0)                         # depth
-    header += _s.pack("<I", 0)                         # mipmaps
-    header += _s.pack("<I", 32)                        # ddspf size
-    header += _s.pack("<I", 0x1 | 0x40)                # DDPF_ALPHAPIXELS|DDPF_RGB
-    header += _s.pack("<I", 0)                         # fourCC
-    header += _s.pack("<I", 32)                        # RGBBitCount
-    header += _s.pack("<I", 0x00FF0000)                # R mask
-    header += _s.pack("<I", 0x0000FF00)                # G mask
-    header += _s.pack("<I", 0x000000FF)                # B mask
-    header += _s.pack("<I", 0xFF000000)                # A mask
-    header += _s.pack("<I", 0x1000)                    # dwCaps = TEXTURE
-    header += _s.pack("<5I", 0, 0, 0, 0, 0)           # caps2..reserved
-    while len(header) < 128:        # DDSURFACEDESC2 padding
-        header += b"\x00"
-    return bytes(header) + bytes([96, 96, 96, 255]) * (size * size)
+    DXT1 stores two endpoint colours plus a 2-bit per-pixel index. A flat block
+    is encoded with c0 == c1, which the spec allows and every DXT decoder
+    handles: colour0 and colour1 are the same RGB565 value and the indices are
+    all zero.
+    """
+    c = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+    return struct.pack("<HHI", c, c, 0)
+
+
+def _make_dds(width: int = _LOGO_W, height: int = _LOGO_H,
+              rgb: tuple[int, int, int] = (96, 96, 96),
+              mips: int = _LOGO_MIPS) -> bytes:
+    """A minimal, valid DXT1 DDS of the given size, filled with one colour.
+
+    DXT1 compresses in 4x4 blocks: 8 bytes per block. The full mip chain is
+    always stored; `mips` only sets the value the header advertises, which
+    matches what the game's own logo files declare (6 for a 256x64 image,
+    even though the chain itself runs to 1x1).
+    """
+    header = bytearray(128)
+    header[0:4] = b"DDS "
+    struct.pack_into("<I", header, 4, 124)               # dwSize
+    # CAPS|HEIGHT|WIDTH|PIXELFORMAT|MIPMAPCOUNT|LINEARSIZE
+    struct.pack_into("<I", header, 8, 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000)
+    struct.pack_into("<I", header, 12, height)           # dwHeight
+    struct.pack_into("<I", header, 16, width)            # dwWidth
+    chain = _mip_chain(width, height)
+    struct.pack_into("<I", header, 28, mips)             # dwMipMapCount
+    # The game reads the pixel format from offset 76, not the textbook 32.
+    struct.pack_into("<I", header, 76, 32)               # ddspf.dwSize
+    struct.pack_into("<I", header, 80, 0x4)              # DDPF_FOURCC
+    header[84:88] = b"DXT1"                              # ddspf.dwFourCC
+    # 0x1000 TEXTURE | 0x40000 | 0x8 -- byte-for-byte what the game's own
+    # logo carries.
+    struct.pack_into("<I", header, 108, 0x00401008)       # dwCaps
+
+    block = _dxt1_block(*rgb)
+    body = bytearray()
+    for level_w, level_h in chain:
+        bw = max(1, -(-level_w // 4))
+        bh = max(1, -(-level_h // 4))
+        body += block * (bw * bh)
+    return bytes(header) + bytes(body)
+
+
+def _mip_chain(width: int, height: int) -> list[tuple[int, int]]:
+    """The (w, h) levels of a full mip chain, halving until 1x1."""
+    levels = [(width, height)]
+    while width > 1 or height > 1:
+        width = max(1, width // 2)
+        height = max(1, height // 2)
+        levels.append((width, height))
+    return levels
 
 
 def _patch_tobj(template: bytes, path: str) -> bytes | None:
@@ -1402,25 +1505,46 @@ def _patch_tobj(template: bytes, path: str) -> bytes | None:
     return bytes(data)
 
 
-def build_brand_logo(brand: str, tobj_template: bytes | None) -> dict:
-    """Return {path: bytes} for the three brand-logo files."""
-    name = re.sub(r"[^a-z0-9]+", "", brand.lower()) or "mod"
-    root = f"material/ui/truck_brand_logo/{name}"
-    out = {
-        f"{root}.dds": _make_dds(),
-        f"{root}.mat": (
+def build_brand_logo(name: str, tobj_template: bytes | None,
+                     dds: bytes | None = None,
+                     dirs: tuple[str, ...] = (_TRUCK_LOGO_DIR,)) -> dict:
+    """Return {path: bytes} for the brand-logo files in each given directory.
+
+    `name` is the stem the logo is filed under. `dds` is the real texture when
+    the source mod ships one; otherwise a flat placeholder is generated.
+
+    The Car Dealer resolves the logo by the name it asks for, so the caller
+    decides the stem: the brand folder for truck_brand_logo/, and the dealer
+    folder for car_brand_logo/ (the game asked for
+    "/material/ui/car_brand_logo/mod.mat").
+    """
+    name = re.sub(r"[^a-z0-9]+", "", str(name).lower()) or "mod"
+    texture = dds if dds else _make_dds()
+    out: dict[str, bytes] = {}
+    for directory in dirs:
+        root = f"{directory}/{name}"
+        out[f"{root}.dds"] = texture
+        out[f"{root}.mat"] = (
             'material : "ui"\n'
             "{\n"
             f'\ttexture : "{name}.tobj"\n'
             '\ttexture_name : "texture"\n'
             "}\n"
-        ).encode("utf-8"),
-    }
-    tobj = _patch_tobj(tobj_template, f"{root}.dds")
-    if tobj is None:
-        return out
-    out[f"{root}.tobj"] = tobj
+        ).encode("utf-8")
+        tobj = _patch_tobj(tobj_template, f"{root}.dds")
+        if tobj is not None:
+            out[f"{root}.tobj"] = tobj
     return out
+
+
+def _synth_tobj(path: str) -> bytes:
+    """Build a minimal .tobj pointing at `path`, for when no template exists.
+
+    Layout taken from the reference converter's output: a 40-byte header, then a
+    u32 length at offset 40 and the ASCII path from offset 44.
+    """
+    raw = path.encode("ascii")
+    return bytes(40) + struct.pack("<I", len(raw)) + raw
 
 
 def find_mod_folders() -> list[Path]:
@@ -1572,7 +1696,20 @@ def main(argv: list[str] | None = None) -> int:
              + ". Unlisted spellings are accepted and normalised, so an "
                "alternative token can be tested without editing the script.",
     )
-    ap.add_argument("--brand", help="brand, e.g. porsche")
+    ap.add_argument(
+        "--brand",
+        help="brand, e.g. porsche. Omit to pick from the shipped logo list. "
+             "See brands.py for the recognised names.",
+    )
+    ap.add_argument(
+        "--brand-logo",
+        help="logo image for this brand (PNG/WebP/SVG). Converted to the "
+             "256x64 DXT1 DDS the game needs. Overrides the mod's own logo.",
+    )
+    ap.add_argument(
+        "--brand-logo-dir",
+        help="directory to look for <brand>.png instead of the bundled logos/.",
+    )
     ap.add_argument(
         "--extra-tags",
         help="comma-separated extra vehicle types to add to tags[], e.g. "
@@ -1673,6 +1810,32 @@ def main(argv: list[str] | None = None) -> int:
         if not guided:
             raise SystemExit("error: --brand is required in scripted mode")
         args.brand = prompt_brand(slug)
+    args.brand = _brands.normalise(args.brand) or "other"
+
+    # ---- 3b. brand logo -------------------------------------------------
+    logo_dds = None
+    if args.brand_logo:
+        try:
+            logo_dds = _logo.image_to_dds(
+                Path(args.brand_logo).read_bytes()
+            )
+        except (_logo.LogoError, OSError) as exc:
+            raise SystemExit(f"error: --brand-logo: {exc}")
+    else:
+        path = None
+        if args.brand_logo_dir:
+            for ext in (".png", ".webp", ".svg", ".jpg", ".jpeg"):
+                cand = Path(args.brand_logo_dir) / f"{args.brand}{ext}"
+                if cand.exists():
+                    path = cand
+                    break
+        else:
+            path = _brands.logo_path(args.brand)
+        if path is not None:
+            try:
+                logo_dds = _logo.image_to_dds(path.read_bytes())
+            except (_logo.LogoError, OSError) as exc:
+                raise SystemExit(f"error: {path.name}: {exc}")
 
     # ---- 4. weight -------------------------------------------------------
     mass = None
@@ -1722,6 +1885,7 @@ def main(argv: list[str] | None = None) -> int:
         mass=mass,
         force_physics=args.force_physics,
         tags=tags,
+        logo_dds=logo_dds,
     )
 
     if mass:

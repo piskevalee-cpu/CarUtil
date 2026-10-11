@@ -12,6 +12,7 @@ Two levels:
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import subprocess
@@ -964,12 +965,15 @@ def test_all_assets_are_carried_over() -> None:
             check(f"{label}: nothing else dropped", not (dropped - allowed),
                   str(sorted(dropped - allowed)[:4]))
 
-            for ext in (".pmd", ".pmc", ".dds", ".tobj", ".mat", ".bank"):
-                n = sum(1 for x in got if x.endswith(ext))
-                o = sum(1 for x in want if x.endswith(ext))
-                if o:
-                    # the generated brand logo legitimately adds one of each
-                    check(f"{label}: {o} {ext} carried over", n in (o, o + 1),
+        for ext in (".pmd", ".pmc", ".dds", ".tobj", ".mat", ".bank"):
+            n = sum(1 for x in got if x.endswith(ext))
+            o = sum(1 for x in want if x.endswith(ext))
+            if o:
+                # The generated brand logo legitimately adds one of each under
+                # truck_brand_logo/ (as the reference does) plus one more set
+                # under car_brand_logo/ (which the reference omits).
+                check(f"{label}: {o} {ext} carried over",
+                      n in (o, o + 1, o + 2),
                           f"got {n}, want {o} or {o + 1}")
 
             # model bytes must be byte-identical
@@ -1287,8 +1291,22 @@ def test_parity_with_reference_converter() -> None:
 
         mn = {n for n in mine.namelist() if not n.endswith("/")}
         tn = {n for n in tool.namelist() if not n.endswith("/")}
-        check("same set of files", mn == tn,
-              f"mine-only={sorted(mn - tn)[:3]} tool-only={sorted(tn - mn)[:3]}")
+
+        # Deliberate divergence from the reference converter: the reference
+        # does not write material/ui/car_brand_logo/, which is the directory Car
+        # Mode actually reads. The game logged
+        #   "Can not open '/material/ui/car_brand_logo/mod.mat'"
+        # until these were added. Everything else must match exactly.
+        expected_extra = {
+            "material/ui/car_brand_logo/mod.dds",
+            "material/ui/car_brand_logo/mod.mat",
+            "material/ui/car_brand_logo/mod.tobj",
+        }
+        extra = mn - tn
+        check("only car_brand_logo added beyond reference", extra == expected_extra,
+              f"extra={sorted(extra)} tool-only={sorted(tn - mn)[:3]}")
+        check("no files lost vs reference", not (tn - mn),
+              f"tool-only={sorted(tn - mn)[:3]}")
 
         # the registration chain and the two defs we rewrite
         targets = [
@@ -1335,10 +1353,149 @@ def test_parity_with_reference_converter() -> None:
               not any(n.startswith("def/vehicle/p_disc/") for n in mn))
 
 
+def test_brand_logo() -> None:
+    section("brand logo (car_brand_logo is what Car Mode reads)")
+    import struct
+
+    # A generated DDS must match the reference's shape exactly: 256x64, DXT1,
+    # pixel-format block at offset 76, and a full 6-level mip chain.
+    dds = C._make_dds()
+    check("dds magic", dds[:4] == b"DDS ")
+    check("dds header is 128 bytes before the body", dds[0:4] == b"DDS ")
+    check("dds width 256", struct.unpack("<I", dds[16:20])[0] == 256)
+    check("dds height 64", struct.unpack("<I", dds[12:16])[0] == 64)
+    check("dds fourCC DXT1", dds[84:88] == b"DXT1")
+    check("dds pf flags DDPF_FOURCC", struct.unpack("<I", dds[80:84])[0] == 0x4)
+    check("dds pf size at offset 76", struct.unpack("<I", dds[76:80])[0] == 32)
+    check("dds has 6 mips", struct.unpack("<I", dds[28:32])[0] == 6)
+    ref_len = 11080
+    check("dds matches reference size", len(dds) == ref_len, str(len(dds)))
+
+    # A flat block encodes as c0 == c1 with zero indices.
+    blk = C._dxt1_block(96, 96, 96)
+    check("dxt1 block is 8 bytes", len(blk) == 8)
+    c0, c1, idx = struct.unpack("<HHI", blk)
+    check("dxt1 endpoints equal for a flat block", c0 == c1)
+    check("dxt1 indices zero", idx == 0)
+
+    # The logo must be written under the dealer folder name, because that is
+    # what the game asks for ("/material/ui/car_brand_logo/mod.mat").
+    logo = C.build_brand_logo("MOD", None, None, dirs=("material/ui/car_brand_logo",))
+    for ext in (".dds", ".mat"):
+        check(f"car_brand_logo/mod{ext} written",
+              f"material/ui/car_brand_logo/mod{ext}" in logo)
+    check("name is normalised to lower case",
+          not any("MOD" in k for k in logo))
+
+    # .tobj path must be length-prefixed and absolute.
+    tobj = C._synth_tobj("material/ui/car_brand_logo/mod.dds")
+    ln = struct.unpack("<I", tobj[40:44])[0]
+    check("synth tobj length prefix", ln == len("material/ui/car_brand_logo/mod.dds"))
+    check("synth tobj path", tobj[44:44 + ln] == b"material/ui/car_brand_logo/mod.dds")
+
+    # End to end: the Mercedes conversion must carry the mod's real logo into
+    # car_brand_logo/ rather than inventing a grey placeholder.
+    if not W223.exists():
+        check("W223 present", False, str(W223))
+        return
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "logo.scs"
+        C.main([str(W223), "--type", "sedan", "--brand", "mercedes",
+                "--mass", "1900", "-o", str(out), "--no-prompt"])
+        with zipfile.ZipFile(out) as z:
+            names = set(z.namelist())
+            for ext in (".dds", ".mat", ".tobj"):
+                check(f"output has car_brand_logo/mod{ext}",
+                      f"material/ui/car_brand_logo/mod{ext}" in names)
+            real = z.read("material/ui/car_brand_logo/mod.dds")
+            check("car_brand_logo dds is the right size and format",
+                  len(real) == ref_len and real[84:88] == b"DXT1",
+                  f"{len(real)} bytes {real[84:88]!r}")
+            # --brand mercedes now picks up the bundled logos/merc.png, so the
+            # bytes differ from the reference's. The DDS must still be a real
+            # converted logo, not the flat placeholder.
+            check("logo is converted art, not the placeholder",
+                  real != C._make_dds())
+            t = z.read("material/ui/car_brand_logo/mod.tobj")
+            ln = struct.unpack("<I", t[40:44])[0]
+            check("output tobj points at the car_brand_logo dds",
+                  t[44:44 + ln] == b"material/ui/car_brand_logo/mod.dds")
+            mat = z.read("material/ui/car_brand_logo/mod.mat").decode()
+            check("output mat references mod.tobj", 'texture : "mod.tobj"' in mat)
+
+
+def test_brand_selection() -> None:
+    section("brand selection and logo conversion")
+    import struct
+
+    import brands as B
+    import logo as L
+
+    check("brands listed", len(B.BRANDS) >= 16, str(len(B.BRANDS)))
+    names = [n for n, _l, _s in B.BRANDS]
+    check("no duplicate brand names", len(names) == len(set(names)))
+    check("every brand has a label", all(l for _n, l, _s in B.BRANDS))
+
+    # Aliases and normalisation.
+    check("mercedes-benz -> mercedes", B.normalise("Mercedes-Benz") == "mercedes")
+    check("MERC -> mercedes", B.normalise("MERC") == "mercedes")
+    check("chevy -> chevrolet", B.normalise("chevy") == "chevrolet")
+    check("lower-cased", B.normalise("  TOYOTA ") == "toyota")
+
+    # Logo lookup: every brand that claims a logo must actually have a file.
+    for name, label, stem in B.BRANDS:
+        p = B.logo_path(name)
+        if p is None:
+            check(f"{name}: no logo is tolerated", True)
+        else:
+            check(f"{name}: logo file exists", p.exists(), str(p))
+    check("some logos are present", len(B.available()) >= 10,
+          f"{len(B.available())} of {len(B.BRANDS)}")
+    check("unknown brand has no logo", B.logo_path("notacarbrand") is None)
+
+    if L.imagemagick() is None:
+        check("ImageMagick present", False, "skipping conversion tests")
+        return
+    check("ImageMagick present", True)
+
+    # Conversion: every shipped logo must yield a valid 256x64 DXT1 DDS.
+    for name in B.available():
+        raw = B.logo_path(name).read_bytes()
+        try:
+            dds = L.image_to_dds(raw)
+        except L.LogoError as exc:
+            check(f"{name}: converts", False, str(exc))
+            continue
+        ok = (
+            dds.startswith(b"DDS ")
+            and dds[84:88] == b"DXT1"
+            and struct.unpack("<I", dds[16:20])[0] == 256
+            and struct.unpack("<I", dds[12:16])[0] == 64
+            and len(dds) == 11080
+        )
+        check(f"{name}: 256x64 DXT1, {len(dds)} bytes", ok)
+
+    # Distinct brands must not collapse to the same texture.
+    seen = {}
+    for name in B.available()[:6]:
+        seen[name] = L.image_to_dds(B.logo_path(name).read_bytes())
+    check("different brands give different textures",
+          len({hashlib.sha256(v).digest() for v in seen.values()}) == len(seen))
+
+    # Garbage input must raise, not crash or emit a broken file.
+    try:
+        L.image_to_dds(b"not an image at all")
+        check("invalid image raises", False)
+    except L.LogoError:
+        check("invalid image raises", True)
+
+
 def main() -> int:
     test_sii_helpers()
     test_vehicle_types()
     test_type_validation()
+    test_brand_logo()
+    test_brand_selection()
     test_reference_roundtrip()
     test_physics_sii_policy()
     test_porsche_conversion()

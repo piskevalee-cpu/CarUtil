@@ -835,9 +835,43 @@ geometry is still a truck wheel, which no amount of def rewriting can change.
 If that is the cause, the fix is a width override or new wheel models, not a
 converter change.
 
-Quick Jobs is a separate question: per the wiki the vehicle `tags[]` type
-decides which cargoes a car can haul, but a car must also be *owned* through Car
-Mode before it appears in a job listing.
+## 17. Quick Jobs vs Dispatch Market (correction)
+
+A long thread of this investigation assumed a converted car failing to appear in
+**Quick Jobs** was a converter defect. It is not.
+
+SCS's Road Trip blog states it directly: "you won't need to have your own
+vehicle to take on a Quick Job. A suitable vehicle will be provided for you by
+the company offering the job." Quick Jobs always use a borrowed vehicle.
+
+The truck-mode equivalent of a freight market, where the player supplies their
+own car, is the **Dispatch Market**. That is where a converted car appears, once
+the player owns it through Car Mode.
+
+Consequences:
+
+- `tags[]` does **not** decide whether a car is visible in a job list at all. It
+  decides which cargo the car qualifies to haul, and per the wiki only `muscle`,
+  `classic` and `sports` are restricted from certain cargoes -- so `sedan`,
+  `suv`, `pickup` and `off-road` are unrestricted in practice.
+- The reference converter's `job-tag ... matches car_job vehicle_types[]` line is
+  a check against a **built-in list**, not against the base game's `car_job`
+  unit. Its own summary carries `UNVERIFIED 1` for runtime jobs. Matching that
+  tool byte-for-byte therefore proved nothing about job availability.
+- Confirmed in-game: a converted Mercedes (`tags[]: "sedan"`) and a converted
+  Honda both take jobs normally. Neither was ever a converter bug.
+
+The two ERROR lines that *were* real, and are now fixed, were about UI materials
+the game could not find:
+
+```
+<ERROR> [resource_task] Can not open '/material/ui/car_brand_logo/mod.mat'
+<ERROR> [resource_task] Can not open '/material/ui/accessory/hpilot25.mat'
+```
+
+The first is fixed: the logo is now written to `car_brand_logo/` under the dealer
+folder name, which is what the game asks for. The reference converter does not
+write that directory at all.
 
 
 ## 16. The reference converter: what it actually does (correction)
