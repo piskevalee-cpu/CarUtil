@@ -1,0 +1,15 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Converted archives (some are 100-200 MB and contain third-party assets)
+*.scs
+*.zip
+
+# Reference output extracted from the third-party converter. That material is
+# DN Modding's, not ours to redistribute; regenerate it locally if needed.
+reference/tool_output/
+
+# Scratch
+*.log
+*.tmp
