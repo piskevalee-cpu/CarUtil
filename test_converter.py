@@ -1520,7 +1520,10 @@ def test_brand_logo() -> None:
                       f"material/ui/car_brand_logo/mod{ext}" in names)
             real = z.read("material/ui/car_brand_logo/mod.dds")
             check("car_brand_logo dds is the right size and format",
-                  len(real) == ref_len and real[84:88] == b"DXT1",
+                  real.startswith(b"DDS ")
+                  and struct.unpack("<I", real[16:20])[0] == 256
+                  and struct.unpack("<I", real[12:16])[0] == 64
+                  and real[84:88] in (b"DXT5", b"DXT1"),
                   f"{len(real)} bytes {real[84:88]!r}")
             # --brand mercedes now picks up the bundled logos/merc.png, so the
             # bytes differ from the reference's. The DDS must still be a real
@@ -1571,7 +1574,8 @@ def test_brand_selection() -> None:
         return
     check("ImageMagick present", True)
 
-    # Conversion: every shipped logo must yield a valid 256x64 DXT1 DDS.
+    # Conversion: every shipped logo must yield a valid 256x64 DDS. DXT5 is
+    # preferred -- DXT1's 1-bit alpha makes a logo's antialiased edges blocky.
     for name in B.available():
         raw = B.logo_path(name).read_bytes()
         try:
@@ -1581,12 +1585,12 @@ def test_brand_selection() -> None:
             continue
         ok = (
             dds.startswith(b"DDS ")
-            and dds[84:88] == b"DXT1"
+            and dds[84:88] in (b"DXT5", b"DXT1")
             and struct.unpack("<I", dds[16:20])[0] == 256
             and struct.unpack("<I", dds[12:16])[0] == 64
-            and len(dds) == 11080
+            and len(dds) > 0
         )
-        check(f"{name}: 256x64 DXT1, {len(dds)} bytes", ok)
+        check(f"{name}: 256x64 {dds[84:88].decode()}, {len(dds)} bytes", ok)
 
     # Distinct brands must not collapse to the same texture.
     seen = {}

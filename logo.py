@@ -48,10 +48,17 @@ _PLATE = [
 # -define dds:compression=dxt1 selects DXT1. The trailing "-" makes ImageMagick
 # write to stdout so nothing has to touch the filesystem.
 _CONVERT = [
-    "-define", "dds:compression=dxt1",
     "-colorspace", "sRGB",
     "dds:-",
 ]
+
+# DXT5 is preferred over DXT1. DXT1 stores alpha as a single bit per 4x4 block,
+# which snaps the antialiased edges of a logo logo-shaped cut-out to hard,
+# blocky steps -- that is the "choppy" look. DXT5 keeps 8-bit alpha and a
+# separate colour block, which renders far smoother for a 22 KB file. The game
+# reads both (its own opaque logos are DXT1).
+_COMPRESSION = ["-define", "dds:compression=dxt5"]
+_FALLBACK_COMPRESSION = ["-define", "dds:compression=dxt1"]
 
 
 class LogoError(Exception):
@@ -93,7 +100,10 @@ def _is_blank(image: bytes, exe: str) -> bool:
 
 
 def image_to_dds(image: bytes) -> bytes:
-    """Convert image data (PNG/WebP/SVG/...) to a 256x64 DXT1 DDS.
+    """Convert image data (PNG/WebP/SVG/...) to a 256x64 DDS.
+
+    Prefers DXT5 for smooth edges; falls back to DXT1 if this build of
+    ImageMagick cannot produce DXT5.
 
     Raises LogoError if ImageMagick is missing or the image cannot be read.
     """
@@ -104,14 +114,14 @@ def image_to_dds(image: bytes) -> bytes:
             "Install it, or drop a pre-converted .dds into logos/."
         )
 
-    if _is_blank(image, exe):
-        proc = _run(exe, [*_PLATE, *_FIT, *_CONVERT], image)
-    else:
-        proc = _run(exe, [*_FIT, *_CONVERT], image)
+    prep = _PLATE if _is_blank(image, exe) else []
 
-    if proc.returncode != 0 or not proc.stdout.startswith(b"DDS "):
-        detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
-        raise LogoError(
-            "could not convert logo image: " + (detail[-1] if detail else "unknown error")
-        )
-    return proc.stdout
+    for compression in (_COMPRESSION, _FALLBACK_COMPRESSION):
+        proc = _run(exe, [*prep, *_FIT, *compression, *_CONVERT], image)
+        if proc.returncode == 0 and proc.stdout.startswith(b"DDS "):
+            return proc.stdout
+
+    detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+    raise LogoError(
+        "could not convert logo image: " + (detail[-1] if detail else "unknown error")
+    )

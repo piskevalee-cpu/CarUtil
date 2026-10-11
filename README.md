@@ -75,9 +75,13 @@ python3 convert_to_car.py mod.scs --type suv --extra-tags pickup,sedan --brand h
 shows. Omit it and the guided prompt lists the brands in `brands.py`.
 
 Logos live in `logos/` and may be PNG, WebP or SVG — the game never reads those
-directly. Each is letterboxed onto the 256×64 canvas and converted to the DXT1
-DDS the game actually wants (`logo.py`, which uses ImageMagick). White-on-
-transparent artwork is composited onto a dark plate so it stays visible.
+directly. Each is letterboxed onto the 256×64 canvas and converted to the DDS
+the game wants (`logo.py`, which uses ImageMagick). White-on-transparent
+artwork is composited onto a dark plate so it stays visible.
+
+Textures are written as **DXT5**, not DXT1. DXT1 keeps a single alpha bit per
+4×4 block, which turns a logo's antialiased edges into visible blocky steps;
+DXT5 keeps 8-bit alpha and renders far smoother for 22 KB instead of 11 KB.
 
 The logo is written to both `material/ui/car_brand_logo/<dealer>.{dds,mat,tobj}`
 — the directory Car Mode reads — and `material/ui/truck_brand_logo/<brand>.*`.

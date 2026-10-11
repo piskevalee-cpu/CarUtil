@@ -1723,7 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--brand-logo",
         help="logo image for this brand (PNG/WebP/SVG). Converted to the "
-             "256x64 DXT1 DDS the game needs. Overrides the mod's own logo.",
+             "256x64 DDS the game needs. Overrides the mod's own logo.",
     )
     ap.add_argument(
         "--brand-logo-dir",
