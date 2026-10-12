@@ -83,6 +83,12 @@ installer updates the machine PATH, but the process keeps its old copy, so
 prepends the install directory to `os.environ["PATH"]` to avoid needing a
 re-login. If you add a second dependency, it needs the same treatment.
 
+**CRLF is a non-issue, and that is worth knowing.** Windows translates `\n`
+only in *text mode*. Def units are handed to `zipfile` as `str` and encoded to
+UTF-8 internally, so generated files stay LF-only on every platform. The 31
+defs that *do* contain CRLF are the mod author's own, carried through
+verbatim. Do not "fix" this by writing defs in binary.
+
 ## Non-obvious constraints
 
 **The test fixtures are third-party assets and must never be committed.** Real
@@ -101,9 +107,18 @@ with `df -h /tmp`.
 the base game. Its own summary still carries `UNVERIFIED 1`. Matching it
 byte-for-byte proves nothing about in-game behaviour.
 
-**The base game's `def.scs` / `base.scs` are SCS# v2 and unreadable here.**
-Magic is `53 43 53 23`. There is no offline way to confirm what the game
-accepts — that needs an in-game test or an SCS-aware extractor.
+**The base game's `def.scs` / `base.scs` are readable — stop guessing.** They are
+HashFS **v2**, not encryption. It used to be recorded here as opaque, and that
+falsehood cost several "UNVERIFIED, needs an in-game test" conclusions. A 49-byte
+packed header (`SCS#`, u16 version, u16 salt, `CITY`, two table counts and
+lengths, two u64 table offsets), then two **zlib** tables: entries are 16 bytes
+(u64 CityHash of the path, u32 metadata index, u16 metadata count, u16 flags);
+the metadata table is a typed stream where `128`/`129` are plain file/directory
+records holding a 3-byte LE compressed size, a size, and an **offset block of
+16**. Data is raw deflate behind a **2-byte prefix**. Roughly thirty lines of
+Python reads an entire DLC. `dlc_rt_ford.scs` in a local ATS install holds SCS's
+own Road Trip car physics and is the reference for any drivetrain question.
+See `FINDINGS.md` §18.
 
 ## Corrections to prior conclusions
 
@@ -111,10 +126,33 @@ This project has been wrong repeatedly in ways that cost hours. Don't repeat
 them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
 
 - **`car_job` / `tags[]` is not about job visibility.** Quick Jobs *lend you a
-  vehicle* by design. Your own car belongs in the **Dispatch Market**, once
-  owned. `tags[]` decides which *cargo* a car may haul, and only `muscle`,
-  `classic` and `sports` are restricted. A converted car missing from Quick
-  Jobs is working correctly. See `FINDINGS.md` §17.
+  vehicle* by design. Your own car belongs in the **Dispatch Market**, once owned.
+  `tags[]` decides which *cargo* a car may haul, and only `muscle`, `classic` and
+  `sports` are restricted. A converted car missing from Quick Jobs is working
+  correctly. See `FINDINGS.md` §17.
+- **Never express a physics target as an absolute number.** `--engine-torque
+  1125` was fitted on a `--type classic` car whose preset mass was 1550 kg when
+  the real vehicle was 2069 kg, so it was 34% out before it was ever driven.
+  Target per tonne of the mass *read back from the written chassis* instead
+  (`--engine-nm-per-tonne`). A hand-tuned absolute figure is a guess wearing a
+  decimal point.
+- **Real-world torque is the wrong target for SCS's simulation.** SCS's own
+  Road Trip cars all sit at 250-300 Nm/t and still take ~2.5x their real-world
+  0-60. Matching the mod's stated output therefore produces a gutless car. The
+  measured calibration is ~760 Nm/t. See `FINDINGS.md` §21.
+- **Chassis tuning is not what makes a car drive like a car.** The drivetrain
+  and the tyres are. Truck engines declare `torque: 1400`/`4000` against their
+  own `info[]` of `475 @@nm@@`/`520 @@nm@@`; SCS's own engines declare the true
+  figure. A 2.2 t car on a 9.4 t engine reaches 60 mph in three seconds. A car
+  wheel with no `grip_factor` runs on truck tyre defaults and will not pull even
+  once the engine is fixed. **Do not touch gearing** — the mods' 10-speed
+  already matches SCS's own 10R80. See `FINDINGS.md` §18 and §19.
+- **SCS's conventions, measured across the base game.** All 181 engine units
+  peak `torque_curve` at exactly 1.00, set `torque` equal to the figure their
+  own `info[]` states, and never use `secondary_torque`. All 18 car wheel units
+  declare exactly `roll_resistance` (11-13) and `grip_factor` (1.1-1.2). Drive
+  force scales linearly with the declared `torque` scalar. When a value looks
+  wrong, check what SCS itself ships before inventing a replacement.
 - **Game file layout is not textbook.** The logo DDS reads its pixel-format
   block at **offset 76**, not 32; `dwCaps` is `0x00401008`. The `.tobj` stores
   its length as u32 at offset 40, has **four padding bytes at 44–47**, and the
@@ -123,6 +161,11 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
 - **Use DXT5 for logo textures, not DXT1.** DXT1 keeps one alpha bit per 4×4
   block, which makes a logo's antialiased edges visibly blocky. The game's own
   logos are DXT1 only because they are opaque; ours are transparent cut-outs.
+- **`brake_rotor_diameter` is a car-only key.** All 4 SCS Road Trip chassis
+  declare it; none of the 39 truck chassis do. Omitting it leaves the car on the
+  global truck default, which is what over-brakes. FINDINGS §16 refused to
+  synthesise one; §20 shows the reasoning was an untested assumption. When a
+  key is declared by every car and no truck, it belongs in the car preset.
 - **Logo sources need normalising before conversion.** Three cases, handled in
   `logo.py`: opaque artwork (knock the painted background out to alpha),
   black-on-transparent (invert the colour channels, then plate), and

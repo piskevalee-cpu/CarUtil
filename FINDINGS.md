@@ -925,3 +925,264 @@ and the choice of stock paint. 411 tests.
 Paint job: the reference picks `color3` ("Alaska White"), we pick the first
 stock paint (`color1`, "Alpine White"). Both are `stock: true`; no rule was
 derivable. Cosmetic only.
+
+## 18. The cars drove like trucks: the drivetrain and the global physics (correction)
+
+Section 8 concluded that rewriting the chassis was "the actual mechanism by
+which a vehicle gets car physics", and section 3 called the base game
+unreadable. Both are now wrong. A converted Honda Pilot reached 60 mph in about
+three seconds and stopped in one, at a correct 2200 kg.
+
+### The base game was never unreadable
+
+`def.scs` and the DLCs are HashFS **v2**, not an encrypted blob. The container
+is a 49-byte packed header -- `SCS#`, version, salt, the hash method `CITY`,
+two table counts and lengths, then the two table offsets -- followed by two
+**zlib** tables. The entry table is 16 bytes per file (`u64` CityHash of the
+path, `u32` metadata index, `u16` metadata count, `u16` flags). The metadata
+table is a typed stream; type `128`/`129` are plain file and directory records
+carrying a 3-byte little-endian compressed size, a size, and an **offset block
+of 16 bytes**. File data is raw deflate behind a **2-byte prefix**.
+
+With that, `def.scs` and `dlc_rt_ford.scs` decode in about thirty lines of
+Python. Every "UNVERIFIED, needs an in-game test" note below section 3 was
+avoidable. Measure the file, don't assume it is opaque.
+
+### The engine was the whole acceleration problem
+
+Ground truth, from SCS's own Road Trip Ford DLC:
+
+| | SCS Road Trip engines | the truck mods |
+|---|---|---|
+| `torque` | 389 / 382 / 556 / 563 Nm | Pilot **1400**, W223 **4000** |
+| own `info[]` says | 389 / 414 / 556 / 542 Nm | 475 Nm, 520 Nm |
+| `secondary_torque` | absent | 2250 / 4800 |
+
+SCS's `torque` **is** the engine's real peak in Nm -- the F-150 V8 declares
+`torque: 556` against its own `info[]: "410 @@lb_ft@@ (556@@nm@@)"`. The mods
+inflate the same field by 2.9x and 7.7x while stating the true figure in
+`info[]`. So the mod is its own calibration: `tune_engine` divides the declared
+value by the primary `torque_curve` peak and rescales to the stated number.
+Pilot 1400 -> 833 Nm, W223 4000 -> 945 Nm.
+
+The gearbox is **not** at fault and must not be touched: the mods' 10-speed
+ratios (4.69 / 2.98 / 2.14 / 1.76 / 1.52 / 1.27 / 1.00 / 0.85 / 0.68 / 0.63)
+are the same 10R80 pattern SCS ships on the F-150
+(4.696 / 2.985 / 2.146 / 1.769 / 1.520 / 1.275 / 1.000 / 0.854 / 0.689 / 0.636).
+
+### Section 16's physics.sii ruling was backwards
+
+Section 16 reversed section 3 and kept the mod's `physics.sii`, reasoning that
+dropping it is a global change. The block *is* global -- but it is stale, and
+it is what brakes like a trap. Against `def.scs`:
+
+| key | base game | mod |
+|---|---|---|
+| `brake_balance` | 1.1 | 1.5 |
+| `braking_curve_peak_rel` | 1.5 | 1.15 |
+| `bristle_stiffness_lateral/longitudinal` | 1.0 / 1.0 | 2.05 / 1.95 |
+| `bristle_damping_lateral/longitudinal` | 1.0 / 1.0 | 2.25 / 2.15 |
+| `slip_lateral/longitudinal_factor` | 1.0 / 1.0 | 2.10 / 2.05 |
+| `sway_bar_stiffness_factor` | 1.0 | 3.0 |
+| `steering_sensitivity_multiplier_0kmh` | 1.25 | 1.0 |
+
+A ~2019 truck tyre model forced onto the whole game. Dropping it is now the
+default and `--keep-physics` opts back in -- which is also what `README.md`
+already documented, so the flag drift between docs and code is closed.
+
+### Section 8's chassis tuning was right all along
+
+Converting the Pilot with `--type pickup` reproduces DN Modding's Road Trip
+version of the same vehicle key for key (`air_resistance 0.22`, `cog_height
+0.75`, `kerb_weight 1238/962`, `residual_travel 0.20/0.22`). Of the 326
+definition files the two mods share, only `chassis/awd.sii` and `data.sii`
+differ at all. Two lessons: the reference converter's *physics* was not the
+problem, and `tune_chassis` never needed changing.
+
+Note the reference versions are DN Modding conversions, not SCS-authored cars.
+They are a valid structural reference and an invalid physics reference.
+
+### Also wrong
+
+- `secondary_torque_curve[]` contains the substring `torque_curve[]`. An
+  unanchored curve regex merges both curves and reports the secondary peak as
+  the primary one, silently mis-sizing every rescale.
+- `get_key` returns a value with its trailing comment, so
+  `secondary_torque: 2250 # ...` does not parse as a float. `_rescale_in_place`
+  rewrites just the number instead, keeping the comment that documents it.
+
+## 19. In-game result: over-corrected, and why (correction)
+
+Section 18's engine rescale made the Mercedes *slower than intended* — 12.70 s
+to 60 mph, against the roughly 4.8 s a real W223 does. Two things came out of
+measuring that.
+
+### Acceleration is linear in the declared `torque`, and nothing else
+
+Original 3.00 s at `torque: 4000`; after rescaling to 945, 12.70 s. That is
+`3.00 x 4000/945 = 12.70` exactly. So drive force scales with the declared
+scalar, and `torque_curve` does not independently scale the peak.
+
+### Every SCS engine declares `torque` as its true peak, and peaks its curve at 1.00
+
+Surveying all 181 engine units in `def.scs`, `base_vehicle.scs` and every DLC
+truck or Road Trip archive: **`torque_curve` maxes out at exactly 1.00 in all
+181**, and `torque` equals the figure the engine's own `info[]` states — for
+trucks just as much as cars (International LT 2305 Nm, Volvo VNR 5492 Nm,
+Cascadia 2779 Nm, F-150 556 Nm). Not one uses `secondary_torque`.
+
+So SCS's convention is: `torque` is peak newton-metres and the curve is a
+normalised shape. The mods break that convention — `torque: 4000` against a
+stated 520, with a curve peaking at 0.55. The inflation is not a constant
+factor either (Pilot 2.95x, Mercedes 7.69x), which is why normalising to the
+stated figure moved the two cars by very different amounts.
+
+### The tyres were the real limiter, and they are worse than expected
+
+Surveying all 18 official SCS **car** wheel units: every one declares exactly
+`roll_resistance` (11 or 13) and `grip_factor` (1.1 or 1.2), and **nothing
+else**. No SCS car wheel has ever used `wet_grip`. The six truck wheel units
+declare neither key and inherit the global default.
+
+The mods sit on the truck side of that split. The Mercedes `p_tire` declares
+**no grip key at all**. The Pilot uses `wet_grip: 4.02` and
+`roll_resistance: 6.0`, both truck-era. So after the drivetrain was corrected,
+both cars were still running on the truck's tyre calibration — which is why the
+Mercedes stayed slow despite having *more* torque and *less* mass than the
+Pilot. `tune_wheel` writes the two keys SCS actually reads.
+
+Note `wet_grip` and `noise_volume` are left in place rather than deleted. They
+are not keys any SCS car wheel carries, but nothing establishes that the engine
+ignores them, and this project has been wrong often enough by inventing.
+
+### Lesson
+
+Two of the three original symptoms were the drivetrain and the global physics,
+which was right. The third — the car still feeling slow once those were fixed
+— was never on the list because section 8 assumed the chassis was the whole
+story. Measuring the base game's car population, rather than reasoning about
+what should be right, is what found it.
+
+## 20. Brake rotors are a car-only key, and we were inheriting the truck's
+
+FINDINGS section 16 declined to write `brake_rotor_diameter`, quoting the
+reference converter: "Tyre diameter comes from the .pmd model and is not
+recorded in any .sii file... inventing a rotor size risks a brake/wheel
+mismatch." That reasoning does not survive measurement.
+
+Across every SCS chassis unit:
+
+| | chassis units | declaring `brake_rotor_diameter` | values |
+|---|---|---|---|
+| Road Trip cars | 4 | **4** | 0.279, 0.285, 0.302, 0.308, 0.350, 0.356 |
+| trucks | 39 | **0** | — |
+
+So SCS states the rotor diameter explicitly on *every* car and omits it from
+*every* truck, which leaves trucks on the global default. A converted car that
+omits it too is therefore running the truck's rotor — the original "insane
+brake sensitivity", and the reason `--force-physics` never fixed it. `tune_chassis`
+now writes the F-150's own pair (0.302 / 0.285, mid-range for the fleet).
+
+The section 16 reasoning assumed the value was unknowable. It is knowable, and
+the way to know it was to go and read what SCS ships.
+
+Note this reverses a conclusion recorded as settled. Section 16 was careful and
+well-reasoned; it was reasoning from an assumption about the .pmd instead of
+from the files.
+
+## 21. Mass was the bug: a torque figure fitted on the wrong car (correction)
+
+The W223 was converted as `--type classic`, which is a 1550 kg Crown Victoria
+preset. The real car is 2069 kg. Both acceleration measurements (9.67 s at
+520 Nm, 3.70 s at 1600 Nm) were therefore taken on a vehicle 519 kg too light,
+and section 20's extrapolation of them to a 5 s target was wrong before it was
+ever tested.
+
+Fitting `t ∝ T^-k` across the two points gives `k = 0.855` -- close to the
+inverse-torque 1.0 of pure torque limiting, so torque is very nearly the whole
+lever and only mild grip limiting is in play. But a time is only meaningful
+against the mass that produced it, and the mass was wrong.
+
+### Real-world torque is the wrong target, twice over
+
+| | kerb | stated Nm | Nm/t | what it should do |
+|---|---|---|---|---|
+| real W223 S-Class | 2069 kg | 520 | 251 | ~5.0 s |
+| SCS's own F-150 | 1873 kg | 556 | 297 | — |
+| SCS's own Bronco | 2144 kg | 563 | 263 | — |
+| SCS's own Mustang 67 | 1323 kg | 382 | 289 | — |
+
+SCS's cars all sit near **250-300 Nm/t**. That is the reference. A converted
+car at its real-world torque lands at 251 Nm/t and, in the simulation,
+0-60 takes about **12.9 s** -- roughly 2.5x the real car. The simulation's
+torque-to-traction relationship is simply not the real one, so matching real
+engineering figures produces a car that feels gutless no matter how correct the
+numbers look on paper.
+
+The honest calibration is the measured one: **~760 Nm/t**, which puts both the
+Merc (2069 kg -> 1572 Nm) and the Pilot (2200 kg -> 1672 Nm) at a predicted
+5.0 s. That is roughly **2.6x the stated torque** -- which is also why the
+original 7.69x inflation felt merely "insane" rather than unplayable, and why
+section 18's correction to real-world torque over-corrected.
+
+### The interface bug that caused it
+
+`--engine-torque NM` is absolute, so it silently assumes the mass you measured
+was the mass you will ship. The flag is now `--engine-nm-per-tonne NM/T`,
+computed from the kerb weight actually written to the chassis, not from the
+`--type` preset. A test asserts the two can never disagree: it converts with
+`--mass 2069` and checks the engine's peak torque equals
+`760 * (mass_read_back_from_the_chassis) / 1000`.
+
+Any future tuning number in this area must be expressed per unit mass or per
+unit of something measured from the output file. An absolute number tuned by
+hand is a guess wearing a decimal point.
+
+## 22. Windows 11 audit
+
+Requested explicitly. Most of the risk was already covered by AGENTS.md and
+verified sound; the one real defect found was not platform-related at all.
+
+### Verified already correct
+
+- `ui.py` imports `termios`/`tty` only inside `try:` in
+  `_raw_keys_available()`. Simulating their absence (import blocked) returns
+  False and the numbered menu still answers, so the guided walkthrough
+  survives.
+- `logo.py` resolves ImageMagick through `shutil.which` and then **verifies**
+  the candidate by running `-version`. `imagemagick()` correctly rejects
+  `C:\Windows\System32\convert.exe` — the FAT→NTFS converter — when it is the
+  only candidate on PATH.
+- `_refresh_magick_path()` is gated on `os.name != "nt"`, looks for
+  `magick.exe` under `C:\Program Files\ImageMagick*`, and prepends using
+  `os.pathsep`. No hardcoded `":"` join anywhere.
+- `winget` is the first entry in `_INSTALLERS`, so a Windows box is offered a
+  command that exists. The others are inert there.
+- Directory walks normalise with `.replace("\\", "/")`, so archive entry names
+  never carry backslashes.
+- No `shell=True` in any shipped module, and every `subprocess` call passes an
+  argument list. On Windows a shell would select `cmd.exe`, whose quoting
+  differs from POSIX and breaks paths containing spaces.
+- No hardcoded `/tmp` in shipped code; `tempfile.mkdtemp()` is used instead.
+
+### CRLF: checked, and it is a non-issue
+
+Windows translates `\n` to `\r\n` in **text mode** only. Def units are written
+into the ZIP as Python `str`, and `zipfile` encodes them to UTF-8 internally,
+so no translation happens on any platform. Verified: generated defs contain no
+`\r`. The 31 defs that *do* contain CRLF are the mod author's own files,
+carried through verbatim byte-for-byte, which is the required behaviour.
+
+### The real defect: the 760 Nm/t default was silently inert
+
+Not a Windows bug, found by the simulated-Windows end-to-end run. `convert()`
+passed the CLI's `engine_nm_per_tonne=None` straight through, which overrode
+`tune_engine`'s own parameter default. Every conversion without an explicit
+flag fell back to the mod's stated torque (833 Nm) instead of 760 Nm/t
+(1672 Nm). The flag looked like it worked because passing it explicitly took a
+different path.
+
+Fixed by coalescing `None` to `_DEFAULT_NM_PER_TONNE` at the call site, with
+`test_default_engine_target_applies` asserting the no-flag case. A default set
+on a parameter is not a default if a caller can pass `None` over it — which is
+exactly why the fix belongs at the boundary, not in the signature.
