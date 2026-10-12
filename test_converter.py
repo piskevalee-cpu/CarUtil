@@ -712,27 +712,41 @@ def test_car_physics_presets() -> None:
     section("car physics presets")
     for t_ in C.VEHICLE_TYPES:
         cfg = C.car_physics(t_, 2)
+        # Bounded by the range SCS's own four Road Trip chassis use, not by
+        # the Parati. The old "<0.30 is a car" test was measuring the old
+        # table against itself.
         check(f"{t_}: air_resistance is car-scale",
-              float(cfg["air_resistance"]) < 0.30, cfg["air_resistance"])
+              0.37 <= float(cfg["air_resistance"]) <= 0.60,
+              cfg["air_resistance"])
         check(f"{t_}: cog_height is car-scale",
-              0.25 <= float(cfg["cog_height"]) <= 0.85, cfg["cog_height"])
+              0.52 <= float(cfg["cog_height"]) <= 0.74, cfg["cog_height"])
         check(f"{t_}: steering lock is car-scale",
-              24 <= int(cfg["max_steering_angle"]) <= 36, cfg["max_steering_angle"])
+              28 <= int(cfg["max_steering_angle"]) <= 35,
+              cfg["max_steering_angle"])
         mass = sum(int(x) for x in cfg["kerb_weight"])
         check(f"{t_}: kerb mass plausible", 900 <= mass <= 2600, str(mass))
         check(f"{t_}: voltage 12V", cfg["nominal_voltage"] == "12.0")
         check(f"{t_}: no air brakes", cfg["air_tank_pressure"] == "0.0")
 
-    # sports must be the grippiest, pickup the least aerodynamic
-    check("sports has least drag",
-          float(C.car_physics("sports", 2)["air_resistance"])
-          < float(C.car_physics("pickup", 2)["air_resistance"]))
-    check("sports has stiffest sway bar",
-          float(C.car_physics("sports", 2)["sway_bar_stiffness"])
-          > float(C.car_physics("sedan", 2)["sway_bar_stiffness"]))
-    check("offroad has most travel",
+    # The ordering that survives SCS's own calibration: tall heavy cars drag
+    # and roll most, light ones least. "Sports is the most aerodynamic" was a
+    # Parati-era assumption and is false of the Mustang, which is more draggy
+    # than the Victoria.
+    check("pickup has most drag",
+          float(C.car_physics("pickup", 2)["air_resistance"])
+          >= max(float(C.car_physics(t, 2)["air_resistance"])
+                for t in C.VEHICLE_TYPES))
+    check("classic and muscle have least drag",
+          float(C.car_physics("classic", 2)["air_resistance"])
+          == min(float(C.car_physics(t, 2)["air_resistance"])
+                 for t in C.VEHICLE_TYPES))
+    check("pickup has the highest CoG",
+          float(C.car_physics("pickup", 2)["cog_height"])
+          >= max(float(C.car_physics(t, 2)["cog_height"])
+                for t in C.VEHICLE_TYPES))
+    check("offroad is at least as soft as the sedan",
           float(C.car_physics("offroad", 2)["residual_travel"][0])
-          > float(C.car_physics("sports", 2)["residual_travel"][0]))
+          >= float(C.car_physics("sedan", 2)["residual_travel"][0]))
 
 
 @guard
@@ -2263,6 +2277,58 @@ def test_real_transmission_tuning() -> None:
                   "torque_converter_crawl: true" in out)
 
 
+def test_car_physics_within_scs_ranges() -> None:
+    """Every preset must sit inside what SCS's own cars actually ship.
+
+    The tuning table used to be derived from the VW Parati, and every value in
+    it fell outside the range SCS uses. residual_travel was the visible one --
+    0.18 against a measured 0.093-0.134, nearly double the free travel before
+    the springs engage, which is what made converted cars roll like boats.
+    """
+    section("presets are inside SCS's measured car ranges")
+    # Measured across all four Road Trip chassis in dlc_rt_ford.scs.
+    ranges = {
+        "sway_bar_stiffness": (0.30, 0.40),
+        "cog_height": (0.52, 0.738),
+        "residual_travel": (0.093, 0.134),
+        "suspension_damping_factor": (0.5, 0.8),
+        "air_resistance": (0.37, 0.596),
+        "max_steering_angle": (28, 35),
+    }
+    for vtype in ("sedan", "suv", "muscle", "sports", "pickup", "offroad",
+                  "classic"):
+        cfg = C.car_physics(vtype, 2)
+        for key, (lo, hi) in ranges.items():
+            vals = cfg[key]
+            vals = [vals] if isinstance(vals, str) else vals
+            worst = [float(v) for v in vals
+                     if not lo - 1e-9 <= float(v) <= hi + 1e-9]
+            check(f"{vtype}: {key} within {lo}-{hi}", not worst,
+                  f"out of range: {worst}")
+
+
+def test_residual_travel_always_written() -> None:
+    section("residual_travel is overwritten, not threshold-gated")
+    # Truck mods ship 0.09-0.10 and SCS cars use 0.093-0.134. The ranges
+    # overlap, so no threshold separates them and SCS's own Mustang value
+    # must not be mistaken for a truck one.
+    check("SCS's Mustang value is still replaced",
+          C._is_truck_scale("residual_travel", ["0.093", "0.134"]))
+    check("a truck value is replaced",
+          C._is_truck_scale("residual_travel", ["0.10", "0.10"]))
+
+    text = ("SiiNunit\n{\naccessory_chassis_data : x\n{\n"
+            "\tresidual_travel[0]: 0.10\n\tresidual_travel[1]: 0.10\n}\n}\n")
+    out = C.tune_chassis(text, "suv", None, C.Report())
+    # The Bronco's front value is itself 0.10, so assert the rear was
+    # corrected rather than that the value changed.
+    check("a truck residual_travel is rewritten to the car's",
+          re.search(r"^\tresidual_travel\[1\]: 0\.11$", out, re.M), out)
+    check("both axles land on the preset",
+          re.findall(r"^\tresidual_travel\[\d\]: ([\d.]+)$", out, re.M)
+          == ["0.10", "0.11"])
+
+
 def test_windows_compatibility() -> None:
     """Platform contracts that are silent on Linux and fatal on Windows 11.
 
@@ -2501,6 +2567,8 @@ def main() -> int:
     test_tune_engine_target_override()
     test_tune_engine_nm_per_tonne()
     test_tune_wheel_adds_car_grip()
+    test_car_physics_within_scs_ranges()
+    test_residual_travel_always_written()
     test_torque_for_time()
     test_tune_transmission_stall_ratio()
     test_launch_force_matches_after_stall_fix()

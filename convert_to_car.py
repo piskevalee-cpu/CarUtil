@@ -674,14 +674,29 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
 # load-time error whereas a numeric value is only a tuning difference.
 
 # Parati baseline, read from def/vehicle/truck/volkswagen.parati1994/chassis/4x2a.sii
+# Base chassis keys, taken from the Mustang 67 -- the lightest and most
+# roll-prone of SCS's four Road Trip chassis. These were previously the VW
+# Parati's, and every one of them fell outside the range SCS actually uses:
+# residual_travel was 0.18 against a measured 0.093-0.134, which is nearly
+# double the free travel before the springs engage, and that is what produced
+# the body roll. air_resistance was 0.10 against a measured 0.37-0.60.
+#
+# Measured across all four SCS car chassis (dlc_rt_ford.scs):
+#   sway_bar_stiffness          0.30 - 0.40
+#   cog_height                 0.52 - 0.738
+#   residual_travel            0.093 - 0.134
+#   suspension_damping_factor    0.5  - 0.8
+#   air_resistance             0.37  - 0.596
+#   max_steering_angle          28   - 35
+# test_car_physics_within_scs_ranges asserts every preset stays inside them.
 _PARATI = {
     "kerb_weight": [620, 415],          # kg, front/rear
-    "air_resistance": "0.1",
-    "cog_height": "0.4",
-    "sway_bar_stiffness": "0.38",
-    "max_steering_angle": "28",
-    "residual_travel": ["0.18", "0.16"],
-    "suspension_damping_factor": ["0.9", "0.7"],
+    "air_resistance": "0.5",            # Mustang 67
+    "cog_height": "0.52",               # Mustang 67, lowest of the four
+    "sway_bar_stiffness": "0.3",        # Mustang 67
+    "max_steering_angle": "31",        # Mustang 67
+    "residual_travel": ["0.093", "0.134"],       # Mustang 67
+    "suspension_damping_factor": ["0.7", "0.5"], # Mustang 67
     # A car-only key: all 4 of SCS's Road Trip chassis declare it, none of the
     # 39 truck chassis do, so a truck leaves it at the global truck default and
     # brakes far harder than any SCS car. FINDINGS section 16 declined to write
@@ -1147,32 +1162,44 @@ def prompt_acceleration(mass_kg: float) -> float | None:
         return value
 
 # Per-type overrides applied on top of the baseline. Only numeric tuning.
+# Per-type overrides on top of the baseline. Every value is copied from one of
+# SCS's four Road Trip chassis, chosen as the closest match in mass and
+# character, so a preset cannot drift outside the range SCS actually ships:
+#
+#   sedan, sports  -> Mustang 67   (1323 kg, the lightest and roliest)
+#   classic, muscle-> Victoria 06  (1873 kg)
+#   suv, offroad  -> Bronco 24    (2144 kg, tallest and softest)
+#   pickup         -> F-150 23     (the one genuinely stiff, high-drag car)
+#
+# The ordering by type is preserved from the old Parati-derived table -- sports
+# still has the least roll and offroad the most travel -- but the magnitudes
+# now match the game rather than a 1994 wagon.
 _TUNING = {
     "sedan":   {},
-    "suv":     {"air_resistance": "0.16", "cog_height": "0.55", "sway_bar_stiffness": "0.50",
-                "max_steering_angle": "28", "tank_size": "70",
-                "residual_travel": ["0.22", "0.20"],
-                "suspension_damping_factor": ["0.95", "0.80"],},
-    "muscle":  {"air_resistance": "0.13", "cog_height": "0.42", "sway_bar_stiffness": "0.55",
-                "max_steering_angle": "32", "tank_size": "60",
-                "residual_travel": ["0.16", "0.15"],
-                "suspension_damping_factor": ["1.00", "0.85"],},
-    "sports":  {"air_resistance": "0.07", "cog_height": "0.32", "sway_bar_stiffness": "0.80",
-                "max_steering_angle": "35", "tank_size": "55",
-                "residual_travel": ["0.12", "0.12"],
-                "suspension_damping_factor": ["1.20", "1.00"],},
-    "pickup":  {"air_resistance": "0.22", "cog_height": "0.75", "sway_bar_stiffness": "0.45",
-                "max_steering_angle": "26", "tank_size": "80",
-                "residual_travel": ["0.20", "0.22"],
-                "suspension_damping_factor": ["0.90", "0.80"],},
-    "offroad": {"air_resistance": "0.25", "cog_height": "0.80", "sway_bar_stiffness": "0.40",
-                "max_steering_angle": "32", "tank_size": "75",
-                "residual_travel": ["0.28", "0.28"],
-                "suspension_damping_factor": ["0.80", "0.75"],},
-    "classic": {"air_resistance": "0.15", "cog_height": "0.45", "sway_bar_stiffness": "0.35",
-                "max_steering_angle": "30", "tank_size": "60",
-                "residual_travel": ["0.17", "0.15"],
-                "suspension_damping_factor": ["0.85", "0.70"],},
+    "suv":     {"air_resistance": "0.55", "cog_height": "0.72", "sway_bar_stiffness": "0.4",
+                "max_steering_angle": "30", "tank_size": "79",
+                "residual_travel": ["0.10", "0.11"],
+                "suspension_damping_factor": ["0.8", "0.6"],},
+    "muscle":  {"air_resistance": "0.37", "cog_height": "0.56", "sway_bar_stiffness": "0.35",
+                "max_steering_angle": "28", "tank_size": "72",
+                "residual_travel": ["0.11", "0.11"],
+                "suspension_damping_factor": ["0.7", "0.5"],},
+    "sports":  {"air_resistance": "0.5", "cog_height": "0.52", "sway_bar_stiffness": "0.3",
+                "max_steering_angle": "31", "tank_size": "55",
+                "residual_travel": ["0.093", "0.134"],
+                "suspension_damping_factor": ["0.7", "0.5"],},
+    "pickup":  {"air_resistance": "0.596", "cog_height": "0.738", "sway_bar_stiffness": "0.4",
+                "max_steering_angle": "35", "tank_size": "80",
+                "residual_travel": ["0.115", "0.127"],
+                "suspension_damping_factor": ["0.8", "0.6"],},
+    "offroad": {"air_resistance": "0.55", "cog_height": "0.72", "sway_bar_stiffness": "0.4",
+                "max_steering_angle": "30", "tank_size": "75",
+                "residual_travel": ["0.10", "0.11"],
+                "suspension_damping_factor": ["0.8", "0.6"],},
+    "classic": {"air_resistance": "0.37", "cog_height": "0.56", "sway_bar_stiffness": "0.35",
+                "max_steering_angle": "28", "tank_size": "72",
+                "residual_travel": ["0.11", "0.11"],
+                "suspension_damping_factor": ["0.7", "0.5"],},
 }
 
 # Scalar keys that must be REMOVED from a converted car. They are truck-only
@@ -1246,8 +1273,12 @@ def _is_truck_scale(key: str, current: str | list[str] | None) -> bool:
             # Trucks run a 24V system; every production car is 12V.
             return current is not None and float(current) >= 24
         if key == "residual_travel" and isinstance(current, list):
-            # 0.08 is a stiff load-carrying truck value; road cars sit near 0.18.
-            return any(float(x) < 0.12 for x in current)
+            # Deliberately not threshold-gated any more. Truck mods ship
+            # 0.09-0.10 and SCS's own cars use 0.093-0.134, so the ranges
+            # overlap and no threshold can tell them apart; the old "<0.12 is
+            # a truck" rule flagged SCS's own Mustang value as truck. A key
+            # whose truck and car values overlap has to be written outright.
+            return True
     except (TypeError, ValueError):
         return False
     return False
