@@ -395,8 +395,17 @@ def test_tune_engine_rescales_inflated_output() -> None:
                                 _ENGINE_INFLATED).group(1)) - tq / 1400) < 0.01)
     check("author's comment survives the rewrite",
           "# torque x 1.26 (final drive relation)" in out)
-    check("torque_curve left untouched",
-          out.count("torque_curve[]") == _ENGINE_INFLATED.count("torque_curve[]"))
+    check("torque_curve points preserved apart from the added origin",
+          [l for l in out.splitlines() if "torque_curve[]" in l][1:]
+          == [l for l in _ENGINE_INFLATED.splitlines()
+              if "torque_curve[]" in l])
+    check("a zero-torque origin is added, as every SCS engine has",
+          re.search(r"^\ttorque_curve\[\]: \(0, 0\)$", out, re.M))
+    peak = max((float(m.group(2)), int(m.group(1)))
+               for m in re.finditer(
+                   r"^\s*torque_curve\[\]:\s*\(\s*(\d+)\s*,\s*([\d.]+)",
+                   out, re.M))
+    check("peak value and rev unchanged", peak == (0.57, 3750), str(peak))
     check("reported the rescale", any("engine rescaled" in a for a in rep.actions))
 
     # An explicit ratio still wins over the default.
@@ -2329,6 +2338,47 @@ def test_residual_travel_always_written() -> None:
           == ["0.10", "0.11"])
 
 
+def test_torque_curve_gets_scs_origin() -> None:
+    section("the torque curve is given the origin SCS engines declare")
+    # All 181 SCS engine units peak torque_curve at 1.00 and start at (0, 0).
+    # The mods start at idle with 0.43-0.47 of peak and have no origin, which
+    # is what pulls the car away to ~15 mph when Drive is selected.
+    truck = ("SiiNunit\n{\naccessory_engine_data : e\n{\n"
+             "\ttorque: 1400\n\ttorque_curve[]: (750, 0.47)\n"
+             "\ttorque_curve[]: (3500, 0.57)\n}\n}\n")
+    out, added = C._ensure_torque_origin(truck)
+    check("origin added when absent", added)
+    curve = [l for l in out.splitlines() if "torque_curve[]" in l]
+    pts = re.findall(r"torque_curve\[\]:\s*\(\s*(\d+),", "\n".join(curve))
+    check("origin is the first curve point", pts[0] == "0", str(pts))
+    check("and it sits inside the unit block, not above SiiNunit",
+          out.splitlines()[0] == "SiiNunit"
+          and out.count("{") == out.count("}"), out[:40])
+    check("existing points untouched",
+          "(750, 0.47)" in out and "(3500, 0.57)" in out)
+
+    already = ("SiiNunit\n{\naccessory_engine_data : e\n{\n"
+               "\ttorque: 556\n\ttorque_curve[]: (0, 0)\n"
+               "\ttorque_curve[]: (4500, 1.0)\n}\n}\n")
+    out2, added2 = C._ensure_torque_origin(already)
+    check("an SCS-style curve is left alone", not added2 and out2 == already)
+
+
+@guard
+def test_real_engine_origin() -> None:
+    section("real mods: engine curve gains the SCS zero-torque origin")
+    for label, path in (("Pilot", PILOT), ("W223", W223)):
+        src = C.ModSource(path)
+        engines = [n for n in src.readable
+                   if re.search(r"/engine/.*\.sii$", n)]
+        for e in engines:
+            out = C.tune_engine(src.read(e), C.Report())
+            pts = re.findall(r"^\s*torque_curve\[\]:\s*\(\s*(\d+)\s*,",
+                             out, re.M)
+            check(f"{label}: curve starts at 0 rpm", pts and pts[0] == "0",
+                  str(pts[:2]))
+
+
 def test_windows_compatibility() -> None:
     """Platform contracts that are silent on Linux and fatal on Windows 11.
 
@@ -2572,6 +2622,7 @@ def main() -> int:
     test_torque_for_time()
     test_tune_transmission_stall_ratio()
     test_launch_force_matches_after_stall_fix()
+    test_torque_curve_gets_scs_origin()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():
@@ -2580,6 +2631,7 @@ def main() -> int:
     test_physics_sii_policy()
     test_real_engine_scaling()
     test_real_wheel_grip()
+    test_real_engine_origin()
     test_real_transmission_tuning()
     test_engine_target_uses_written_mass()
     test_default_engine_target_applies()

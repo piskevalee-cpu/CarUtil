@@ -1474,6 +1474,36 @@ def _rescale_in_place(
     return out, scaled
 
 
+def _ensure_torque_origin(text: str) -> tuple[str, bool]:
+    """Give the torque curve the zero-torque origin every SCS engine has.
+
+    All 181 of SCS's engine units peak `torque_curve` at 1.00 and begin at
+    `(0, 0)`. All four Road Trip cars do too. The truck mods start their curve
+    at idle with 0.43-0.47 of peak and have no origin at all, so the engine
+    has full torque before the revs are even up: after the torque rescale that
+    is roughly 800 Nm at idle, which is what pulls the car away to about
+    15 mph the moment Drive is selected.
+
+    Only the origin is added. The existing points, and therefore the peak, the
+    power band and the shift points, are untouched.
+    """
+    m = re.search(r"^\s*torque_curve\[\]\s*:\s*\(\s*(\d+)\s*,", text, re.M)
+    if not m:
+        return text, False
+    if int(m.group(1)) == 0:
+        return text, False
+    lines = text.splitlines()
+    # Insert at the first existing curve point, not at the top of the file:
+    # prepending to `text` put the key above `SiiNunit`, outside the unit.
+    idx = next((i for i, l in enumerate(lines)
+                if "torque_curve[]" in l and not "secondary_torque_curve" in l),
+               None)
+    if idx is None:
+        return text, False
+    lines.insert(idx, "\ttorque_curve[]: (0, 0)")
+    return "\n".join(lines) + "\n", True
+
+
 def tune_engine(text: str, rep: Report, force: bool = False,
                 target_nm: int | None = None,
                 nm_per_tonne: float | None = _DEFAULT_NM_PER_TONNE,
@@ -1545,6 +1575,12 @@ def tune_engine(text: str, rep: Report, force: bool = False,
     lines, new_torque = _rescale_in_place(lines, "torque", factor)
     lines, new_secondary = _rescale_in_place(lines, "secondary_torque", factor)
 
+    joined = "\n".join(lines)
+    joined, added = _ensure_torque_origin(joined)
+    if added:
+        rep.action("added the (0, 0) torque origin every SCS engine declares")
+    lines = joined.split("\n")
+
     if nm_per_tonne is not None:
         source = target_source or f"{nm_per_tonne:g} Nm/t default ({tonnes:.2f} t)"
     elif target_nm is not None:
@@ -1588,6 +1624,9 @@ _TYRE_FLOOR = {"roll_resistance": 11.0, "grip_factor": 1.1}
 # Mercedes and made the car genuinely unrecoverable rather than merely quick.
 # A stall ratio cannot be left alone: it is the single most violent number in
 # the drivetrain and no torque target can compensate for it.
+# All four SCS Road Trip transmissions declare these three keys. The mods
+# declare none of them. Written as SCS declares them rather than on a
+# judgement about which keys seem safe.
 _CAR_TRANSMISSION = {
     "torque_converter_crawl": "true",
     "transmission_class": "standard",
