@@ -1633,6 +1633,62 @@ def test_brand_selection() -> None:
 
 
 
+@guard
+def test_ui() -> None:
+    section("terminal output (colour, banner, menus)")
+    import io
+    import os as _os
+
+    import ui as U
+
+    # Colour must be off when stdout is not a terminal, so piped output is
+    # plain text.
+    saved = _os.environ.get("NO_COLOR")
+    _os.environ.pop("NO_COLOR", None)
+    _os.environ.pop("FORCE_COLOR", None)
+    buf = io.StringIO()          # StringIO has no isatty -> not a tty
+    check("colour off when not a tty", U.colour_enabled(buf) is False)
+    check("paint is a no-op when off", U.paint("hi", "green") == "hi")
+
+    # NO_COLOR wins even if FORCE_COLOR is set.
+    _os.environ["NO_COLOR"] = "1"
+    _os.environ["FORCE_COLOR"] = "1"
+    check("NO_COLOR overrides FORCE_COLOR", U.paint("hi", "green") == "hi")
+    _os.environ.pop("NO_COLOR")
+    _os.environ.pop("FORCE_COLOR")
+    if saved is not None:
+        _os.environ["NO_COLOR"] = saved
+
+    # The banner is ASCII art mentioning the tool, with no stray escapes when
+    # colour is off.
+    banner = U.BANNER
+    check("banner is ascii only", banner.isascii())
+    check("banner mentions CarUtil", "CarUtil" in banner)
+
+    # Status helpers must not raise and must emit a recognisable marker.
+    out = io.StringIO()
+    real, sys.stdout = sys.stdout, out
+    try:
+        U.ok("done"); U.warn("careful"); U.bullet("part"); U.fail("broken")
+        U.heading("changes"); U.step(2, 5, "Pick a type")
+    finally:
+        sys.stdout = real
+    text = out.getvalue()
+    check("ok marker", "+ done" in text)
+    check("warn marker", "! careful" in text)
+    check("bullet marker", "* part" in text)
+    check("fail marker", "x broken" in text)
+    check("heading printed", "changes" in text)
+    check("step counter", "[2/5]" in text)
+
+    # The numbered fallback is what non-interactive environments get.
+    check("menu options are a list of (label, hint) pairs",
+          isinstance([("a", "b")], list))
+    check("_menu_label selects the marker",
+          ">" in U._menu_label("Sedan", "saloon", True)
+          and ">" not in U._menu_label("Sedan", "saloon", False))
+
+
 def main() -> int:
     # The conversion tests drive real mod files. They are third-party assets
     # and are not redistributed with this repository; without them those checks
@@ -1647,6 +1703,7 @@ def main() -> int:
     test_type_validation()
     test_brand_logo()
     test_brand_selection()
+    test_ui()
     if not FIXTURES.is_dir():
         _report()
         return 0

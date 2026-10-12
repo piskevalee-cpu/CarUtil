@@ -37,6 +37,7 @@ from sii import (  # noqa: E402
 )
 import brands as _brands
 import logo as _logo
+import ui as _ui
 
 # The seven vehicle types, per the Truck Simulator Wiki's Road Trip page.
 VEHICLE_TYPES = ["pickup", "suv", "sedan", "muscle", "classic", "sports", "offroad"]
@@ -804,10 +805,16 @@ def prompt_source() -> Path:
 def prompt_type() -> str:
     """Ask what kind of car it is."""
     print()
-    print("  What kind of car is it?")
-    for i, t in enumerate(VEHICLE_TYPES, 1):
-        print(f"    {i}. {t:9s} {TYPE_HELP[t]}")
+    _ui.heading("What kind of car is it?")
+    print("  " + _ui.paint("arrow keys to move, Enter to choose", "dim"))
     print()
+    options = [(t.title(), TYPE_HELP[t]) for t in VEHICLE_TYPES]
+    idx = _ui.arrow_menu(options, default=0)
+    return VEHICLE_TYPES[idx]
+
+
+def prompt_type_numbered() -> str:
+    """Numbered fallback kept for non-interactive use."""
     while True:
         raw = _ask("  Type [1]: ").strip().lower()
         if raw in ("q", "quit", "exit"):
@@ -834,29 +841,17 @@ def prompt_brand(slug: str) -> str:
         guess = "other"
 
     print()
-    print("  Which brand is it? The Car Dealer shows this name and logo.")
+    _ui.heading("Which brand is it? The Car Dealer shows this name and logo.")
+    print("  " + _ui.paint("arrow keys to move, Enter to choose", "dim"))
     print()
+
     have = _brands.available()
-    for i in range(0, len(_brands.BRANDS), 4):
-        row = _brands.BRANDS[i:i + 4]
-        cells = []
-        for j, (name, label, _stem) in enumerate(row, start=i + 1):
-            mark = "" if name in have else " (no logo)"
-            cells.append(f"{j:2d}. {label}{mark}")
-        print("    " + "".join(c.ljust(30) for c in cells).rstrip())
-    print()
-    while True:
-        raw = _ask(f"  Brand [{guess}]: ").strip().lower()
-        if raw in ("q", "quit", "exit"):
-            raise SystemExit("cancelled")
-        if not raw:
-            return guess
-        if raw.isdigit() and 1 <= int(raw) <= len(_brands.BRANDS):
-            return _brands.BRANDS[int(raw) - 1][0]
-        key = _brands.normalise(raw)
-        if key and key != raw:
-            return key
-        print("  -> pick a number, or type a brand name")
+    options = [
+        (label, "" if name in have else "no logo")
+        for name, label, _stem in _brands.BRANDS
+    ]
+    start = next((i for i, (n, _l, _s) in enumerate(_brands.BRANDS) if n == guess), 0)
+    return _brands.BRANDS[_ui.arrow_menu(options, default=start)][0]
 
 
 def prompt_weight(vtype: str, preset: str | None) -> list[int] | None:
@@ -1666,30 +1661,40 @@ def _write_scs(files: dict[str, str], out_path: Path,
 def print_install_help(out: Path) -> None:
     """Print the output path and where to copy it, with a real mod folder if found."""
     print()
-    print("=" * 62)
-    print(f"  DONE -- your Road Trip mod is here:\n")
-    print(f"      {out.resolve()}\n")
-    print("  To install it:")
-    print("    1. Close American Truck Simulator")
+    print(_ui.paint("  " + _ui.rule("=", 62), "green"))
+    print()
+    print("  " + _ui.paint("DONE", "green", "bold")
+          + " -- your Road Trip mod is here:")
+    print()
+    print("      " + _ui.paint(str(out.resolve()), "bold"))
+    print()
+    print("  " + _ui.paint("To install it:", "bold"))
+    print("    " + _ui.paint("1.", "magenta") + " Close American Truck Simulator")
 
     mod_dirs = [d / "mod" for d in find_mod_folders()]
     if mod_dirs:
-        print("    2. Copy that .scs into your ATS mod folder:")
+        print("    " + _ui.paint("2.", "magenta")
+              + " Copy that .scs into your ATS mod folder:")
         for d in mod_dirs:
             marker = "" if d.exists() else "  (will be created)"
-            print(f"       {d}{marker}")
+            print("       " + _ui.paint(str(d), "cyan") + marker)
     else:
-        print("    2. Copy that .scs into your ATS mod folder:")
+        print("    " + _ui.paint("2.", "magenta")
+              + " Copy that .scs into your ATS mod folder:")
         print("       Windows:  Documents\\American Truck Simulator\\mod")
         print("       Proton:   ~/.steam/steamapps/compatdata/<appid>/pfx/drive_c/")
         print("                 users/<user>/Documents/American Truck Simulator/mod")
-        print("       (I could not find one on this machine -- search for")
-        print("        'American Truck Simulator' under compatdata/ if unsure)")
-    print("    3. Start the game, then Mod Manager -> enable -> Save & Play")
+        print("       " + _ui.paint("(I could not find one on this machine -- search for",
+                                        "dim"))
+        print("        " + _ui.paint("'American Truck Simulator' under compatdata/ if unsure)",
+                                        "dim"))
+    print("    " + _ui.paint("3.", "magenta")
+          + " Start the game, then Mod Manager -> enable -> Save & Play")
     print()
-    print("  Car Mode needs the Road Trip DLC. Once it is unlocked, look for")
-    print("  this car under Car Dealer.")
-    print("=" * 62)
+    print("  " + _ui.paint("Car Mode needs the Road Trip DLC. Once it is unlocked,",
+                            "dim"))
+    print("  " + _ui.paint("look for this car under Car Dealer.", "dim"))
+    print(_ui.paint("  " + _ui.rule("=", 62), "green"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1701,9 +1706,10 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  convert_to_car.py                       # guided, asks everything\n"
-            "  convert_to_car.py mod.scs --type suv --brand porsche\n"
-            "  convert_to_car.py mod.scs --type sedan --brand vw --mass 1650\n"
+            "  python3 convert_to_car.py                       # guided, asks everything\n"
+            "  python3 convert_to_car.py mod.scs --type suv --brand porsche\n"
+            "  python3 convert_to_car.py mod.scs --type sedan --brand mercedes "
+            "--mass 1900\n"
         ),
     )
     ap.add_argument("input", nargs="?", type=Path, help="mod folder or plain-ZIP .scs")
@@ -1784,12 +1790,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if _tty() and not args.no_prompt and args.input is None:
         print()
-        print("=" * 62)
-        print("  ATS ROAD TRIP MOD CONVERTER")
-        print("  Turn a truck-classified car mod into a Car Mode vehicle.")
-        print("=" * 62)
+        print(_ui.banner())
 
     guided = _tty() and not args.no_prompt
+    total = 5
 
     # ---- 1. source -------------------------------------------------------
     if args.input is None:
@@ -1797,8 +1801,10 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 "error: no input given.\n"
                 "  Guided mode: run with no arguments and answer the prompts.\n"
-                "  Scripted: pass the path, e.g. convert_to_car.py mod.scs --type suv --brand porsche"
+                "  Scripted: pass the path, e.g. python3 convert_to_car.py mod.scs \\\n"
+                "            --type suv --brand porsche"
             )
+        _ui.step(1, total, "Find your mod")
         args.input = prompt_source()
     if not args.input.exists():
         raise SystemExit(f"error: no such file or folder: {args.input}")
@@ -1812,6 +1818,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.vtype is None:
         if not guided:
             raise SystemExit("error: --type is required in scripted mode")
+        _ui.step(2, total, "Choose the body type")
         args.vtype = prompt_type()
     args.vtype = normalise_type(args.vtype)
 
@@ -1828,6 +1835,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.brand is None:
         if not guided:
             raise SystemExit("error: --brand is required in scripted mode")
+        _ui.step(3, total, "Choose the brand")
         args.brand = prompt_brand(slug)
     args.brand = _brands.normalise(args.brand) or "other"
 
@@ -1878,6 +1886,7 @@ def main(argv: list[str] | None = None) -> int:
     elif guided:
         # Interactive: only when a terminal is attached, so scripted runs
         # and CI never block on stdin.
+        _ui.step(4, total, "Set the kerb weight")
         mass = prompt_weight(args.vtype, None)
 
     # ---- 5. output -------------------------------------------------------
@@ -1889,6 +1898,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         # input was a folder: write inside it
         out = args.input / f"{RT_PREFIX}_{slug}.scs"
+
+    if guided:
+        _ui.step(5, total, "Convert")
+        print()
 
     rep = convert(
         src,
@@ -1914,23 +1927,26 @@ def main(argv: list[str] | None = None) -> int:
             f"= {sum(mass)} kg total{suffix}"
         )
 
-    print(f"\n=== {args.input} -> {out} ===")
+    print()
+    print("  " + _ui.paint(str(args.input), "dim") + "  ->  "
+          + _ui.paint(str(out), "bold", "green"))
+    print()
     if rep.actions:
-        print("\nchanges:")
+        _ui.heading("changes")
         for a in rep.actions:
-            print(f"  - {a}")
+            _ui.ok(a)
     if rep.bound:
-        print("\nparts bound:")
+        _ui.heading("parts bound")
         for b in rep.bound:
-            print(f"  * {b}")
+            _ui.bullet(b)
     if rep.warnings:
-        print("\nwarnings:")
+        _ui.heading("warnings")
         for w in rep.warnings:
-            print(f"  ! {w}")
+            _ui.warn(w)
     if rep.gaps:
-        print("\nnot present in source (needs manual work):")
+        _ui.heading("not present in source (needs manual work)")
         for g in rep.gaps:
-            print(f"  ? {g}")
+            print("  " + _ui.paint("?", "yellow") + " " + g)
 
     if args.dry_run:
         print("\n(dry run -- nothing was written)")

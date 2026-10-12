@@ -1,29 +1,64 @@
-# convert_to_car
+# CarUtil — ATS Road Trip car converter
 
 Converts a truck-classified American Truck Simulator mod into a **Road Trip**
 vehicle, so it registers in the Car Dealer and drives with car physics.
 
-Python 3 standard library only — no dependencies.
+Python 3.9+, standard library only — no dependencies. (ImageMagick is optional
+and only used to convert brand logo images.)
 
 ## Usage
 
+Run the script with `python3`. There is nothing to install, no `chmod +x`, and
+no `carutil` command on your PATH — it is a script you execute directly.
+
+**Interactive** — start it with no arguments and it asks you everything:
+
 ```bash
-python3 convert_to_car.py <mod.scs | mod_folder> \
-    --type  sedan|suv|muscle|sports|pickup|offroad|classic \
-    --brand porsche \
-    [--slug porsche_cayenne] \
-    [--asset-root /vehicle/car/porsche_cayenne] \
-    [--keep-physics] [--dry-run] [-o output.scs]
+python3 convert_to_car.py
 ```
 
-Example — the Porsche Cayenne as an SUV:
+```
+   ___         _   _   _   _   ___
+  / __\__ _  | | | | | |_(_) / __| __ _ _ __ _ __
+ | (__/ _` | | | | |  _| | \__ \/ _` | '__| '__|
+  \___|(_| | |_| | |_| | |___/ (_| | |  | |
+  |_/   \__, |\__,_|\__|_|    |_|___|_|  |_|
+         __/ |
+        |___/   CarUtil -- ATS Road Trip car converter
+
+  [1/5] Find your mod
+  [2/5] Choose the body type
+      > Sedan    saloon / hatchback
+        SUV      crossover
+        Pickup   truck bed
+        ...
+    arrow keys to move, Enter to choose
+```
+
+**Scripted** — pass everything as flags, nothing is prompted:
 
 ```bash
-python3 convert_to_car.py \
-    "../testing-covnverter/porsche-cayenne/2021 Porsche Cayenne Coupe Def.scs" \
+python3 convert_to_car.py "../mods/2021 Porsche Cayenne Coupe Def.scs" \
     --type suv --brand porsche --slug porsche_cayenne \
     -o out_porsche_roadtrip.scs
 ```
+
+Both modes produce the same `.scs`; the interactive one just asks first.
+
+### Terminal output
+
+Colour and the ASCII banner are automatic and never get in the way:
+
+- **Colour switches itself off** when stdout is not a terminal, so piping to a
+  file or a log gives clean text.
+- **`NO_COLOR=1`** disables it anywhere; **`FORCE_COLOR=1`** enables it anywhere.
+- **Arrow-key menus** need a real terminal. Without one — piped input, CI, or a
+  dumb `$TERM` — they fall back to typing a number, so scripted runs are never
+  blocked.
+- **`TERM=dumb`** or an unknown terminal also falls back to the numbered prompt.
+
+You can always type a name instead of using the arrows (e.g. `sedan`,
+`porsche`), so the menus are never a dead end.
 
 ### Options
 
