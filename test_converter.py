@@ -284,7 +284,7 @@ def test_reference_roundtrip() -> None:
 
 @guard
 def test_physics_sii_policy() -> None:
-    section("physics.sii is kept by default")
+    section("physics.sii is dropped by default")
     with tempfile.TemporaryDirectory() as td:
         src_dir = Path(td) / "src"
         src_dir.mkdir()
@@ -301,17 +301,365 @@ def test_physics_sii_policy() -> None:
 
         out = Path(td) / "a.scs"
         C.main([str(src_dir), "--type", "sedan", "--brand", "vw", "-o", str(out)])
-        check("physics.sii kept by default",
-              "def/vehicle/physics.sii" in zipfile.ZipFile(out).namelist())
+        check("physics.sii dropped by default",
+              "def/vehicle/physics.sii" not in zipfile.ZipFile(out).namelist())
         check("folder input works",
               "def/vehicle/truck/volkswagen.parati1994/data.sii"
               in zipfile.ZipFile(out).namelist())
 
         out2 = Path(td) / "b.scs"
         C.main([str(src_dir), "--type", "sedan", "--brand", "vw",
-                "--drop-physics", "-o", str(out2)])
-        check("--drop-physics removes it",
-              "def/vehicle/physics.sii" not in zipfile.ZipFile(out2).namelist())
+                "--keep-physics", "-o", str(out2)])
+        check("--keep-physics retains it",
+              "def/vehicle/physics.sii" in zipfile.ZipFile(out2).namelist())
+
+
+# ------------------------------------------------------------------- engine
+# A truck engine in a 2.2 t car reaches 60 mph in about three seconds. The
+# gearbox the mods ship already matches SCS's own Road Trip gearing, and mass,
+# drag and suspension are all car-scaled, so the engine's declared output is
+# the only thing left that is still at truck scale.
+
+_ENGINE_INFLATED = """SiiNunit
+{
+accessory_engine_data : 35l.test.engine
+{
+\tname: "3.5 L EcoBoost V6"
+\tinfo[]: "365 @@hp@@ (272@@kw@@)"
+\tinfo[]: "350 @@lb_ft@@ (475 @@nm@@)"
+\ttorque: 1400
+\ttorque_curve[]: (1500, 0.51)
+\ttorque_curve[]: (3750, 0.57)
+\tsecondary_torque: 2250 # torque x 1.26 (final drive relation)
+\tsecondary_torque_curve[]: (4500, 0.61)
+}
+}
+"""
+
+# SCS's own Road Trip F-150 V8, verbatim: torque 556 against a stated 556 Nm.
+_ENGINE_OFFICIAL = """SiiNunit
+{
+accessory_engine_data : ford_tivctv8.ford.f150_23.engine
+{
+\tname: "@@engine_ford_50l_tivct_32v_v8@@"
+\tinfo[]: "400 @@hp@@ (298@@kw@@)"
+\tinfo[]: "410 @@lb_ft@@ (556@@nm@@)"
+\ttorque: 556
+\tvolume: 5.0
+\ttorque_curve[]: (1000, 0.6)
+\ttorque_curve[]: (4500, 1.0)
+}
+}
+"""
+
+
+def test_stated_engine_torque() -> None:
+    section("engine info[] Nm parser")
+    check("parses the Nm figure", C.stated_engine_torque(_ENGINE_INFLATED) == 475)
+    check("tolerates a missing space before the unit",
+          C.stated_engine_torque(_ENGINE_OFFICIAL) == 556)
+    check("official engine parses", C.stated_engine_torque(_ENGINE_OFFICIAL) == 556)
+
+    lbft = _ENGINE_OFFICIAL.replace("410 @@lb_ft@@ (556@@nm@@)", "400 @@lb_ft@@")
+    check("falls back to lb_ft when Nm is absent",
+          C.stated_engine_torque(lbft) == 542, str(C.stated_engine_torque(lbft)))
+    check("no info[] yields None",
+          C.stated_engine_torque("accessory_engine_data : x\n{\n\ttorque: 9\n}\n")
+          is None)
+    check("hp-only info[] is not mistaken for torque",
+          C.stated_engine_torque(
+              'info[]: "365 @@hp@@ (272@@kw@@)"') is None)
+
+
+def test_engine_curve_peak_excludes_secondary() -> None:
+    section("primary torque curve peak")
+    check("Pilot primary curve peaks at 0.57",
+          C._primary_curve_peak(_ENGINE_INFLATED) == 0.57)
+    check("secondary curve is not folded in",
+          C._primary_curve_peak(_ENGINE_OFFICIAL) == 1.0)
+
+
+def test_tune_engine_rescales_inflated_output() -> None:
+    section("engine output is rescaled to the default Nm/t target")
+    rep = C.Report()
+    # 1.00 t, so the target is 760 Nm peak; 1400 * 0.57 = 798 Nm actual.
+    out = C.tune_engine(_ENGINE_INFLATED, rep, tonnes=1.0)
+    peak = C._primary_curve_peak(out)
+    tq = float(C.get_key(out.splitlines(), "torque"))
+    check("peak torque lands on the target",
+          abs(tq * peak - 760) < 2, f"got {tq * peak:.0f} Nm")
+    check("secondary_torque scaled by the same factor",
+          abs(float(re.search(r"secondary_torque:\s*(\d+)",
+                              out).group(1))
+              / float(re.search(r"secondary_torque:\s*(\d+)",
+                                _ENGINE_INFLATED).group(1)) - tq / 1400) < 0.01)
+    check("author's comment survives the rewrite",
+          "# torque x 1.26 (final drive relation)" in out)
+    check("torque_curve left untouched",
+          out.count("torque_curve[]") == _ENGINE_INFLATED.count("torque_curve[]"))
+    check("reported the rescale", any("engine rescaled" in a for a in rep.actions))
+
+    # An explicit ratio still wins over the default.
+    rep2 = C.Report()
+    out2 = C.tune_engine(_ENGINE_INFLATED, rep2, nm_per_tonne=1000, tonnes=2.0)
+    check("an explicit ratio overrides the default",
+          abs(float(C.get_key(out2.splitlines(), "torque")) * 0.57 - 2000) < 2)
+
+
+def test_tune_engine_falls_back_to_stated_figure() -> None:
+    section("the stated figure is a fallback, not the target")
+    # Only reachable when the ratio is disabled, which is what the "preserve
+    # an already-correct engine" behaviour relies on.
+    rep = C.Report()
+    out = C.tune_engine(_ENGINE_INFLATED, rep, nm_per_tonne=None)
+    # 1400 * 0.57 = 798; stated 475 => 1400 * (475/798) = 833.
+    check("fallback rescales to the stated 475 Nm",
+          re.search(r"^\ttorque: 833$", out, re.M), out)
+    check("fallback is labelled as such",
+          any("stated 475 Nm" in a for a in rep.actions), str(rep.actions))
+
+
+def test_tune_engine_preserves_official_output() -> None:
+    section("preservation is measured against the stated figure")
+    # SCS's own F-150 V8 declares torque 556 against a stated 556 Nm. With the
+    # ratio disabled it is left byte-identical, because its peak already equals
+    # what it claims. Under the Nm/t default it is deliberately NOT preserved:
+    # 556 Nm on a 1 t car is not SCS-felt performance, and that is the point.
+    rep = C.Report()
+    out = C.tune_engine(_ENGINE_OFFICIAL, rep, nm_per_tonne=None)
+    check("an engine matching its own figure is byte-identical",
+          out == _ENGINE_OFFICIAL)
+    check("preservation is reported",
+          any("preserved" in a for a in rep.actions))
+
+    rep2 = C.Report()
+    default_out = C.tune_engine(_ENGINE_OFFICIAL, rep2, tonnes=1.0)
+    check("the Nm/t default does override it",
+          "torque: 760" in default_out, default_out)
+
+
+def test_tune_engine_degenerate_inputs() -> None:
+    section("engine tuning refuses to guess")
+    no_info = _ENGINE_INFLATED.replace('info[]: "350 @@lb_ft@@ (475 @@nm@@)"\n', "")
+    rep = C.Report()
+    check("no stated figure => untouched",
+          C.tune_engine(no_info, rep, nm_per_tonne=None) == no_info)
+    check("and warns instead of inventing one",
+          any("no torque in info[]" in w for w in rep.warnings))
+    check("...but the Nm/t default still reaches it",
+          "torque: 1333" in C.tune_engine(no_info, C.Report(), tonnes=1.0))
+
+    no_curve = "\n".join(
+        ln for ln in _ENGINE_INFLATED.splitlines()
+        if "torque_curve[]" not in ln or "secondary_torque_curve" in ln) + "\n"
+    rep2 = C.Report()
+    check("no primary torque curve => untouched",
+          C.tune_engine(no_curve, rep2, nm_per_tonne=None) == no_curve)
+
+    not_engine = "SiiNunit\n{\nfoo: 1\n}\n"
+    check("non-engine unit is not touched",
+          C.tune_engine(not_engine, C.Report()) == not_engine)
+
+    rep3 = C.Report()
+    forced = C.tune_engine(_ENGINE_OFFICIAL, rep3, force=True, nm_per_tonne=None)
+    check("--force-physics resweeps an already-correct engine",
+          any("engine rescaled" in a for a in rep3.actions),
+          str(rep3.actions))
+    check("...but does not change its values", "torque: 556" in forced)
+
+    try:
+        C.tune_engine(_ENGINE_INFLATED, C.Report(), nm_per_tonne=760, tonnes=0)
+        check("a zero mass is rejected", False, "no error raised")
+    except ValueError:
+        check("a zero mass is rejected", True)
+
+
+def test_tune_engine_target_override() -> None:
+    section("--engine-torque overrides the stated figure")
+    rep = C.Report()
+    out = C.tune_engine(_ENGINE_INFLATED, rep, target_nm=1400)
+    # 1400 Nm peak over a 0.57 curve => declared scalar 2456
+    check("target reached", re.search(r"^\ttorque: 2456$", out, re.M), out)
+    check("target reported as the source",
+          any("--engine-torque 1400" in a for a in rep.actions), str(rep.actions))
+
+    # An engine already below the target must still be raised: the override is
+    # explicit and is not subject to the preserve-if-close rule.
+    rep2 = C.Report()
+    out2 = C.tune_engine(_ENGINE_OFFICIAL, rep2, target_nm=1400)
+    check("a preserved engine is raised when a target is given",
+          "torque: 1400" in out2)
+    check("...and is not reported as preserved",
+          not any("preserved" in a for a in rep2.actions))
+
+    # Target with no info[] at all: previously impossible.
+    blind = _ENGINE_INFLATED.replace('info[]: "350 @@lb_ft@@ (475 @@nm@@)"\n', "")
+    rep3 = C.Report()
+    out3 = C.tune_engine(blind, rep3, target_nm=1400)
+    check("target works without any info[]", "torque: 2456" in out3)
+    check("...and does not warn about a missing figure",
+          not rep3.warnings, str(rep3.warnings))
+
+
+def test_tune_engine_nm_per_tonne() -> None:
+    section("engine torque is targeted per tonne, not absolutely")
+    # This is the trap that cost a full test cycle: 1125 Nm was fitted on a
+    # 1550 kg `classic`-preset car that was really 2069 kg.
+    rep = C.Report()
+    out = C.tune_engine(_ENGINE_INFLATED, rep, nm_per_tonne=760, tonnes=2.069)
+    peak = C._primary_curve_peak(out)
+    tq = float(C.get_key(out.splitlines(), "torque"))
+    check("target scales with the mass actually written",
+          abs(tq * peak - 760 * 2.069) < 2, f"got {tq * peak:.0f} Nm")
+    check("mass is reported so a wrong figure is visible",
+          any("2.07 t" in a for a in rep.actions), str(rep.actions))
+
+    # Same ratio, heavier car: more torque, and the acceleration is unchanged.
+    rep2 = C.Report()
+    out2 = C.tune_engine(_ENGINE_INFLATED, rep2, nm_per_tonne=760, tonnes=2.500)
+    tq2 = float(C.get_key(out2.splitlines(), "torque"))
+    check("a heavier car is given more torque", tq2 > tq)
+
+    # An engine with no info[] is still reachable via the ratio.
+    blind = _ENGINE_INFLATED.replace('info[]: "350 @@lb_ft@@ (475 @@nm@@)"\n', "")
+    rep3 = C.Report()
+    out3 = C.tune_engine(blind, rep3, nm_per_tonne=760, tonnes=2.069)
+    check("ratio works without any info[]",
+          abs(float(C.get_key(out3.splitlines(), "torque")) * 0.57
+              - 760 * 2.069) < 2)
+
+
+@guard
+def test_engine_target_uses_written_mass() -> None:
+    section("engine target tracks the mass written to the chassis")
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "m.scs"
+        C.main([str(PILOT), "--type", "pickup", "--brand", "honda",
+                "--mass", "2069", "--engine-nm-per-tonne", "760",
+                "-o", str(out)])
+        z = zipfile.ZipFile(out)
+        eng = [n for n in z.namelist()
+               if re.search(r"/engine/.*\.sii$", n)][0]
+        chassis = [n for n in z.namelist()
+                   if re.search(r"/chassis/.*\.sii$", n)][0]
+        et = z.read(eng).decode()
+        ct = z.read(chassis).decode()
+        kw = re.findall(r"^\s*kerb_weight(?:\[\d+\])?\s*:\s*([\d.]+)", ct, re.M)
+        mass = sum(float(x) for x in kw)
+        peak = C._primary_curve_peak(et)
+        tq = float(C.get_key(et.splitlines(), "torque"))
+        check("kerb mass is 2069 kg as asked", abs(mass - 2069) < 1, str(mass))
+        check("torque matches mass/1000 * 760, not a preset",
+              abs(tq * peak - 760 * mass / 1000) < 2, f"{tq * peak:.0f} Nm")
+
+
+@guard
+def test_default_engine_target_applies() -> None:
+    section("760 Nm/t is the default with no flags at all")
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "d.scs"
+        C.main([str(PILOT), "--type", "suv", "--brand", "honda",
+                "--mass", "2200", "-o", str(out)])
+        z = zipfile.ZipFile(out)
+        eng = [n for n in z.namelist()
+               if re.search(r"/engine/.*\.sii$", n)][0]
+        ch = [n for n in z.namelist()
+              if re.search(r"/chassis/.*\.sii$", n)][0]
+        et = z.read(eng).decode()
+        mass = sum(float(x) for x in re.findall(
+            r"^\s*kerb_weight(?:\[\d+\])?\s*:\s*([\d.]+)",
+            z.read(ch).decode(), re.M))
+        peak = C._primary_curve_peak(et)
+        tq = float(C.get_key(et.splitlines(), "torque"))
+        # This regressed once: convert() passed the CLI's None straight through,
+        # which overrode tune_engine's own default and silently fell back to
+        # the mod's stated torque (833 Nm instead of 1672).
+        check("default target is applied without any flag",
+              abs(tq * peak - 760 * mass / 1000) < 2,
+              f"peak {tq * peak:.0f} Nm, expected "
+              f"{760 * mass / 1000:.0f} Nm for {mass:.0f} kg")
+        check("...and it is far above the mod's stated output",
+              tq * peak > 1000, f"{tq * peak:.0f} Nm")
+
+
+def test_tune_wheel_adds_car_grip() -> None:
+    section("car wheel grip keys")
+    bare = ("SiiNunit\n{\naccessory_wheel_data : w223.ftire\n{\n\tname: \"Stock\"\n"
+            "\tmodel: \"/vehicle/truck/w223/acc/wheel/tire_01.pmd\"\n}\n}\n")
+    rep = C.Report()
+    out = C.tune_wheel(bare, rep)
+    check("roll_resistance written", re.search(r"^\troll_resistance: 11$", out, re.M))
+    check("grip_factor written", re.search(r"^\tgrip_factor: 1.1$", out, re.M))
+
+    # SCS's own car wheels: 11-13 and 1.1-1.2. Those must survive untouched.
+    tuned = bare.replace("\tname: \"Stock\"",
+                         "\tname: \"Stock\"\n\troll_resistance: 13\n\tgrip_factor: 1.2")
+    rep2 = C.Report()
+    check("an already-car tyre is left alone",
+          C.tune_wheel(tuned, rep2) == tuned)
+    check("...and preservation is reported",
+          any("preserved" in a for a in rep2.actions))
+
+    forced = C.tune_wheel(tuned, C.Report(), force=True)
+    check("--force-physics overwrites a tuned tyre",
+          re.search(r"^\troll_resistance: 11$", forced, re.M)
+          and re.search(r"^\tgrip_factor: 1.1$", forced, re.M))
+
+    rim = "SiiNunit\n{\naccessory_rim_data : w223.fdisc\n{\n\tname: \"Stock\"\n}\n}\n"
+    check("a rim unit is not treated as a tyre",
+          C.tune_wheel(rim, C.Report()) == rim)
+
+    truck_key = bare.replace("\tname: \"Stock\"",
+                             "\tname: \"Stock\"\n\twet_grip: 4.02\n\tnoise_volume: 70")
+    out2 = C.tune_wheel(truck_key, C.Report())
+    check("truck-only tyre keys are left in place, not deleted",
+          "wet_grip: 4.02" in out2 and "noise_volume: 70" in out2)
+
+
+@guard
+def test_real_wheel_grip() -> None:
+    section("real mods: car wheels carry the keys SCS reads")
+    for label, path in (("Pilot", PILOT), ("W223", W223)):
+        src = C.ModSource(path)
+        tyres = [n for n in src.readable
+                 if re.match(r"^def/vehicle/[a-z_]*tire/.*\.sii$", n)]
+        if not tyres:
+            skip(f"{label} wheels", "no *_tire unit found")
+            continue
+        for t in tyres:
+            out = C.tune_wheel(src.read(t), C.Report())
+            check(f"{label}: {Path(t).name} has grip_factor",
+                  re.search(r"^\tgrip_factor:\s*1\.1$", out, re.M))
+            check(f"{label}: {Path(t).name} roll_resistance at car floor",
+                  re.search(r"^\troll_resistance:\s*11$", out, re.M))
+
+
+@guard
+def test_real_engine_scaling() -> None:
+    section("real mods: no engine stays at truck scale")
+    for label, path, want in (("Pilot", PILOT, 475), ("W223", W223, 520)):
+        src = C.ModSource(path)
+        engines = [n for n in src.readable
+                   if "/engine/" in n and n.endswith(".sii")]
+        if not engines:
+            skip(f"{label} engine", "no engine unit found")
+            continue
+        for eng in engines:
+            text = src.read(eng)
+            rep = C.Report()
+            out = C.tune_engine(text, rep)
+            stated = C.stated_engine_torque(text)
+            check(f"{label}: states its real torque", stated == want, str(stated))
+            peak = C._primary_curve_peak(out)
+            tq = C.get_key(out.splitlines(), "torque")
+            tq = float(re.match(r"[+-]?\d+(?:\.\d+)?", tq).group(0))
+            actual = tq * peak
+            check(f"{label}: peak torque is no longer at real-world output",
+                  actual > want * 1.3,
+                  f"peak {actual:.0f} Nm vs stated {want} Nm -- real-world "
+                  "torque produces a car about 2.5x slower than the real one")
+            check(f"{label}: engine unit still balanced",
+                  out.count("{") == out.count("}"))
 
 
 @guard
@@ -393,16 +741,21 @@ def test_axle_count_never_exceeds() -> None:
     for axles in (2, 3, 4):
         cfg = C.car_physics("suv", axles)
         for key in ("kerb_weight", "residual_travel", "suspension_damping_factor",
-                    "disc_brake", "axle_suspension_type"):
+                    "disc_brake", "axle_suspension_type",
+                    "brake_rotor_diameter"):
             check(f"{key} has exactly {axles} elements",
                   len(cfg[key]) == axles, f"got {len(cfg[key])}")
 
-    # brake_rotor_diameter is deliberately absent: the reference converter
-    # refuses to synthesise it ("inventing a rotor size risks a brake/wheel
-    # mismatch"), and it was a cause of the wheel errors.
+    # brake_rotor_diameter was previously refused on the reference converter's
+    # reasoning ("inventing a rotor size risks a brake/wheel mismatch"). That
+    # reason does not survive measurement: all 4 SCS Road Trip chassis declare
+    # it and all 39 truck chassis omit it, so a truck inherits the global
+    # truck default -- which is what over-brakes a converted car.
     cfg3 = C.car_physics("suv", 3)
-    check("brake_rotor_diameter is never synthesised",
-          "brake_rotor_diameter" not in cfg3)
+    check("brake_rotor_diameter is written for a car",
+          cfg3.get("brake_rotor_diameter") is not None)
+    check("...at a value inside SCS's own car range",
+          all(0.279 <= float(v) <= 0.356 for v in cfg3["brake_rotor_diameter"]))
     check("powered_axle is never synthesised", "powered_axle" not in cfg3)
 
     # disc_brake / axle_suspension_type must never receive a bare number
@@ -1779,6 +2132,109 @@ def test_ui() -> None:
         builtins.input = real_input
 
 
+def test_windows_compatibility() -> None:
+    """Platform contracts that are silent on Linux and fatal on Windows 11.
+
+    Everything here is a Windows-only failure that this Linux box cannot
+    reproduce by running the code, so each one is asserted structurally.
+    """
+    section("Windows 11 compatibility")
+
+    # 1. POSIX-only imports must stay inside a try/except. An import above the
+    #    guard raises ModuleNotFoundError on Windows and takes down the guided
+    #    walkthrough at step 1 of 5, before the numbered-menu fallback.
+    import ast as _ast
+    import ui as U
+
+    tree = _ast.parse((HERE / "ui.py").read_text(encoding="utf-8"))
+    guarded = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Try):
+            for sub in _ast.walk(node):
+                if isinstance(sub, _ast.Import):
+                    for a in sub.names:
+                        guarded.add(a.name.split(".")[0])
+    for mod in ("termios", "tty"):
+        imported_at_module_level = False
+        for node in tree.body:
+            if isinstance(node, _ast.Import) and \
+                    any(a.name.split(".")[0] == mod for a in node.names):
+                imported_at_module_level = True
+        check(f"{mod} is not imported at module level in ui.py",
+              not imported_at_module_level)
+        check(f"{mod} import is guarded", mod in guarded)
+
+    # 2. shutil.which("convert") resolves to the FAT-to-NTFS convert.exe on
+    #    Windows. Every call must therefore be verified, never trusted by name.
+    import logo as L
+    src = (HERE / "logo.py").read_text(encoding="utf-8")
+    check("logo.py verifies the binary by running -version",
+          "_is_imagemagick" in src and "-version" in src)
+    real_which = shutil.which
+    try:
+        shutil.which = lambda n: ("C:\\Windows\\System32\\convert.exe"
+                                  if n == "convert" else None)
+        check("imagemagick() rejects the Windows convert.exe",
+              L.imagemagick() is None)
+    finally:
+        shutil.which = real_which
+
+    # 3. A Windows ImageMagick install is invisible to the running process
+    #    until PATH is refreshed, so that recovery must exist and be nt-only.
+    check("_refresh_magick_path exists", hasattr(C, "_refresh_magick_path"))
+    csrc = (HERE / "convert_to_car.py").read_text(encoding="utf-8")
+    check("_refresh_magick_path is gated on nt", 'os.name != "nt"' in csrc)
+    check("it looks for magick.exe",
+          "magick.exe" in csrc and "ImageMagick" in csrc)
+
+    # 4. PATH is joined with os.pathsep, never a bare ":". The latter
+    #    silently truncates PATH on Windows.
+    check("PATH is joined with os.pathsep", "os.pathsep" in csrc)
+    check('no hardcoded ":" PATH join', '":" + os.environ' not in csrc)
+
+    # 5. Directory walks normalise to forward slashes for archive paths, or
+    #    Windows backslashes end up as zip entry names the game cannot read.
+    check("rglob paths are normalised to /",
+          '.replace("\\\\", "/")' in csrc)
+
+    # 6. Archive text must not acquire CRLF. zipfile encodes str to UTF-8
+    #    itself, so nothing should open .sii in text mode on the way in.
+    check("defs are read as bytes or with explicit encoding",
+          'read_text(encoding="utf-8"' in csrc)
+    check("the archive is written in binary",
+          'open(out_path, "wb")' in csrc or 'open(out_path,"wb")' in csrc
+          or "ZIP_DEFLATED) as z" in csrc)
+
+    # 7. No shell=True anywhere: on Windows it selects cmd.exe, whose quoting
+    #    differs from POSIX and breaks paths containing spaces.
+    for name in ("convert_to_car.py", "sii.py", "logo.py", "ui.py",
+                 "brands.py"):
+        text = (HERE / name).read_text(encoding="utf-8")
+        check(f"{name} never uses shell=True", "shell=True" not in text)
+
+    # 8. subprocess invocations pass an argument list, never a string.
+    lsrc = (HERE / "logo.py").read_text(encoding="utf-8")
+    check("logo.py passes argv lists to subprocess",
+          "[exe, \"-version\"]" in lsrc)
+
+    # 9. The installer must be winget-first on Windows: apt/pacman/brew do not
+    #    exist there, and offering them would produce a useless suggestion.
+    import os as _os
+    if _os.name == "nt":
+        check("winget is the first installer offered",
+              C._INSTALLERS[0][0] == "winget")
+    else:
+        check("winget is present in the installer list",
+              any(m == "winget" for m, _ in C._INSTALLERS))
+
+    # 10. No hardcoded /tmp or POSIX-only path in library code. The test file
+    #     may use it; the shipped modules may not.
+    for name in ("convert_to_car.py", "sii.py", "logo.py", "ui.py",
+                 "brands.py"):
+        text = (HERE / name).read_text(encoding="utf-8")
+        check(f"{name} has no hardcoded /tmp path", '"/tmp' not in text)
+
+
 def test_dependency_check() -> None:
     section("dependency preflight")
     import io
@@ -1905,12 +2361,25 @@ def main() -> int:
     test_brand_logo()
     test_brand_selection()
     test_ui()
+    test_stated_engine_torque()
+    test_engine_curve_peak_excludes_secondary()
+    test_tune_engine_rescales_inflated_output()
+    test_tune_engine_falls_back_to_stated_figure()
+    test_tune_engine_preserves_official_output()
+    test_tune_engine_degenerate_inputs()
+    test_tune_engine_target_override()
+    test_tune_engine_nm_per_tonne()
+    test_tune_wheel_adds_car_grip()
+    test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():
-        _report()
-        return 0
+        return _report()
     test_reference_roundtrip()
     test_physics_sii_policy()
+    test_real_engine_scaling()
+    test_real_wheel_grip()
+    test_engine_target_uses_written_mass()
+    test_default_engine_target_applies()
     test_porsche_conversion()
     test_car_physics_presets()
     test_axle_count_never_exceeds()
@@ -1949,7 +2418,7 @@ def main() -> int:
     test_chassis_avoids_invented_keys()
     test_parity_with_reference_converter()
 
-    _report()
+    return _report()
 
 
 def _report() -> int:

@@ -682,6 +682,15 @@ _PARATI = {
     "max_steering_angle": "28",
     "residual_travel": ["0.18", "0.16"],
     "suspension_damping_factor": ["0.9", "0.7"],
+    # A car-only key: all 4 of SCS's Road Trip chassis declare it, none of the
+    # 39 truck chassis do, so a truck leaves it at the global truck default and
+    # brakes far harder than any SCS car. FINDINGS section 16 declined to write
+    # one on the grounds that tyre diameter "comes from the .pmd model" -- but
+    # the evidence says SCS states it explicitly for every car and omits it
+    # from every truck, and inheriting the truck figure is what produces the
+    # trap-pedal braking this is meant to fix. Values measured across the Road
+    # Trip fleet span 0.279-0.356 m; this pair is the F-150's, mid-range.
+    "brake_rotor_diameter": ["0.302", "0.285"],
     "disc_brake": ["true", "true"],
     "axle_suspension_type": ["wishbone", "wishbone"],
     "suspension_class": "standard",
@@ -1127,8 +1136,8 @@ def car_physics(vtype: str, axles: int, mass: list[int] | None = None) -> dict:
 
     for key, default in (
         ("residual_travel", "0.16"), ("suspension_damping_factor", "0.8"),
-        ("disc_brake", "true"),
-        ("axle_suspension_type", "wishbone"),
+        ("disc_brake", "true"), ("axle_suspension_type", "wishbone"),
+        ("brake_rotor_diameter", "0.30"),
     ):
         fit(key, default)
 
@@ -1213,7 +1222,8 @@ def tune_chassis(
     # mod's own declaration as authoritative -- copying a rear-drive reference
     # would silently change the drivetrain.
     for key in ("residual_travel", "suspension_damping_factor",
-                "disc_brake", "axle_suspension_type", "kerb_weight"):
+                "disc_brake", "axle_suspension_type", "kerb_weight",
+                "brake_rotor_diameter"):
         if key not in cfg:
             continue
         current = get_all_indexed(lines, key) or None
@@ -1260,6 +1270,245 @@ def tune_chassis(
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+# A truck engine is built to move a 40-tonne combination. Reuse one in a 2.2 t
+# car and it is absurd overpowered -- the Honda Pilot conversion reached 60 mph
+# in about three seconds. Nothing else in the converter can fix that: mass,
+# drag and suspension are already car-scaled, and the gearbox ratios the mods
+# ship are the same 10R80 pattern SCS uses in its own Road Trip cars. The one
+# number left is the engine's output.
+#
+# The mods already state their true figure in info[], e.g.
+#     info[]: "350 @@lb_ft@@ (475 @@nm@@)"
+# which for SCS's own Road Trip engines equals the `torque` value exactly
+# (the F-150 V8 declares torque: 556 against "410 lb_ft (556 Nm)"). Truck mods
+# inflate the same field instead -- 1400 and 4000 -- so the stated figure is a
+# trustworthy source and the declared one is not.
+
+# Torque is declared in Nm and the curve is a multiplier on it, so peak output
+# is torque * curve_max. Compare the two within this margin before rewriting, so
+# a mod that already got it right is left untouched.
+_ENGINE_TOLERANCE = 1.15
+
+# Default peak torque per tonne of kerb weight, newton-metres. Measured, not
+# assumed: the Mercedes converted this way was timed in-game at 4.9 s against a
+# 5.0 s prediction, and the figure holds across masses because it is per tonne.
+#
+# This is deliberately far above the mod's stated output, and above SCS's own
+# cars, which all sit at 250-300 Nm/t. Real-world torque is not the target in
+# this simulation -- SCS's own F-150 declares its true 556 Nm and still takes
+# about 2.5x its real-world 0-60, because the whole model is tuned for trucks.
+# Matching a real engine spec therefore yields a gutless car. See FINDINGS.md
+# sections 20-21.
+_DEFAULT_NM_PER_TONNE = 760.0
+
+_NM_RE = re.compile(r"\(\s*([\d.]+)\s*@@nm@@\s*\)")
+_LBFT_RE = re.compile(r"([\d.]+)\s*@@lb_ft@@")
+# Anchored deliberately. "secondary_torque_curve[]" contains the substring
+# "torque_curve[]", so an unanchored pattern silently merges both curves and
+# reports the secondary peak as the primary one.
+_PRIMARY_CURVE_RE = re.compile(
+    r"^\s*torque_curve\[\]\s*:\s*\(\s*[\d.]+\s*,\s*([\d.]+)", re.M)
+
+
+def stated_engine_torque(text: str) -> int | None:
+    """The engine's own peak torque in Nm, as declared in its info[] strings.
+
+    Mods spell this inconsistently -- "(475 @@nm@@)" and "(556@@nm@@)" both
+    occur -- so the pattern tolerates missing spaces. lb_ft is only a fallback:
+    it rounds, and a rounded input would make the rewritten torque wrong by a
+    few Nm.
+    """
+    for line in text.splitlines():
+        if "info[]" not in line:
+            continue
+        m = _NM_RE.search(line)
+        if m:
+            try:
+                return int(round(float(m.group(1))))
+            except ValueError:
+                continue
+        m = _LBFT_RE.search(line)
+        if m:
+            try:
+                return int(round(float(m.group(1)) * 1.35582))
+            except ValueError:
+                continue
+    return None
+
+
+def _primary_curve_peak(text: str) -> float | None:
+    peaks = [float(v) for v in _PRIMARY_CURVE_RE.findall(text)]
+    return max(peaks) if peaks else None
+
+
+def _rescale_in_place(
+    lines: list[str], key: str, factor: float,
+) -> tuple[list[str], int | None]:
+    """Multiply a scalar's number by `factor`, preserving the rest of its line.
+
+    Not set_key: these lines carry author comments such as
+    `secondary_torque: 2250 # torque x 1.26 (final drive relation)`, and both
+    get_key (which returns the comment with the value) and set_key (which
+    rewrites the whole line) mishandle that -- the first makes the value
+    unparseable, the second silently discards the comment explaining the key.
+    """
+    out = list(lines)
+    last = None
+    for i, line in enumerate(out):
+        if re.match(rf"^\s*{re.escape(key)}\s*:", line):
+            last = i
+    if last is None:
+        return out, None
+    m = re.match(
+        rf"^(\s*{re.escape(key)}\s*:\s*)([+-]?\d+(?:\.\d+)?)(.*)$", out[last])
+    if not m:
+        return out, None
+    scaled = max(1, int(round(float(m.group(2)) * factor)))
+    out[last] = f"{m.group(1)}{scaled}{m.group(3)}"
+    return out, scaled
+
+
+def tune_engine(text: str, rep: Report, force: bool = False,
+                target_nm: int | None = None,
+                nm_per_tonne: float | None = _DEFAULT_NM_PER_TONNE,
+                tonnes: float = 1.0) -> str:
+    """Rescale an engine's output to the figure its own info[] declares.
+
+    `torque` is multiplied down and `secondary_torque` by the same factor, so
+    whatever relationship the author intended between the two survives. The
+    curve is left alone: scaling the scalar rescales the whole curve with it,
+    and rewriting the points would alter the rev range and shifters too.
+
+    The target is per tonne of kerb weight, never an absolute figure. An
+    absolute Nm is a trap: `--engine-torque 1125` was fitted on a car whose
+    `classic` preset weighed 1550 kg when the real vehicle was 2069 kg, so the
+    number was silently 34% out before any of it was tested. Torque per tonne
+    is what actually determines acceleration, and it stays correct when the
+    mass preset is wrong, the vehicle is heavier than its type suggests, or the
+    same engine is reused on a different car.
+    """
+    if "accessory_engine_data" not in text:
+        return text
+
+    if tonnes <= 0:
+        raise ValueError("tonnes must be positive")
+
+    # An explicit --engine-torque replaces the ratio; it is a deliberate
+    # override, not a second opinion.
+    if target_nm is not None:
+        nm_per_tonne = None
+
+    stated = stated_engine_torque(text)
+    if stated is None and target_nm is None and nm_per_tonne is None:
+        rep.warn(
+            "engine declares no torque in info[]; leaving its output alone "
+            "(pass --force-physics to rescale blind, or --engine-torque to "
+            "give it a target)")
+        return text
+
+    lines = text.splitlines()
+    declared = get_key(lines, "torque")
+    if declared is None:
+        return text
+    m = re.match(r"^([+-]?\d+(?:\.\d+)?)", declared)
+    if not m:
+        return text
+    declared_nm = float(m.group(1))
+
+    peak = _primary_curve_peak(text)
+    if not peak or peak <= 0:
+        return text
+
+    actual_nm = declared_nm * peak
+
+    if nm_per_tonne is not None:
+        target = nm_per_tonne * tonnes
+    elif target_nm is not None:
+        target = float(target_nm)
+    else:
+        target = float(stated)
+        if not force and actual_nm <= target * _ENGINE_TOLERANCE:
+            rep.action(
+                f"engine torque {declared_nm:.0f} Nm (peak {actual_nm:.0f} Nm) "
+                f"is within {_ENGINE_TOLERANCE:.2f}x of its stated {stated} Nm; "
+                "preserved")
+            return text
+
+    factor = target / actual_nm
+    lines, new_torque = _rescale_in_place(lines, "torque", factor)
+    lines, new_secondary = _rescale_in_place(lines, "secondary_torque", factor)
+
+    if nm_per_tonne is not None:
+        source = f"{nm_per_tonne:g} Nm/t default ({tonnes:.2f} t)"
+    elif target_nm is not None:
+        source = f"--engine-torque {target:.0f}"
+    else:
+        source = f"stated {stated} Nm"
+    rep.action(
+        f"engine rescaled {declared_nm:.0f} -> {new_torque} Nm"
+        + (f", secondary_torque -> {new_secondary}"
+           if new_secondary is not None else "")
+        + f" ({source}; was {actual_nm:.0f} Nm peak -- {factor:.2f}x)"
+    )
+    return "\n".join(lines) + "\n"
+
+
+# Every one of SCS's own Road Trip car wheel units (18 of them in def.scs,
+# base_vehicle.scs and dlc_rt_ford.scs) declares exactly two grip keys and no
+# others: roll_resistance of 11 or 13, and grip_factor of 1.1 or 1.2. The truck
+# wheel units declare neither, so trucks inherit the global default.
+#
+# Truck mods ship the truck side of that split. The Mercedes declares no grip
+# key whatsoever, and the Pilot uses `wet_grip`, which no SCS car wheel has
+# ever used. Either way the car runs on the truck's tyre calibration, which is
+# what leaves it crawling after the drivetrain is corrected. Write the two keys
+# SCS actually reads for a car.
+_CAR_TYRE = {
+    "roll_resistance": "11",   # SCS car range is 11-13
+    "grip_factor": "1.1",      # SCS car range is 1.1-1.2
+}
+# Below the low end of SCS's own car range. A value above it is a mod that has
+# already been set for a car and must be left alone.
+_TYRE_FLOOR = {"roll_resistance": 11.0, "grip_factor": 1.1}
+
+
+def tune_wheel(text: str, rep: Report, force: bool = False) -> str:
+    """Give a car wheel unit the grip keys SCS's own car wheels declare.
+
+    A value already at or above SCS's car floor is preserved; the point is not
+    to stomp a tuned wheel, it is to stop the car inheriting truck tyre
+    defaults. `force` overwrites even those.
+    """
+    if "accessory_wheel_data" not in text:
+        return text
+
+    lines = text.splitlines()
+    replaced: list[str] = []
+    kept: list[str] = []
+
+    for key, value in _CAR_TYRE.items():
+        current = get_key(lines, key)
+        if not force and current is not None:
+            m = re.match(r"^([+-]?\d+(?:\.\d+)?)", current)
+            try:
+                if m and float(m.group(1)) >= _TYRE_FLOOR[key]:
+                    kept.append(key)
+                    continue
+            except ValueError:
+                pass
+        lines = set_key(lines, key, value)
+        replaced.append(f"{key} ({current} -> {value})" if current else key)
+
+    if replaced:
+        rep.action(f"car tyre grip applied: {', '.join(replaced)}")
+    if kept:
+        rep.action(f"preserved tuned tyre grip: {', '.join(kept)}")
+    return "\n".join(lines) + "\n"
+
+
 def convert(
     src: ModSource,
     out_path: Path,
@@ -1269,13 +1518,15 @@ def convert(
     slug: str,
     explicit_slug: bool = False,
     asset_root: str | None,
-    drop_physics: bool,
+    keep_physics: bool,
     dry_run: bool,
     car_tune: bool = True,
     mass: list[int] | None = None,
     force_physics: bool = False,
     tags: list[str] | None = None,
     logo_dds: bytes | None = None,
+    engine_torque: int | None = None,
+    engine_nm_per_tonne: float | None = None,
 ) -> Report:
     rep = Report()
     if src.wrapper_note:
@@ -1372,7 +1623,14 @@ def convert(
         r"truck_desktop|truck_company)/"
     )
 
+    # Engine torque is targeted per tonne of the mass we actually write, not
+    # per tonne of whatever the --type preset assumed. Recompute it from the
+    # same input tune_chassis uses, so the two cannot drift apart.
+    kerb_kg = sum(mass) if mass else sum(_MASS.get(vtype, _MASS["sedan"]))
+    tonnes = kerb_kg / 1000.0
+
     # 1. existing def files, with asset paths + tags rewritten
+    dropped_physics = False
     for name in src.readable:
         if not name.endswith((".sii", ".sui")):
             continue
@@ -1387,18 +1645,42 @@ def convert(
             re.escape(vehicle_dir) + r"chassis/.*\.sii$", name
         ):
             new_text = tune_chassis(new_text, vtype, mass, rep, force=force_physics)
+        elif car_tune and re.match(
+            re.escape(vehicle_dir) + r"engine/.*\.sii$", name
+        ):
+            new_text = tune_engine(
+                new_text, rep, force=force_physics,
+                target_nm=engine_torque,
+                # None here means "not supplied on the command line", so it
+                # must fall through to tune_engine's own default. Passing the
+                # None straight through silently disabled the 760 Nm/t default
+                # and fell back to the mod's stated torque.
+                nm_per_tonne=(_DEFAULT_NM_PER_TONNE
+                              if engine_nm_per_tonne is None
+                              else engine_nm_per_tonne),
+                tonnes=tonnes)
+        elif car_tune and re.match(
+            r"^def/vehicle/[a-z_]*tire/.*\.sii$", name
+        ):
+            new_text = tune_wheel(new_text, rep, force=force_physics)
         elif name.endswith("def/vehicle/physics.sii"):
-            # KEEP by default. The reference converter keeps the mod's own
-            # global physics block and reports that overriding it would change
-            # every vehicle in the game, not just this one. It is a documented
-            # pre-existing risk rather than something a converter should
-            # silently delete.
-            if drop_physics:
+            # DROPPED by default. This block is non-namespaced, so it replaces
+            # the base game's calibrated physics for EVERY vehicle in the game,
+            # not just this one. The mods that ship one carry a stale copy:
+            # against the base game they set brake_balance 1.5 (vs 1.1),
+            # braking_curve_peak_rel 1.15 (vs 1.5), and roughly double every
+            # bristle_stiffness/bristle_damping/slip factor (1.0 -> ~2.1), plus
+            # sway_bar_stiffness_factor 3.0 (vs 1.0). Those are what make a
+            # converted car brake like a trap and feel feather-light.
+            if keep_physics:
+                rep.warn(
+                    "kept the mod's def/vehicle/physics.sii; it is a stale "
+                    "non-namespaced global that overrides the base game's "
+                    "brake and tyre physics for EVERY vehicle in the game"
+                )
+            else:
+                dropped_physics = True
                 continue
-            rep.warn(
-                "kept the mod's def/vehicle/physics.sii; it overrides the base "
-                "game block for EVERY vehicle, not just this one"
-            )
 
         files[name] = new_text
 
@@ -1542,8 +1824,11 @@ def convert(
 
         _write_scs(files, out_path, assets)
 
-    if drop_physics:
-        rep.warn("dropped def/vehicle/physics.sii (--drop-physics)")
+    if dropped_physics:
+        rep.action(
+            "dropped the mod's def/vehicle/physics.sii; the base game's own "
+            "brake and tyre calibration now applies (--keep-physics to retain it)"
+        )
     return rep
 
 
@@ -1897,11 +2182,29 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--slug", help="vehicle slug; defaults to source folder name")
     ap.add_argument("--asset-root", help="rewrite model roots to this, e.g. /vehicle/car/my_car")
     ap.add_argument(
-        "--drop-physics",
+        "--keep-physics",
         action="store_true",
-        help="delete the mod's def/vehicle/physics.sii (kept by default: it is "
-             "a non-namespaced global that overrides the base game for all "
-             "vehicles, so removing it is a global change)",
+        help="retain the mod's own def/vehicle/physics.sii instead of dropping "
+             "it. It is a non-namespaced global, so keeping it also overrides "
+             "the base game's brake and tyre calibration for every other "
+             "vehicle in the game",
+    )
+    ap.add_argument(
+        "--engine-torque",
+        type=int,
+        metavar="NM",
+        help="peak engine torque in Nm, overriding the figure the mod states "
+             "in info[]. Use this to match the feel of an SCS Road Trip car, "
+             "whose target is not the real engine's output",
+    )
+    ap.add_argument(
+        "--engine-nm-per-tonne",
+        type=float,
+        metavar="NM/T",
+        help="peak engine torque per tonne of kerb weight, e.g. "
+             "--engine-nm-per-tonne 760. Preferred over --engine-torque: an "
+             "absolute figure silently breaks when the real car weighs more "
+             "than its --type preset assumes",
     )
     ap.add_argument(
         "--no-car-tune",
@@ -2079,7 +2382,9 @@ def main(argv: list[str] | None = None) -> int:
         slug=slug,
         explicit_slug=args.slug is not None,
         asset_root=args.asset_root,
-        drop_physics=args.drop_physics,
+        keep_physics=args.keep_physics,
+        engine_torque=args.engine_torque,
+        engine_nm_per_tonne=args.engine_nm_per_tonne,
         dry_run=args.dry_run,
         car_tune=args.car_tune,
         mass=mass,
