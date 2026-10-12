@@ -2132,6 +2132,137 @@ def test_ui() -> None:
         builtins.input = real_input
 
 
+def test_torque_for_time() -> None:
+    section("a target 0-60 determines the engine")
+    # Reproduces the two measured points on the W223.
+    check("the calibration point is self-consistent",
+          abs(C.torque_for_time(1550, 9.67) - 520) < 3,
+          f"{C.torque_for_time(1550, 9.67):.0f} Nm")
+    # A heavier car needs more torque for the same time, and vice versa.
+    check("heavier => more torque for the same target",
+          C.torque_for_time(2200, 5.0) > C.torque_for_time(1550, 5.0))
+    check("slower target => less torque",
+          C.torque_for_time(2200, 7.0) < C.torque_for_time(2200, 5.0))
+
+    # Asking for the time the shipped 760 Nm/t produced must land near 760.
+    implied = C.torque_for_time(2069, 4.63) / 2.069
+    check("asking for a measured time returns the constant that produced it",
+          700 < implied < 900, f"{implied:.0f} Nm/t")
+
+    # Clamped, so a silly request cannot silently become a wild guess.
+    check("absurdly fast is clamped up", C.torque_for_time(1500, 0.1) >= C._CAL_MAX_NM)
+    check("absurdly slow is clamped down",
+          C.torque_for_time(1500, 999) <= C._CAL_MIN_NM)
+    check("nonsense inputs are survivable",
+          C.torque_for_time(0, 5.0) == C._CAL_TORQUE_NM
+          and C.torque_for_time(1500, 0) == C._CAL_TORQUE_NM)
+
+    # Monotonic: every step up in target time must reduce torque.
+    prev = None
+    for t in (3.0, 4.0, 5.0, 6.0, 8.0, 12.0):
+        v = C.torque_for_time(2200, t)
+        if prev is not None:
+            check(f"monotonic at {t}s", v < prev)
+        prev = v
+
+
+_TRANSMISSION_TRUCK = """SiiNunit
+{
+accessory_transmission_data : 10_speed.hpilot25.transmission
+{
+\tname: "10-speed AT"
+\tdifferential_ratio: 3.73
+\tstall_torque_ratio: 4.50
+\tshift_time: 0.1
+\tratios_forward[0]: 4.69
+}
+}
+"""
+
+_TRANSMISSION_CAR = """SiiNunit
+{
+accessory_transmission_data : 9_speed.w223_s500.transmission
+{
+\tname: "9-speed AT"
+\tdifferential_ratio: 2.821
+\tstall_torque_ratio: 1.953
+\ttorque_converter_lock_gear: 4
+\ttorque_converter_crawl: true
+\ttransmission_class: standard
+\tratios_forward[0]: 5.354
+}
+}
+"""
+
+
+def test_tune_transmission_stall_ratio() -> None:
+    section("torque converter stall ratio is brought into car range")
+    rep = C.Report()
+    out = C.tune_transmission(_TRANSMISSION_TRUCK, rep)
+    # SCS's own Road Trip cars sit at 1.8-2.0. 4.50 is a diesel figure and
+    # multiplied the Pilot's launch force by 2.84x against the Mercedes.
+    check("stall ratio capped at the car ceiling",
+          re.search(r"^\tstall_torque_ratio: 2(\.0)?$", out, re.M), out)
+    check("crawl added", "torque_converter_crawl: true" in out)
+    check("transmission_class added", "transmission_class: standard" in out)
+    check("lock gear added", "torque_converter_lock_gear: 3" in out)
+    check("gearing untouched", "differential_ratio: 3.73" in out)
+    check("ratios untouched", "ratios_forward[0]: 4.69" in out)
+
+    rep2 = C.Report()
+    out2 = C.tune_transmission(_TRANSMISSION_CAR, rep2)
+    check("an already-car transmission keeps its stall ratio",
+          "stall_torque_ratio: 1.953" in out2)
+    check("and its own lock gear", "torque_converter_lock_gear: 4" in out2)
+    check("and is otherwise untouched", out2 == _TRANSMISSION_CAR)
+
+    forced = C.tune_transmission(_TRANSMISSION_CAR, C.Report(), force=True)
+    check("--force-physics overwrites a tuned converter",
+          re.search(r"^\tstall_torque_ratio: 2(\.0)?$", forced, re.M))
+
+    not_x = "SiiNunit\n{\nfoo: 1\n}\n"
+    check("a non-transmission unit is not touched",
+          C.tune_transmission(not_x, C.Report()) == not_x)
+
+
+def test_launch_force_matches_after_stall_fix() -> None:
+    section("launch force is comparable once the stall ratio is capped")
+    def launch(nm, gear, stall):
+        return nm * gear * stall
+    # Same engine target, each car's own gearing.
+    merc = launch(1572, 15.10, 1.953)
+    pilot_before = launch(1672, 17.49, 4.500)
+    pilot_after = launch(1672, 17.49, C._CAR_STALL_CEILING)
+    check("Pilot was far more violent than the Merc before",
+          pilot_before / merc > 2.0, f"{pilot_before / merc:.2f}x")
+    check("and is now within a sane margin",
+          pilot_after / merc < 1.5, f"{pilot_after / merc:.2f}x")
+    # What is left is taller 1st gearing, which slows launch rather than
+    # snapping it -- so the residual must be above 1, not below.
+    check("residual difference is taller gearing, not more force",
+          pilot_after > merc)
+
+
+@guard
+def test_real_transmission_tuning() -> None:
+    section("real mods: no transmission launches on a truck stall ratio")
+    for label, path in (("Pilot", PILOT), ("W223", W223)):
+        src = C.ModSource(path)
+        xs = [n for n in src.readable
+              if re.match(r"def/vehicle/truck/.*/transmission/.*\.sii$", n)]
+        if not xs:
+            skip(f"{label} transmission", "no transmission unit found")
+            continue
+        for x in xs:
+            out = C.tune_transmission(src.read(x), C.Report())
+            m = re.search(r"^\s*stall_torque_ratio:\s*([\d.]+)", out, re.M)
+            check(f"{label}: stall ratio is in car range",
+                  m is not None and float(m.group(1)) <= C._CAR_STALL_CEILING,
+                  m.group(1) if m else "absent")
+            check(f"{label}: converter crawl present",
+                  "torque_converter_crawl: true" in out)
+
+
 def test_windows_compatibility() -> None:
     """Platform contracts that are silent on Linux and fatal on Windows 11.
 
@@ -2370,6 +2501,9 @@ def main() -> int:
     test_tune_engine_target_override()
     test_tune_engine_nm_per_tonne()
     test_tune_wheel_adds_car_grip()
+    test_torque_for_time()
+    test_tune_transmission_stall_ratio()
+    test_launch_force_matches_after_stall_fix()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():
@@ -2378,6 +2512,7 @@ def main() -> int:
     test_physics_sii_policy()
     test_real_engine_scaling()
     test_real_wheel_grip()
+    test_real_transmission_tuning()
     test_engine_target_uses_written_mass()
     test_default_engine_target_applies()
     test_porsche_conversion()

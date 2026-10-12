@@ -1074,6 +1074,78 @@ def prompt_weight(vtype: str, preset: str | None) -> list[int] | None:
             continue
         return split_mass(total, vtype, 2)
 
+
+# Measured calibration, not a guess. Two timing points on the W223 (9.67 s at
+# 520 Nm / 1550 kg, 3.70 s at 1600 Nm / 1550 kg) plus a confirmation on the
+# same car at 2069 kg give an exponent of 0.855 on a 1/mass x torque^0.855
+# relationship. Close to the 1.0 of pure torque limiting, so torque is very
+# nearly the whole lever.
+#
+# Anchored on 1550 kg at 520 Nm taking 9.67 s. Mass is accounted for
+# explicitly, which is what lets a target time be honoured across weights.
+_CAL_MASS_KG = 1550.0
+_CAL_TORQUE_NM = 520.0
+_CAL_TIME_S = 9.67
+_CAL_EXPONENT = 0.855
+
+# Outside this the model is extrapolation. The fitting points span 520-1600 Nm
+# at 1550 kg; a 2000 kg SUV sits near the top of that.
+_CAL_MIN_NM = 200.0
+_CAL_MAX_NM = 3000.0
+
+
+def torque_for_time(mass_kg: float, seconds: float) -> float:
+    """Peak engine torque that yields `seconds` to 60 mph at `mass_kg`.
+
+    Returns Nm, clamped to the range the calibration actually covers so a
+    silly request cannot silently become a guess.
+    """
+    if mass_kg <= 0 or seconds <= 0:
+        return _CAL_TORQUE_NM
+    mass_factor = mass_kg / _CAL_MASS_KG
+    seconds_at_reference = _CAL_TIME_S * mass_factor
+    nm = _CAL_TORQUE_NM * (seconds_at_reference / seconds) ** (1 / _CAL_EXPONENT)
+    return max(_CAL_MIN_NM, min(_CAL_MAX_NM, nm))
+
+
+def prompt_acceleration(mass_kg: float) -> float | None:
+    """Ask how quick the car should be, and return the target 0-60 in seconds.
+
+    A weight alone cannot produce a believable drivetrain, because SCS's own
+    cars take roughly 2.5x their real-world 0-60 regardless of what the engine
+    is. Asking for the time the user actually wants turns the engine target
+    from a single fitted constant into a function of the two numbers that
+    determine it.
+    """
+    if not _tty():
+        return None
+
+    default = _CAL_TIME_S * (mass_kg / _CAL_MASS_KG)
+    print()
+    print("  How quick should this car be?")
+    print("    Enter the 0-60 mph time in seconds. Most cars are 4-7 s;")
+    print("    a truck-based conversion lands near 12 s otherwise.")
+    print(f"    Press Enter for {default:.1f} s.")
+    print()
+    while True:
+        try:
+            raw = input(f"  0-60 seconds [{default:.1f}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  cancelled -- using the measured default.")
+            return None
+        if not raw:
+            return None
+        raw = raw.lower().rstrip("s ").replace(",", ".")
+        try:
+            value = float(raw)
+        except ValueError:
+            print("  -> enter a number of seconds, e.g. 5.0")
+            continue
+        if not (1.0 <= value <= 30.0):
+            print("  -> between 1 and 30 seconds is a car, not a spaceship")
+            continue
+        return value
+
 # Per-type overrides applied on top of the baseline. Only numeric tuning.
 _TUNING = {
     "sedan":   {},
@@ -1374,7 +1446,8 @@ def _rescale_in_place(
 def tune_engine(text: str, rep: Report, force: bool = False,
                 target_nm: int | None = None,
                 nm_per_tonne: float | None = _DEFAULT_NM_PER_TONNE,
-                tonnes: float = 1.0) -> str:
+                tonnes: float = 1.0,
+                target_source: str | None = None) -> str:
     """Rescale an engine's output to the figure its own info[] declares.
 
     `torque` is multiplied down and `secondary_torque` by the same factor, so
@@ -1442,7 +1515,7 @@ def tune_engine(text: str, rep: Report, force: bool = False,
     lines, new_secondary = _rescale_in_place(lines, "secondary_torque", factor)
 
     if nm_per_tonne is not None:
-        source = f"{nm_per_tonne:g} Nm/t default ({tonnes:.2f} t)"
+        source = target_source or f"{nm_per_tonne:g} Nm/t default ({tonnes:.2f} t)"
     elif target_nm is not None:
         source = f"--engine-torque {target:.0f}"
     else:
@@ -1473,6 +1546,71 @@ _CAR_TYRE = {
 # Below the low end of SCS's own car range. A value above it is a mod that has
 # already been set for a car and must be left alone.
 _TYRE_FLOOR = {"roll_resistance": 11.0, "grip_factor": 1.1}
+
+# Transmission keys, from the four SCS Road Trip transmissions in
+# dlc_rt_ford.scs. Every one of them declares all three; every truck-class
+# transmission omits them.
+#
+# stall_torque_ratio is the launch multiplier on engine torque. SCS's cars sit
+# at 1.8-2.0. The Honda Pilot mod declares 4.50, a diesel torque-converter
+# figure, which multiplied its already-corrected 1672 Nm by 2.84x against the
+# Mercedes and made the car genuinely unrecoverable rather than merely quick.
+# A stall ratio cannot be left alone: it is the single most violent number in
+# the drivetrain and no torque target can compensate for it.
+_CAR_TRANSMISSION = {
+    "torque_converter_crawl": "true",
+    "transmission_class": "standard",
+}
+_CAR_STALL_CEILING = 2.0
+_CAR_LOCK_GEAR = "3"
+
+
+def tune_transmission(text: str, rep: Report, force: bool = False) -> str:
+    """Bring a transmission's converter settings into car range.
+
+    Preserved when already in range, so a mod that already launches sanely
+    survives untouched. `force` overwrites.
+    """
+    if "accessory_transmission_data" not in text:
+        return text
+
+    lines = text.splitlines()
+    changed: list[str] = []
+    kept: list[str] = []
+
+    stall = get_key(lines, "stall_torque_ratio")
+    if stall is None:
+        lines = set_key(lines, "stall_torque_ratio", "1.9")
+        changed.append("stall_torque_ratio (absent -> 1.9)")
+    else:
+        m = re.match(r"^([+-]?\d+(?:\.\d+)?)", stall)
+        try:
+            value = float(m.group(1)) if m else 0.0
+        except (AttributeError, ValueError):
+            value = 0.0
+        if force or value > _CAR_STALL_CEILING:
+            lines = set_key(lines, "stall_torque_ratio", str(_CAR_STALL_CEILING))
+            changed.append(f"stall_torque_ratio ({value:g} -> {_CAR_STALL_CEILING})")
+        else:
+            kept.append(f"stall_torque_ratio {value:g}")
+
+    for key, value in _CAR_TRANSMISSION.items():
+        if get_key(lines, key) is None or force:
+            before = get_key(lines, key)
+            lines = set_key(lines, key, value)
+            changed.append(f"{key} ({before} -> {value})" if before else key)
+        else:
+            kept.append(key)
+
+    if get_key(lines, "torque_converter_lock_gear") is None and not force:
+        lines = set_key(lines, "torque_converter_lock_gear", _CAR_LOCK_GEAR)
+        changed.append(f"torque_converter_lock_gear (absent -> {_CAR_LOCK_GEAR})")
+
+    if changed:
+        rep.action(f"car transmission applied: {', '.join(changed)}")
+    if kept:
+        rep.action(f"preserved converter tuning: {', '.join(kept)}")
+    return "\n".join(lines) + "\n"
 
 
 def tune_wheel(text: str, rep: Report, force: bool = False) -> str:
@@ -1527,6 +1665,7 @@ def convert(
     logo_dds: bytes | None = None,
     engine_torque: int | None = None,
     engine_nm_per_tonne: float | None = None,
+    target_source: str | None = None,
 ) -> Report:
     rep = Report()
     if src.wrapper_note:
@@ -1646,6 +1785,10 @@ def convert(
         ):
             new_text = tune_chassis(new_text, vtype, mass, rep, force=force_physics)
         elif car_tune and re.match(
+            re.escape(vehicle_dir) + r"transmission/.*\.sii$", name
+        ):
+            new_text = tune_transmission(new_text, rep, force=force_physics)
+        elif car_tune and re.match(
             re.escape(vehicle_dir) + r"engine/.*\.sii$", name
         ):
             new_text = tune_engine(
@@ -1658,6 +1801,7 @@ def convert(
                 nm_per_tonne=(_DEFAULT_NM_PER_TONNE
                               if engine_nm_per_tonne is None
                               else engine_nm_per_tonne),
+                target_source=target_source,
                 tonnes=tonnes)
         elif car_tune and re.match(
             r"^def/vehicle/[a-z_]*tire/.*\.sii$", name
@@ -2198,6 +2342,14 @@ def main(argv: list[str] | None = None) -> int:
              "whose target is not the real engine's output",
     )
     ap.add_argument(
+        "--acceleration",
+        type=float,
+        metavar="SECONDS",
+        help="target 0-60 mph time; the engine is tuned to hit it at the "
+             "given --mass. Preferred over --engine-nm-per-tonne, which is a "
+             "constant fitted from one car",
+    )
+    ap.add_argument(
         "--engine-nm-per-tonne",
         type=float,
         metavar="NM/T",
@@ -2249,7 +2401,7 @@ def main(argv: list[str] | None = None) -> int:
         print(_ui.banner())
 
     guided = _tty() and not args.no_prompt
-    total = 5
+    total = 6
 
     # Optional but wanted-by-default: offer to install ImageMagick before the
     # user invests answers in the walkthrough. Cheap when it is already there.
@@ -2354,13 +2506,32 @@ def main(argv: list[str] | None = None) -> int:
             )
         if len(mass) != 2 or any(m < 1 for m in mass):
             raise SystemExit("error: --mass needs two positive weights")
-    elif guided:
+
+    # Every path must bind `wanted`: --mass skips the guided prompts entirely,
+    # and an unbound name here would only surface at the end of the run.
+    wanted = args.acceleration
+    if guided:
         # Interactive: only when a terminal is attached, so scripted runs
         # and CI never block on stdin.
         _ui.step(4, total, "Set the kerb weight")
         mass = prompt_weight(args.vtype, None)
+        if wanted is None:
+            _ui.step(5, total, "Set the acceleration")
+            wanted = prompt_acceleration(
+                sum(mass) if mass else default_total(args.vtype))
 
-    # ---- 5. output -------------------------------------------------------
+    # A target 0-60 supersedes the fitted Nm/t constant: it is measured from
+    # the user's own two numbers instead of extrapolated from one car. Seeded
+    # from argparse so the no-target path still honours an explicit flag.
+    engine_nm_per_tonne = args.engine_nm_per_tonne
+    target_source = (f"--engine-nm-per-tonne {engine_nm_per_tonne:g}"
+                     if engine_nm_per_tonne is not None else None)
+    if wanted is not None:
+        kerb = sum(mass) if mass else default_total(args.vtype)
+        engine_nm_per_tonne = torque_for_time(kerb, wanted) / (kerb / 1000.0)
+        target_source = f"{wanted:.1f}s 0-60 at {kerb:.0f} kg"
+
+    # ---- 6. output -------------------------------------------------------
     if args.output is not None:
         out = args.output
     elif args.input.is_file():
@@ -2371,7 +2542,7 @@ def main(argv: list[str] | None = None) -> int:
         out = args.input / f"{RT_PREFIX}_{slug}.scs"
 
     if guided:
-        _ui.step(5, total, "Convert")
+        _ui.step(6, total, "Convert")
         print()
 
     rep = convert(
@@ -2384,7 +2555,8 @@ def main(argv: list[str] | None = None) -> int:
         asset_root=args.asset_root,
         keep_physics=args.keep_physics,
         engine_torque=args.engine_torque,
-        engine_nm_per_tonne=args.engine_nm_per_tonne,
+        engine_nm_per_tonne=engine_nm_per_tonne,
+        target_source=target_source,
         dry_run=args.dry_run,
         car_tune=args.car_tune,
         mass=mass,
