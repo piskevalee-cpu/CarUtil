@@ -1665,6 +1665,14 @@ def test_ui() -> None:
     check("banner is ascii only", banner.isascii())
     check("banner mentions CarUtil", "CarUtil" in banner)
 
+    # The README quotes the banner; if the art changes, the sample must too.
+    readme = (HERE / "README.md")
+    if readme.exists():
+        text = readme.read_text(encoding="utf-8", errors="replace")
+        missing = [ln for ln in banner.strip("\n").split("\n") if ln not in text]
+        check("README shows the current banner", not missing,
+              f"missing from README: {missing[:2]}")
+
     # Status helpers must not raise and must emit a recognisable marker.
     out = io.StringIO()
     real, sys.stdout = sys.stdout, out
