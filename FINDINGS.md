@@ -1284,3 +1284,46 @@ The type ordering is preserved where SCS supports it -- tall heavy cars drag
 and roll most -- but two Parati-era assumptions are gone, because SCS's own
 cars contradict them: the Mustang is *more* draggy than the Victoria, and the
 sway bar spread across real cars is only 0.3–0.4.
+
+## 25. Creep on selecting Drive, and using SCS's values rather than judgement
+
+The cars pulled away to about 15 mph the instant Drive was selected from
+neutral. The tempting explanation was the `torque_converter_crawl: true` this
+work had just added, and that key was duly made opt-out -- on the reasoning
+that "crawl" sounds like creeping. That was a guess, and the wrong one to act
+on: **SCS's own four Road Trip transmissions all declare `torque_converter_crawl: true`**. A key that every one of the reference cars carries is a car value, and dropping it was tuning by vibes.
+
+Restored. The real gap was elsewhere, and it is measurable.
+
+### Every SCS engine curve starts at (0, 0). The mods' do not.
+
+| engine | first curve point | fraction of peak at idle |
+|---|---|---|
+| SCS F-150 5.0 | **(0, 0)** then 1000 rpm @ 0.60 | 0.39 interpolated |
+| SCS Mustang 289 | **(0, 0)** then 1000 rpm @ 0.39 | 0.31 |
+| SCS Bronco 2.7 | **(0, 0)** then 1000 rpm @ 0.35 | 0.21 |
+| SCS Victoria 4.6 | **(0, 0)** then 1000 rpm @ 0.47 | 0.38 |
+| Honda Pilot mod | **750 rpm @ 0.47**, no origin | 0.47 |
+| W223 mod | **500 rpm @ 0.43**, no origin | 0.43 |
+
+Two separate faults. No `(0, 0)` origin at all, and the first point sitting
+*at* idle rather than above it. After the torque rescale the Pilot carries
+about 800 Nm at idle -- 3.6x the absolute idle torque of an SCS car of the same
+mass. Through a 17.5:1 first gear that is exactly enough to walk the car off
+the line.
+
+`tune_engine` now adds the `(0, 0)` origin, matching all 181 SCS engine units.
+The existing points are untouched, so the peak, its rev, the power band and the
+shift points are all preserved -- only the missing origin is supplied.
+
+### The lesson, which is the one that matters
+
+`torque_converter_crawl` was removed on a plausible-sounding inference and
+would have been re-added anyway. The evidence was already sitting in the
+decoded DLC: four units, all declaring it. **When a value can be read off the
+reference, do not infer it.** Section 18's drumroll about the Parati is the
+opposite mistake and cost a day; this was the same mistake in miniature.
+
+It is also a reminder that a name is not a mechanism. `crawl` describes the
+SCS unit's intent; the torque comes from the engine curve, and that is where
+the fault was.

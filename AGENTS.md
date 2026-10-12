@@ -144,6 +144,16 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   use 1.8-2.0; the Pilot mod declares 4.50, a diesel figure that multiplied
   its launch force 2.30x. No torque target can compensate. See `FINDINGS.md`
   §23.
+- **Every SCS engine curve starts at `(0, 0)`; the mods' do not.** All 181
+  base-game engines do, and so do all four Road Trip cars. The truck mods
+  start theirs *at* idle with 0.43-0.47 of peak, so after the torque rescale
+  they carry ~800 Nm at idle and walk off the line when Drive is selected.
+  `tune_engine` supplies the missing origin; the peak and shift points are
+  untouched. See `FINDINGS.md` §25.
+- **When a value can be read off the reference, do not infer it.**
+  `torque_converter_crawl` was removed on the sound-looking inference that a
+  key called "crawl" causes crawling — when all four SCS transmissions
+  declare it. A name is not a mechanism. See `FINDINGS.md` §25.
 - **Real-world torque is the wrong target for SCS's simulation.** SCS's own
   Road Trip cars all sit at 250-300 Nm/t and still take ~2.5x their real-world
   0-60. Matching the mod's stated output therefore produces a gutless car. The
