@@ -1567,6 +1567,8 @@ def test_brand_selection() -> None:
             check(f"{name}: logo file exists", p.exists(), str(p))
     check("some logos are present", len(B.available()) >= 10,
           f"{len(B.available())} of {len(B.BRANDS)}")
+    check("every listed brand has a logo", not B.missing(),
+          f"missing: {B.missing()}")
     check("unknown brand has no logo", B.logo_path("notacarbrand") is None)
 
     if L.imagemagick() is None:
@@ -1598,6 +1600,29 @@ def test_brand_selection() -> None:
         seen[name] = L.image_to_dds(B.logo_path(name).read_bytes())
     check("different brands give different textures",
           len({hashlib.sha256(v).digest() for v in seen.values()}) == len(seen))
+
+    # Every logo must be *visible* on the dealer's dark tile. This is what the
+    # brightness normalisation exists for: a black-on-transparent or
+    # white-on-opaque source converted straight through is invisible or shows
+    # as a bright box.
+    import subprocess as _sp
+    exe = L.imagemagick()
+    for name in B.available():
+        dds = L.image_to_dds(B.logo_path(name).read_bytes())
+        probe = _sp.run(
+            [exe, "-", "-background", "#2b2b2b", "-alpha", "background",
+             "-alpha", "off", "-colorspace", "Gray", "-format", "%[fx:mean]",
+             "info:"],
+            input=dds, capture_output=True)
+        try:
+            lum = float(probe.stdout.decode().strip())
+        except ValueError:
+            lum = None
+        # Must differ measurably from the flat tile colour, and must not be a
+        # blown-out white block.
+        check(f"{name}: visible against the dark tile",
+              lum is not None and 0.01 < lum < 0.98,
+              f"mean luminance {lum}")
 
     # Garbage input must raise, not crash or emit a broken file.
     try:

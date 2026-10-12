@@ -38,12 +38,35 @@ _CHECK_BLANK = [
     "-format", "%[fx:mean]",
     "info:",
 ]
-# Composite white-on-transparent artwork onto a dark plate so it stays visible.
+# Mean alpha of the source. A fully opaque logo has its own painted background
+# (often white), which must be dealt with rather than shown as a bright box.
+_OPAQUE = [
+    "-alpha", "extract",
+    "-format", "%[fx:mean]",
+    "info:",
+]
+
+# The dealer UI sits on a dark background, so artwork that is near-black once
+# transparency is treated as black will not be visible. Composite those onto a
+# dark plate so the light-coloured artwork reads against it.
 _PLATE = [
     "-background", "#1a1a1a",
     "-alpha", "background",
     "-alpha", "off",
 ]
+
+# For logos painted on an opaque white background, drop the white to
+# transparency first and then plate, so only the mark survives.
+_DROP_WHITE = [
+    "-fuzz", "12%",
+    "-transparent", "white",
+]
+
+# Artwork with almost no luminance of its own (pure black on transparent) would
+# be invisible on the dealer's dark tile even once plated, because it stays
+# dark on dark. Invert the colour channels only -- alpha must be preserved or
+# the cut-out turns into a solid block -- so the mark reads as light artwork.
+_INVERT = ["-channel", "RGB", "-negate", "+channel"]
 
 # -define dds:compression=dxt1 selects DXT1. The trailing "-" makes ImageMagick
 # write to stdout so nothing has to touch the filesystem.
@@ -83,20 +106,49 @@ def _run(exe: str, args: list[str], image: bytes) -> subprocess.CompletedProcess
         raise LogoError(f"could not run ImageMagick: {exc}") from exc
 
 
-def _is_blank(image: bytes, exe: str) -> bool:
-    """True if the logo would be invisible on a transparent background.
-
-    Measures the image's own luminance with alpha ignored. Several logos are
-    pure white artwork on a fully transparent background: their luminance is
-    0 once transparent pixels are treated as black, yet they are perfectly
-    visible on the dark UI. Anything in that bucket gets composited onto a
-    plate instead of being letterboxed into invisibility.
-    """
-    gray = _run(exe, _CHECK_BLANK, image)
+def _mean(image: bytes, exe: str, args: list[str]) -> float | None:
+    """Mean of an ImageMagick expression over the image, or None if unusable."""
+    proc = _run(exe, [*args, "info:"], image)
     try:
-        return float(gray.stdout.decode().strip() or 0) < 0.01
+        return float(proc.stdout.decode().strip())
     except ValueError:
-        return False
+        return None
+
+
+def _has_painted_background(image: bytes, exe: str) -> bool:
+    """True if the logo is fully opaque, i.e. carries its own background.
+
+    A logo that is opaque everywhere has a painted backdrop (usually white)
+    that would otherwise show as a bright rectangle in the dealer tile.
+    """
+    alpha = _mean(image, exe, ["-alpha", "extract", "-format", "%[fx:mean]"])
+    return alpha is not None and alpha > 0.99
+
+
+def _is_too_dark(image: bytes, exe: str) -> bool:
+    """True if the artwork has essentially no luminance of its own.
+
+    Measures luminance over an opaque black backdrop, so transparent pixels do
+    not count. A logo that scores near zero is dark-on-transparent and would
+    disappear against the dealer's dark tile even after being plated.
+    """
+    lum = _mean(image, exe, ["-background", "black", "-alpha", "background",
+                             "-alpha", "off", "-colorspace", "Gray",
+                             "-format", "%[fx:mean]"])
+    return lum is not None and lum < 0.02
+
+
+def _knock_out_white(image: bytes, exe: str) -> bytes:
+    """Render the image to PNG with any white backdrop made transparent.
+
+    Re-encoding is needed so the darkness test sees the *artwork* rather than
+    the white page it was drawn on: a black logo printed on white measures as
+    bright, and would be left black-on-transparent and invisible.
+    """
+    proc = _run(exe, [*_DROP_WHITE, "png:-"], image)
+    if proc.returncode == 0 and proc.stdout.startswith(b"\x89PNG"):
+        return proc.stdout
+    return image
 
 
 def image_to_dds(image: bytes) -> bytes:
@@ -114,10 +166,27 @@ def image_to_dds(image: bytes) -> bytes:
             "Install it, or drop a pre-converted .dds into logos/."
         )
 
-    prep = _PLATE if _is_blank(image, exe) else []
+    # Three failure modes, all invisible or ugly against the dealer's dark tile:
+    #   * fully opaque artwork -- knock the painted background out to alpha;
+    #   * artwork with almost no luminance of its own (black-on-transparent) --
+    #     invert the colour so the mark reads as light artwork;
+    #   * anything still sitting on nothing -- composite onto a dark plate.
+    #
+    # Order matters: the invert must happen before the plate, or it would turn
+    # the dark plate into a light box.
+    prep: list[str] = []
+    source = image
+    if _has_painted_background(image, exe):
+        source = _knock_out_white(image, exe)
+
+    dark = _is_too_dark(source, exe)
+    if dark:
+        prep += _INVERT
+    if dark or _has_painted_background(image, exe):
+        prep += _PLATE
 
     for compression in (_COMPRESSION, _FALLBACK_COMPRESSION):
-        proc = _run(exe, [*prep, *_FIT, *compression, *_CONVERT], image)
+        proc = _run(exe, [*prep, *_FIT, *compression, *_CONVERT], source)
         if proc.returncode == 0 and proc.stdout.startswith(b"DDS "):
             return proc.stdout
 

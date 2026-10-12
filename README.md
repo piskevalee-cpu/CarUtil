@@ -83,13 +83,30 @@ Textures are written as **DXT5**, not DXT1. DXT1 keeps a single alpha bit per
 4×4 block, which turns a logo's antialiased edges into visible blocky steps;
 DXT5 keeps 8-bit alpha and renders far smoother for 22 KB instead of 11 KB.
 
+Sources vary in how they're drawn, so each is normalised for the dealer's dark
+tile:
+
+- **opaque with a painted (usually white) background** — knocked out to alpha,
+  so no bright rectangle appears in the tile;
+- **black artwork on transparency** — colour-inverted so the mark reads as
+  light artwork instead of vanishing into the background;
+- everything else is letterboxed onto the 256×64 canvas as-is.
+
+The test suite asserts every shipped logo is measurably visible against the
+tile colour, so a source that would come out invisible fails the build.
+
 The logo is written to both `material/ui/car_brand_logo/<dealer>.{dds,mat,tobj}`
 — the directory Car Mode reads — and `material/ui/truck_brand_logo/<brand>.*`.
 Missing a logo is not an error: a flat placeholder is used instead.
 
-Brands with no logo file yet: `bmw`, `honda`, `jeep`, `ram`. Add the image to
-`logos/` and it is picked up with no code change. `--brand-logo` uses a specific
-file, `--brand-logo-dir` a directory of your own.
+Adding a brand is two steps: drop its image in `logos/`, and add a row to
+`BRANDS` in `brands.py` mapping the name the user picks to that file. A brand
+with no image falls back to the flat placeholder rather than failing.
+`--brand-logo` uses a specific file, `--brand-logo-dir` a directory of your own.
+
+All 22 brands currently have artwork. Note the files are not all actually PNGs
+despite the extension — some are WebP and some SVG — which is why conversion
+goes through ImageMagick rather than a PNG decoder.
 
 | `--dry-run` | Report what would change; write nothing. |
 
