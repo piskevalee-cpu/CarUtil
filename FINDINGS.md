@@ -1186,3 +1186,55 @@ Fixed by coalescing `None` to `_DEFAULT_NM_PER_TONNE` at the call site, with
 `test_default_engine_target_applies` asserting the no-flag case. A default set
 on a parameter is not a default if a caller can pass `None` over it — which is
 exactly why the fix belongs at the boundary, not in the signature.
+
+## 23. A single Nm/t constant was wrong, and the Pilot found it
+
+Section 21 shipped 760 Nm/t, fitted from one car. It made the W223 correct
+and the **Honda Pilot uncontrollable** -- not merely quick, but violent. Two
+causes, and the second was invisible in the engine.
+
+### Cause 1: stall_torque_ratio (the real culprit)
+
+Launch force is `engine_torque x first_gear_total x stall_torque_ratio`,
+because the torque converter multiplies engine torque at the stall speed:
+
+| | stall ratio | first gear | launch force (arb.) |
+|---|---|---|---|
+| Mercedes (feels right) | 1.953 | 15.10 | 132454 |
+| Pilot, as shipped | **4.50** | 17.49 | **375985** (2.84x) |
+| Pilot, stall capped to 2.0 | 2.0 | 17.49 | 167104 (1.26x) |
+
+`stall_torque_ratio: 4.50` is a diesel torque-converter figure. SCS's four
+Road Trip transmissions use **1.8, 1.8, 1.82 and 2.0** -- never above 2.0. So
+the converter was multiplying an already-corrected 1694 Nm by 2.30x. That is
+why the Pilot felt unlike a fast car and unlike the Merc: no engine target can
+compensate for a multiplier that large, which is also why tuning torque alone
+had made it worse.
+
+Both mods also omit three keys that all four SCS car transmissions declare:
+`torque_converter_lock_gear`, `torque_converter_crawl` and
+`transmission_class`. `tune_transmission` now caps the stall ratio at 2.0,
+preserving anything already at or below it, and supplies the missing keys.
+
+### Cause 2: one constant cannot fit two cars
+
+760 Nm/t was right for a 2069 kg S-Class and wrong for a 2200 kg Pilot only
+because the two cars have different launch multipliers. But the deeper lesson
+is that a single constant fitted from one measurement cannot generalise at
+all. The fix is to stop exporting a constant and start asking.
+
+### Ask for the two numbers that actually determine it
+
+The walkthrough now prompts for the target 0-60 after the kerb weight, and
+`--acceleration SECONDS` does the same non-interactively. Torque follows from
+the calibration in `torque_for_time()`:
+
+    Nm = 520 x ((9.67 x mass/1550) / target)^(1/0.855)
+
+Self-consistency check: asking for the 4.63 s that 760 Nm/t actually produced
+returns 834 Nm/t, against the 760 that produced it -- within the error of the
+exponent. Real-world torque is never the target; the user's own target time
+is, and mass scales it explicitly.
+
+The prompt is skipped entirely when stdin is not a terminal, so scripted runs
+and CI cannot block.

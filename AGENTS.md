@@ -136,6 +136,14 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   Target per tonne of the mass *read back from the written chassis* instead
   (`--engine-nm-per-tonne`). A hand-tuned absolute figure is a guess wearing a
   decimal point.
+- **A single Nm/t constant cannot fit two cars.** 760 Nm/t made the W223
+  correct and the Pilot uncontrollable. Ask for the target 0-60 (`--acceleration`,
+  or step 5 of the walkthrough) and derive torque from mass *and* time.
+- **`stall_torque_ratio` is the most violent number in the drivetrain.**
+  Launch force is `torque x first_gear_total x stall_torque_ratio`. SCS's cars
+  use 1.8-2.0; the Pilot mod declares 4.50, a diesel figure that multiplied
+  its launch force 2.30x. No torque target can compensate. See `FINDINGS.md`
+  §23.
 - **Real-world torque is the wrong target for SCS's simulation.** SCS's own
   Road Trip cars all sit at 250-300 Nm/t and still take ~2.5x their real-world
   0-60. Matching the mod's stated output therefore produces a gutless car. The

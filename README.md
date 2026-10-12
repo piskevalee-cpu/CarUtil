@@ -100,6 +100,7 @@ You can always type a name instead of using the arrows (e.g. `sedan`,
 | `--no-prompt` | Never prompt, even on a terminal. |
 | `--password` | Password for a protected mod archive. |
 | `--no-car-tune` | Leave chassis physics alone (still writes `tags[]` + dealer bindings). |
+| `--acceleration` | Target 0-60 mph in seconds. The engine is tuned to hit it at the given `--mass`. Preferred over `--engine-nm-per-tonne`. |
 | `--force-physics` | Overwrite chassis physics even when the mod already has car-sane values. |
 | `--keep-physics` | Keep the global truck `physics.sii`. **Off by default** — see below. |
 
