@@ -1238,3 +1238,49 @@ is, and mass scales it explicitly.
 
 The prompt is skipped entirely when stdin is not a terminal, so scripted runs
 and CI cannot block.
+
+## 24. Body roll: the tuning table was never calibrated (correction)
+
+The converted cars rolled like boats. `_TUNING` and the `_PARATI` baseline had
+been carried since section 8 and derived by *extrapolating a 1994 wagon*, not
+by reading anything SCS ships. Measuring all four Road Trip chassis shows
+**every preset was outside SCS's own range on at least one key**:
+
+| key | our presets were | SCS cars actually use |
+|---|---|---|
+| `residual_travel` | 0.12 – **0.28** | 0.093 – **0.134** |
+| `air_resistance` | 0.07 – 0.25 | 0.37 – 0.596 |
+| `cog_height` | 0.32 – **0.80** | 0.52 – 0.738 |
+| `suspension_damping_factor` | 0.8 – **1.2** | 0.5 – 0.8 |
+| `sway_bar_stiffness` | 0.3 – **0.8** | 0.3 – 0.4 |
+
+`residual_travel` is the roll bug. It is the suspension's free travel before
+the springs engage, so 0.22 against a measured 0.10–0.11 is **more than double
+the compliance** — the body free-flies before anything resists it. The Pilot's
+chassis arrived carrying `0.10`, but the old threshold only replaced values
+below 0.12 and the SUV preset wrote 0.22 over it anyway.
+
+A second contribution: dropping the mod's `physics.sii` removed its
+`sway_bar_stiffness_factor: 3.0`, so we now inherit SCS's 1.0. That was
+correct on brakes and tyres but it halved the anti-roll the mod had been
+granting, which made the roll change feel sudden rather than gradual.
+
+### truck and car values overlap, so the threshold had to go
+
+Truck mods ship `residual_travel` of 0.09–0.10. SCS's cars use 0.093–0.134.
+**The ranges overlap**, so no threshold can separate them -- and the old
+"below 0.12 means truck" rule was starting to flag SCS's *own* Mustang value
+as a truck value. `residual_travel` is now written unconditionally.
+
+### The table is now copied, not invented
+
+Each preset is anchored to the SCS car closest to it in mass and character:
+Mustang 67 (1323 kg) for sedan and sports, Victoria 06 (1873 kg) for classic
+and muscle, Bronco 24 (2144 kg) for suv and offroad, F-150 23 for pickup. No
+value can be out of range by construction, and
+`test_car_physics_within_scs_ranges` asserts all 42 of them stay inside.
+
+The type ordering is preserved where SCS supports it -- tall heavy cars drag
+and roll most -- but two Parati-era assumptions are gone, because SCS's own
+cars contradict them: the Mustang is *more* draggy than the Victoria, and the
+sway bar spread across real cars is only 0.3–0.4.

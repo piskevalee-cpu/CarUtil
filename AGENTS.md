@@ -154,7 +154,16 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   figure. A 2.2 t car on a 9.4 t engine reaches 60 mph in three seconds. A car
   wheel with no `grip_factor` runs on truck tyre defaults and will not pull even
   once the engine is fixed. **Do not touch gearing** — the mods' 10-speed
-  already matches SCS's own 10R80. See `FINDINGS.md` §18 and §19.
+  already matches SCS's own 10R80. See `FINDINGS.md` §18, §19 and §23.
+- **`residual_travel` is the body-roll key.** Truck mods ship 0.09–0.10 and
+  SCS's cars use 0.093–0.134 — the ranges **overlap**, so no threshold
+  separates them and the key must be written unconditionally. The old preset
+  value of 0.22 was double the real compliance, which is why cars rolled like
+  boats. See `FINDINGS.md` §24.
+- **Never extrapolate a tuning table from one reference vehicle.** The whole
+  of `_TUNING` was scaled from the VW Parati for its entire life and every
+  value in it sat outside what SCS ships. Anchor each preset to the nearest
+  real SCS car, and keep the measured ranges in a test.
 - **SCS's conventions, measured across the base game.** All 181 engine units
   peak `torque_curve` at exactly 1.00, set `torque` equal to the figure their
   own `info[]` states, and never use `secondary_torque`. All 18 car wheel units
