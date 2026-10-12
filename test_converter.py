@@ -1572,7 +1572,9 @@ def test_brand_selection() -> None:
     check("unknown brand has no logo", B.logo_path("notacarbrand") is None)
 
     if L.imagemagick() is None:
-        check("ImageMagick present", False, "skipping conversion tests")
+        # ImageMagick is optional, so its absence is a skip, not a failure --
+        # the same rule the missing mod fixtures follow.
+        skip("brand logo conversion -- ImageMagick not installed")
         return
     check("ImageMagick present", True)
 
@@ -1736,29 +1738,33 @@ def test_ui() -> None:
     # False instead of propagating.
     try:
         raw_ok = U._raw_keys_available()
-        check("_raw_keys_available returns a bool without raising",
-              isinstance(raw_ok, bool))
+        check("_raw_keys_available returns a bool without raising", isinstance(raw_ok, bool))
     except BaseException as exc:                     # noqa: BLE001
         check("_raw_keys_available returns a bool without raising", False,
               f"{type(exc).__name__}: {exc}")
 
     # Simulate Windows by making the termios import fail, whichever way the
     # module tries to reach it.
-    builtins_dict = __builtins__ if isinstance(__builtins__, dict) \
-        else __builtins__.__dict__
-    real_import = builtins_dict["__import__"]
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) \
+        else __builtins__.__import__
 
     def _no_termios(name, *a, **kw):
         if name in ("termios", "tty"):
             raise ModuleNotFoundError(f"No module named {name!r}")
         return real_import(name, *a, **kw)
 
-    builtins_dict["__import__"] = _no_termios
+    if isinstance(__builtins__, dict):
+        __builtins__["__import__"] = _no_termios
+    else:
+        __builtins__.__import__ = _no_termios
     try:
         check("_raw_keys_available is False when termios is absent",
               U._raw_keys_available() is False)
     finally:
-        builtins_dict["__import__"] = real_import
+        if isinstance(__builtins__, dict):
+            __builtins__["__import__"] = real_import
+        else:
+            __builtins__.__import__ = real_import
 
     # And the menu must still be answerable when raw keys are unavailable.
     real_raw = U._raw_keys_available
@@ -1771,6 +1777,117 @@ def test_ui() -> None:
     finally:
         U._raw_keys_available = real_raw
         builtins.input = real_input
+
+
+def test_dependency_check() -> None:
+    section("dependency preflight")
+    import io
+
+    real_magick = C._logo.imagemagick
+    real_which = shutil.which
+    real_tty = C._tty
+    real_confirm = C._confirm
+
+    try:
+        # Nothing missing -> the check is silent and fast.
+        C._logo.imagemagick = lambda: "/usr/bin/magick"
+        check("no missing dependencies when ImageMagick is present",
+              C.missing_dependencies() == [])
+        out = io.StringIO()
+        real, sys.stdout = sys.stdout, out
+        try:
+            C.check_dependencies()
+        finally:
+            sys.stdout = real
+        check("preflight is silent when nothing is missing", out.getvalue() == "")
+
+        # Missing -> reported, with an install command, and no prompt when
+        # stdin is not a terminal (scripted runs and CI must never block).
+        C._logo.imagemagick = lambda: None
+        check("reports a missing ImageMagick",
+              C.missing_dependencies() == ["ImageMagick"])
+
+        C._tty = lambda: False
+        C._confirm = lambda prompt: (_ for _ in ()).throw(
+            AssertionError("preflight must not prompt without a terminal"))
+        out = io.StringIO()
+        real, sys.stdout = sys.stdout, out
+        try:
+            C.check_dependencies()
+        finally:
+            sys.stdout = real
+        text = out.getvalue()
+        check("explains what ImageMagick is for",
+              C.IMAGEMAGICK_WHY in text)
+        check("offers an install command without prompting",
+              any(m in text for m in ("winget", "brew", "apt-get", "dnf",
+                                      "yum", "pacman", "apk")),
+              text)
+
+        # With a terminal it must ask, and declining must not raise.
+        C._tty = lambda: True
+        asked = []
+        C._confirm = lambda prompt: (asked.append(prompt), False)[1]
+        out = io.StringIO()
+        real, sys.stdout = sys.stdout, out
+        try:
+            C.check_dependencies()
+        finally:
+            sys.stdout = real
+        check("offers to install on a terminal", len(asked) == 1, str(asked))
+        check("declining carries on without an error",
+              "Skipped" in out.getvalue())
+
+        # No package manager at all must still be non-fatal.
+        shutil.which = lambda name: None
+        check("no package manager -> no suggestion", C._suggest_install() is None)
+        out = io.StringIO()
+        real, sys.stdout = sys.stdout, out
+        try:
+            C.check_dependencies()
+        finally:
+            sys.stdout = real
+        check("no package manager still exits cleanly",
+              "nothing to offer" in out.getvalue())
+    finally:
+        C._logo.imagemagick = real_magick
+        shutil.which = real_which
+        C._tty = real_tty
+        C._confirm = real_confirm
+
+
+@guard
+def test_missing_imagemagick_still_converts() -> None:
+    """Declining the install must not turn into a failed conversion.
+
+    The brand logo is the only thing ImageMagick is used for, so without it
+    the mod still has to be written -- with the mod's own texture or the flat
+    placeholder. This is what makes the preflight prompt safe to offer.
+    """
+    section("conversion without ImageMagick")
+    if not Path(REF).exists():
+        skip("conversion without ImageMagick -- fixture not present")
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "noimg.scs"
+        script = (
+            "import sys, convert_to_car as C\n"
+            "C._logo.imagemagick = lambda: None\n"
+            "sys.exit(C.main(sys.argv[1:]))\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", script, str(REF), "--type", "sedan",
+             "--brand", "bmw", "-o", str(out)],
+            capture_output=True, text=True, cwd=str(HERE))
+        check("converts without ImageMagick", r.returncode == 0,
+              (r.stderr or r.stdout)[-300:])
+        check("says the logo was skipped", "ImageMagick" in r.stdout)
+        check("still writes the mod", out.is_file())
+        if out.is_file():
+            names = zipfile.ZipFile(out).namelist()
+            check("car_dealer registration still written",
+                  any(n.startswith("def/vehicle/car_dealer/") for n in names))
 
 
 def main() -> int:
@@ -1788,6 +1905,7 @@ def main() -> int:
     test_brand_logo()
     test_brand_selection()
     test_ui()
+    test_dependency_check()
     if not FIXTURES.is_dir():
         _report()
         return 0
@@ -1804,6 +1922,7 @@ def main() -> int:
     test_mass_cli_forms()
     test_prompt_never_blocks_non_tty()
     test_scripted_mode_still_works()
+    test_missing_imagemagick_still_converts()
     test_no_args_off_terminal_fails_clearly()
     test_missing_required_off_terminal()
     test_rt_prefix_default_output()

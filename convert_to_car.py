@@ -17,9 +17,11 @@ synthetic, reused and missing part is reported at the end.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import struct
+import subprocess
 import sys
 import zlib
 import zipfile
@@ -779,6 +781,157 @@ def _ask(prompt: str) -> str:
     except (EOFError, KeyboardInterrupt):
         print()
         raise SystemExit(1)
+
+
+def _confirm(prompt: str) -> bool:
+    """Ask a yes/no question; only an explicit y/yes continues."""
+    while True:
+        raw = _ask(f"  {prompt} [y/N] ").lower()
+        if raw in ("y", "yes"):
+            return True
+        if raw in ("", "n", "no"):
+            return False
+        print("  -> please answer y or n")
+
+
+# The one external program the converter needs. Everything else is stdlib.
+# ImageMagick turns a shipped brand logo into the 256x64 DDS the game reads;
+# the conversion itself works without it and falls back to the mod's own
+# texture or a flat placeholder.
+IMAGEMAGICK_WHY = "convert the shipped brand logos into the .dds the game reads"
+
+# Package managers in the order we prefer them. Each entry is
+# (manager name, argv). `winget` comes first because on Windows `convert`
+# already resolves to the filesystem tool in System32, and `magick` is the
+# name ImageMagick 7 installs; see logo.imagemagick.
+_INSTALLERS: list[tuple[str, list[str]]] = [
+    ("winget", ["winget", "install", "--id", "ImageMagick.ImageMagick",
+                "--silent", "--accept-package-agreements",
+                "--accept-source-agreements"]),
+    ("brew", ["brew", "install", "imagemagick"]),
+    ("apt-get", ["sudo", "apt-get", "install", "-y", "imagemagick"]),
+    ("dnf", ["sudo", "dnf", "install", "-y", "ImageMagick"]),
+    ("yum", ["sudo", "yum", "install", "-y", "ImageMagick"]),
+    ("pacman", ["sudo", "pacman", "-S", "--noconfirm", "imagemagick"]),
+    ("apk", ["sudo", "apk", "add", "imagemagick"]),
+]
+
+# Where a Windows install lands when PATH has not been refreshed yet.
+_WINDOWS_MAGICK_GLOBS = (
+    r"C:\Program Files\ImageMagick*",
+    r"C:\Program Files (x86)\ImageMagick*",
+)
+
+
+def missing_dependencies() -> list[str]:
+    """Names of external programs the converter needs but cannot find."""
+    missing = []
+    if _logo.imagemagick() is None:
+        missing.append("ImageMagick")
+    return missing
+
+
+def _suggest_install() -> tuple[str, list[str]] | None:
+    """The first install command whose package manager exists on this box."""
+    for manager, argv in _INSTALLERS:
+        if shutil.which(manager):
+            return manager, argv
+    return None
+
+
+def _refresh_magick_path() -> None:
+    """Make a just-installed ImageMagick visible to shutil.which.
+
+    Windows installers add ImageMagick to the machine PATH, but the running
+    process keeps its old copy, so `magick` stays "not found" for the rest of
+    this run. Prepending the install directory sidesteps needing a re-login.
+    """
+    if os.name != "nt" or _logo.imagemagick() is not None:
+        return
+    import glob
+    for pattern in _WINDOWS_MAGICK_GLOBS:
+        for folder in glob.glob(pattern):
+            exe = os.path.join(folder, "magick.exe")
+            if os.path.isfile(exe):
+                os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+                return
+
+
+def check_dependencies() -> None:
+    """Check for the external program before the walkthrough starts.
+
+    Interactive runs get offered an install. Scripted runs and CI never
+    block on the prompt -- they just print the command and carry on, since
+    the conversion itself does not require ImageMagick.
+    """
+    missing = missing_dependencies()
+    if not missing:
+        return
+
+    print()
+    _ui.heading("Before we start")
+    for name in missing:
+        print(f"  {_ui.paint('!', 'yellow')} {name} is not installed. "
+              f"It is needed to {IMAGEMAGICK_WHY}.")
+
+    suggestion = _suggest_install()
+    if suggestion is None:
+        print()
+        print("  " + _ui.paint("No supported package manager was found on this "
+                              "machine, so there is nothing to offer.", "dim"))
+        print("  " + _ui.paint("Continuing without it -- brand logos will fall "
+                              "back to the mod's own or a flat placeholder.",
+                              "dim"))
+        print()
+        return
+
+    _manager, argv = suggestion
+    command = " ".join(argv)
+    print()
+    print("  " + _ui.paint(command, "cyan"))
+
+    if not _tty():
+        # Piped or scripted: never block. The printed command is the answer.
+        print()
+        print("  " + _ui.paint("Not attached to a terminal, so not running it "
+                              "for you.", "dim"))
+        print()
+        return
+
+    print()
+    if not _confirm("Install it now?"):
+        print()
+        print("  " + _ui.paint("Skipped. Continuing without it -- brand logos "
+                              "will fall back to the mod's own or a flat "
+                              "placeholder.", "dim"))
+        print()
+        return
+
+    print()
+    print("  " + _ui.paint("Running the installer...", "dim"))
+    try:
+        rc = subprocess.run(argv).returncode
+    except OSError as exc:
+        print("  " + _ui.paint(f"x could not run the installer: {exc}", "red"))
+        return
+
+    if rc != 0:
+        print("  " + _ui.paint(f"x the installer exited with status {rc}",
+                              "red"))
+        print("  " + _ui.paint(f"You can run it yourself: {command}", "dim"))
+        return
+
+    _refresh_magick_path()
+    still = missing_dependencies()
+    if still:
+        # Installed, but this shell's PATH does not see it yet.
+        print("  " + _ui.paint("x installed, but not visible to this session.",
+                              "red"))
+        print("  " + _ui.paint("Open a new terminal and re-run, or put "
+                              "ImageMagick on your PATH.", "dim"))
+    else:
+        print("  " + _ui.paint(f"+ {_logo.imagemagick()} is ready.", "green"))
+    print()
 
 
 def prompt_source() -> Path:
@@ -1795,6 +1948,11 @@ def main(argv: list[str] | None = None) -> int:
     guided = _tty() and not args.no_prompt
     total = 5
 
+    # Optional but wanted-by-default: offer to install ImageMagick before the
+    # user invests answers in the walkthrough. Cheap when it is already there.
+    if not args.no_prompt:
+        check_dependencies()
+
     # ---- 1. source -------------------------------------------------------
     if args.input is None:
         if not guided:
@@ -1859,10 +2017,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             path = _brands.logo_path(args.brand)
         if path is not None:
-            try:
-                logo_dds = _logo.image_to_dds(path.read_bytes())
-            except (_logo.LogoError, OSError) as exc:
-                raise SystemExit(f"error: {path.name}: {exc}")
+            if _logo.imagemagick() is None:
+                # check_dependencies() already explained this and offered an
+                # install. Declining must not then abort the conversion, so
+                # carry on with the mod's own texture or the flat placeholder.
+                print()
+                _ui.warn(
+                    f"no ImageMagick, so {path.name} was not converted; the car "
+                    "keeps the mod's own logo or a flat placeholder"
+                )
+            else:
+                try:
+                    logo_dds = _logo.image_to_dds(path.read_bytes())
+                except (_logo.LogoError, OSError) as exc:
+                    raise SystemExit(f"error: {path.name}: {exc}")
 
     # ---- 4. weight -------------------------------------------------------
     mass = None
