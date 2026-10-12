@@ -1631,11 +1631,44 @@ def test_brand_selection() -> None:
     except L.LogoError:
         check("invalid image raises", True)
 
+    # Which(name) returning a path is not evidence the path is ImageMagick.
+    # On Windows shutil.which("convert") resolves to the FAT-to-NTFS converter
+    # in System32, so probing the name alone made every brand fail with a
+    # localised "invalid parameter" that named neither program.
+    check("_is_imagemagick rejects a non-ImageMagick binary",
+          L._is_imagemagick(sys.executable) is False)
+    check("_is_imagemagick tolerates a missing binary",
+          L._is_imagemagick(str(HERE / "no_such_binary_here")) is False)
+
+    real_which = shutil.which
+    try:
+        # Pretend only the Windows convert.exe exists, as it does on a machine
+        # with no ImageMagick installed: imagemagick() must decline it rather
+        # than hand it ImageMagick arguments.
+        shutil.which = lambda name: "C:\\Windows\\System32\\convert.exe" \
+            if name == "convert" else None
+        check("imagemagick() rejects convert.exe", L.imagemagick() is None)
+
+        # A binary that does identify itself as ImageMagick is still accepted,
+        # so the Linux path (where /usr/bin/convert IS ImageMagick) is intact.
+        real_probe = L._is_imagemagick
+        L._is_imagemagick = lambda exe: exe == "/usr/bin/convert"
+        try:
+            shutil.which = lambda name: "/usr/bin/convert" \
+                if name == "convert" else None
+            check("imagemagick() still returns a verified binary",
+                  L.imagemagick() == "/usr/bin/convert")
+        finally:
+            L._is_imagemagick = real_probe
+    finally:
+        shutil.which = real_which
+
 
 
 @guard
 def test_ui() -> None:
     section("terminal output (colour, banner, menus)")
+    import builtins
     import io
     import os as _os
 
@@ -1695,6 +1728,49 @@ def test_ui() -> None:
     check("_menu_label selects the marker",
           ">" in U._menu_label("Sedan", "saloon", True)
           and ">" not in U._menu_label("Sedan", "saloon", False))
+
+    # termios/tty are POSIX-only. An unguarded import here raised
+    # ModuleNotFoundError on Windows, which killed the guided walkthrough one
+    # prompt after the user pasted their mod path -- the numbered-menu
+    # fallback below never got the chance to engage. The probe must degrade to
+    # False instead of propagating.
+    try:
+        raw_ok = U._raw_keys_available()
+        check("_raw_keys_available returns a bool without raising",
+              isinstance(raw_ok, bool))
+    except BaseException as exc:                     # noqa: BLE001
+        check("_raw_keys_available returns a bool without raising", False,
+              f"{type(exc).__name__}: {exc}")
+
+    # Simulate Windows by making the termios import fail, whichever way the
+    # module tries to reach it.
+    builtins_dict = __builtins__ if isinstance(__builtins__, dict) \
+        else __builtins__.__dict__
+    real_import = builtins_dict["__import__"]
+
+    def _no_termios(name, *a, **kw):
+        if name in ("termios", "tty"):
+            raise ModuleNotFoundError(f"No module named {name!r}")
+        return real_import(name, *a, **kw)
+
+    builtins_dict["__import__"] = _no_termios
+    try:
+        check("_raw_keys_available is False when termios is absent",
+              U._raw_keys_available() is False)
+    finally:
+        builtins_dict["__import__"] = real_import
+
+    # And the menu must still be answerable when raw keys are unavailable.
+    real_raw = U._raw_keys_available
+    U._raw_keys_available = lambda: False
+    real_input = builtins.input
+    builtins.input = lambda prompt="": "2"
+    try:
+        check("arrow_menu falls back to the numbered menu", U.arrow_menu(
+            [("Sedan", ""), ("SUV", ""), ("Sports", "")], default=0) == 1)
+    finally:
+        U._raw_keys_available = real_raw
+        builtins.input = real_input
 
 
 def main() -> int:

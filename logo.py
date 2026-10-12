@@ -89,12 +89,32 @@ class LogoError(Exception):
 
 
 def imagemagick() -> str | None:
-    """Path to a usable ImageMagick binary, or None if there isn't one."""
+    """Path to a usable ImageMagick binary, or None if there isn't one.
+
+    The binary must be verified, not just found. On Windows
+    `shutil.which("convert")` happily returns C:\\Windows\\System32\\
+    convert.exe, the FAT-to-NTFS filesystem converter, because it answers to
+    the same name. Handing that to ImageMagick arguments exits 4 with a
+    localised "invalid parameter" message, so every logo conversion fails
+    with an error that names neither the real program nor the real cause.
+    """
     for name in ("magick", "convert"):
         found = shutil.which(name)
-        if found:
+        if found and _is_imagemagick(found):
             return found
     return None
+
+
+def _is_imagemagick(exe: str) -> bool:
+    """True if `exe` really is ImageMagick, identified by its version banner."""
+    try:
+        proc = subprocess.run(
+            [exe, "-version"], capture_output=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    banner = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+    return "ImageMagick" in banner
 
 
 def _run(exe: str, args: list[str], image: bytes) -> subprocess.CompletedProcess:

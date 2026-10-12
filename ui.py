@@ -164,11 +164,17 @@ def _numbered_menu(options: list[tuple[str, str]], default: int) -> int:
 
 
 def _raw_keys_available() -> bool:
-    """True if we can read single keypresses without Enter."""
-    import termios
-    import tty
+    """True if we can read single keypresses without Enter.
 
+    termios/tty are POSIX-only. The imports must sit inside the try: on
+    Windows they raise ModuleNotFoundError, and an unguarded import here
+    takes down the whole guided walkthrough one prompt after the user
+    pastes their mod path -- before the numbered-menu fallback can engage.
+    """
     try:
+        import termios
+        import tty
+
         termios.tcgetattr(sys.stdin.fileno())
         return True
     except Exception:
