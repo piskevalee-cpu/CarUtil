@@ -17,7 +17,7 @@ used only to convert brand logo images.
 | `brands.py` | ~92 | The brand list and the mapping to each logo file. |
 | `logo.py` | ~195 | Image → 256×64 DDS conversion. Uses ImageMagick. |
 | `ui.py` | ~192 | Banner, colour, arrow-key menus. Pure presentation. |
-| `test_converter.py` | ~1780 | 565 checks. Run it before every commit. |
+| `test_converter.py` | ~1860 | The suite. Run it before every commit. |
 | `FINDINGS.md` | — | Research log. **Several early sections were wrong; see Corrections.** |
 | `logos/` | — | 22 brand images. Not all are actually PNGs. |
 
@@ -30,17 +30,68 @@ python3 convert_to_car.py                         # guided walkthrough
 python3 convert_to_car.py mod.scs --type suv --brand porsche -o out.scs
 ```
 
-Tests must be at **565 passing, 0 failing** before you commit. A fresh clone
-reports skips, not failures, unless `CARUTIL_FIXTURES` is set — that is
-expected, not a regression.
+**The suite must exit 0 before you commit.** Do not trust a hardcoded check
+count: most checks are emitted from loops over the 22 brands, so the number
+moves with the brand list and with whether `CARUTIL_FIXTURES` is set. Read the
+exit code, not a remembered total. A fresh clone reports skips, not failures,
+when the fixtures are absent — that is expected, not a regression.
+
+**`python3` and `python` may be different interpreters** (on the Windows dev
+box, 3.14 and 3.11). Pick one and use it for both the tests and the CLI.
+
+## Dependencies
+
+**ImageMagick is the only external program**, and it is used for exactly one
+thing: turning a shipped brand logo image into the 256×64 DDS the game reads.
+Everything else is the standard library. `main()` runs `check_dependencies()`
+before the walkthrough, which reports a missing ImageMagick and offers the
+package-manager command for the platform. Two rules hold it together:
+
+- **Declining the install must never abort the conversion.** A missing
+  ImageMagick downgrades the *logo* only — the mod falls back to its own
+  texture or the flat placeholder and the car is still written. `logo_dds`
+  stays `None` and `convert()` takes the fallback path.
+- **The preflight must never block when stdin is not a terminal**, or scripted
+  runs and CI hang. It prints the command and returns instead.
+
+An explicitly passed `--brand-logo` is the exception: that image was asked for
+by name, so failing loudly is correct.
+
+## Cross-platform traps
+
+These cost real debugging time. Both are Windows-only failures that are silent
+on Linux, which is exactly why they survive review.
+
+**`shutil.which("convert")` is not ImageMagick on Windows.** It returns
+`C:\Windows\System32\convert.exe`, the FAT→NTFS filesystem converter. Handing
+that binary ImageMagick arguments exits 4 with a *localised* "invalid
+parameter" message, so every logo fails and the error names neither program
+nor cause. `logo.imagemagick()` therefore **verifies** the candidate by
+running `<exe> -version` and looking for `ImageMagick` in the banner. Do not
+revert that to a bare `which()`. It prefers `magick` (ImageMagick 7) over
+`convert` (ImageMagick 6), which is what keeps Linux correct.
+
+**`termios`/`tty` are POSIX-only.** They must stay *inside* the `try` in
+`ui._raw_keys_available()`. An import above the guard raises
+`ModuleNotFoundError` on Windows and kills the guided walkthrough one prompt
+after the user pastes their mod path — step 1 of 5 — before the numbered-menu
+fallback can engage.
+
+**A Windows ImageMagick install is invisible to the running process.** The
+installer updates the machine PATH, but the process keeps its old copy, so
+`magick` stays "not found" for the rest of the run. `_refresh_magick_path()`
+prepends the install directory to `os.environ["PATH"]` to avoid needing a
+re-login. If you add a second dependency, it needs the same treatment.
 
 ## Non-obvious constraints
 
 **The test fixtures are third-party assets and must never be committed.** Real
-car mods live in `../testing-covnverter/` and are not in the repo. `git add` is
-already scoped to specific files, but do not widen it.
+car mods live in `../testing-covnverter/` — the typo is in the real directory
+name — and are not in the repo. `git add` is already scoped to specific files,
+but do not widen it. `*.scs` is gitignored, so a mod dropped in the working
+directory is safe.
 
-**`/tmp` is tmpfs on this machine — it is RAM, not disk.** Each conversion
+**`/tmp` is tmpfs on the Linux box — it is RAM, not disk.** Each conversion
 writes a 100–200 MB archive. A dozen test runs filled `/tmp` to 4 GB and took
 the machine down to 1.9 GB free RAM. Delete scratch output as you go. Check
 with `df -h /tmp`.
@@ -100,10 +151,14 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
 ## Before committing
 
 ```bash
-python3 test_converter.py          # 565 pass, 0 fail
+python3 test_converter.py          # must exit 0
 git status --short                 # only intended files
 git diff --cached --stat           # sanity-check the size
 ```
+
+A missing ImageMagick is a **skip**, not a failure, so a green run without
+ImageMagick is still a valid green run. If you want the logo tests to actually
+execute, install ImageMagick and put it on PATH.
 
 Push to `main`. Pushes occasionally fail once with a bare "remote rejected" and
 succeed on an unchanged retry; that is transient, not a repo problem.

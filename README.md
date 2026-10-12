@@ -26,7 +26,9 @@ to install and nothing to configure — the brand logos come included.
 ---
 
 Python 3.9+, standard library only — no dependencies. (ImageMagick is optional
-and only used to convert brand logo images.)
+and only used to convert brand logo images. If it is missing, the script says so
+up front and offers to install it for your platform; decline and the car still
+converts, just with the mod's own logo or a flat placeholder.)
 
 ## Usage
 
