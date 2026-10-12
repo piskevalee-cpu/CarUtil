@@ -3,6 +3,28 @@
 Converts a truck-classified American Truck Simulator mod into a **Road Trip**
 vehicle, so it registers in the Car Dealer and drives with car physics.
 
+## TL;DR
+
+1. **Get the files** — download the zip and extract it, or clone the repo:
+
+   ```bash
+   git clone https://github.com/piskevalee-cpu/CarUtil.git
+   ```
+
+2. **Run it:**
+
+   ```bash
+   python3 convert_to_car.py
+   ```
+
+3. **Have fun!**
+
+That's the whole thing. It asks you where your mod is, what kind of car it is,
+and which brand, then writes a `.scs` and tells you where to copy it. Nothing
+to install and nothing to configure — the brand logos come included.
+
+---
+
 Python 3.9+, standard library only — no dependencies. (ImageMagick is optional
 and only used to convert brand logo images.)
 
