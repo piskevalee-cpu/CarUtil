@@ -1412,3 +1412,64 @@ you own, and it is offered in the **Dispatch Market**, not Quick Jobs. The 149
 `car_job` units are the Dispatch Market's jobs and they do match on
 `tags[]` — which is why the tag fix in section 26 matters, and why a car that
 appears in neither market is a different fault entirely.
+
+## 28. Top speed, creep, and rebuilding the engine on SCS's curve
+
+The Pilot pulled to 140 mph with no falloff, and reached 120 in 17 s.
+
+### The curve never tapered
+
+Every SCS engine curve returns to **0.00** at the top of its rev range — the
+F-150 goes `(4500, 1.00) … (8000, 0.00)`. The Pilot mod's curve ends at
+`(6400, 0.53)`: **93% of peak torque still on at the limiter**. So power kept
+climbing right up to the cut, and there was nothing to stop the car.
+
+Measured against SCS's four cars:
+
+| | mass | peak power | power peak |
+|---|---|---|---|
+| our Pilot | 2200 kg | **1062 kW (1424 hp)** | 6250 rpm |
+| Bronco 2.7 | 2144 kg | 265 kW (356 hp) | 5000 rpm |
+| F-150 5.0 | 1873 kg | 262 kW (351 hp) | 6000 rpm |
+| Mustang 289 | 1323 kg | 180 kW (241 hp) | 4500 rpm |
+| Victoria 4.6 | 1873 kg | 236 kW (316 hp) | 4500 rpm |
+
+Four times the power of a car of the same mass. Scaling the `torque` scalar
+could never fix this: a flat curve makes power a function of the rev limit,
+so the limiter alone decided the top speed.
+
+### Horsepower is the right target, and the shape comes from SCS
+
+`tune_engine` now rebuilds the curve from `SCS_TORQUE_SHAPE` — the F-150's
+shape — rather than scaling the mod's. Two knobs:
+
+- **`--power HP`** sets peak power. SCS's own cars are 202-398 hp.
+- **`--peak-power-rpm`** sets where that power peaks, by stretching the shape's
+  rpm axis. SCS's are 4500-6000 rpm.
+
+The rev axis is re-stretched a few times against the *clipped, rounded* curve
+to converge on the requested rev, and the amplitude is sized from that same
+clipped curve. Sizing from the unclipped one silently under-delivered: a 350 hp
+request at 6000 rpm produced 315, because clipping points above the 6400 rpm
+limit removed the power peak the amplitude had been sized against.
+
+### The creep was the same bug
+
+Rebuilding from SCS's shape fixes the walk-away too, because the shape starts
+at `(0, 0)`. Idle torque falls from ~800 Nm to 159-368 Nm depending on where
+power peaks, against 118-217 Nm for SCS's own cars. **A higher peak-power rev
+gives less idle torque**, because stretching the axis pushes the shape's first
+real sample above idle:
+
+| peak power at | peak torque | idle torque |
+|---|---|---|
+| 4500 rpm | 614 Nm | 368 Nm |
+| 6000 rpm | 426 Nm | 170 Nm |
+
+So 6000 rpm is the creep answer as well as the top-speed one.
+
+### The trade-off is now explicit
+
+`--acceleration` is kept as the older proxy. It targets a 0-60 time, which
+forces high torque, which forces high power. Horsepower is the honest knob:
+it bounds the top end directly and leaves the low end to the shape.

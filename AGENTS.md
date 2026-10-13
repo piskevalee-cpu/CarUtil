@@ -148,6 +148,12 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
 - **A single Nm/t constant cannot fit two cars.** 760 Nm/t made the W223
   correct and the Pilot uncontrollable. Ask for the target 0-60 (`--acceleration`,
   or step 5 of the walkthrough) and derive torque from mass *and* time.
+- **An engine needs its horsepower, not its torque.** Scaling the `torque`
+  scalar cannot bound top speed: the mods' curves are flat and never taper, so
+  power keeps climbing to the rev limiter and the car pulls to 140 mph with
+  nothing to stop it. `tune_engine` rebuilds the curve on SCS's shape against
+  `--power` and `--peak-power-rpm`. SCS's cars are 202-398 hp at 4500-6000 rpm.
+  See `FINDINGS.md` §28.
 - **`stall_torque_ratio` is the most violent number in the drivetrain.**
   Launch force is `torque x first_gear_total x stall_torque_ratio`. SCS's cars
   use 1.8-2.0; the Pilot mod declares 4.50, a diesel figure that multiplied

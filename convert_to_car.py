@@ -17,6 +17,7 @@ synthetic, reused and missing part is reported at the end.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import shutil
@@ -31,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from sii import (  # noqa: E402
     count_indexed,
     set_indexed,
+    unit_body_end,
     get_all_indexed,
     get_key,
     remove_keys,
@@ -1157,6 +1159,85 @@ _CAL_MIN_NM = 200.0
 _CAL_MAX_NM = 3000.0
 
 
+# The torque curve shape SCS's own engines use, taken from the F-150 V8 in
+# dlc_rt_ford.scs: it starts at (0, 0), peaks at 1.00, and returns to 0.00 at
+# the top of the rev range.
+#
+# Rebuilding the curve from this rather than scaling the mod's own is what
+# fixes the two faults sections 25 and 28 describe. The mods' curves are flat
+# diesel shapes that never taper -- the Pilot holds 93% of peak torque at its
+# 6400 rpm limiter -- so power keeps climbing to the limiter and the car pulls
+# to 140 mph with no falloff. This shape tapers, and its zero origin keeps idle
+# torque low enough that the car does not walk away when Drive is selected.
+SCS_TORQUE_SHAPE = [
+    (0, 0.0), (1000, 0.60), (1500, 0.75), (2000, 0.80), (2700, 0.78),
+    (3000, 0.87), (4000, 0.90), (4500, 1.00), (5000, 0.92), (6000, 0.85),
+    (8000, 0.0),
+]
+
+# Measured across SCS's four Road Trip cars: 202-398 hp at 105-153 hp/tonne,
+# with peak power between 4500 and 6000 rpm. The light three sit at 126-153
+# hp/tonne; the F-150 figure is from its 3.8 t dual-cab chassis and would drag
+# the average down, so the default follows the cars that weigh like ours.
+_DEFAULT_HP_PER_TONNE = 150.0
+_DEFAULT_PEAK_POWER_RPM = 4500
+
+# Peak torque = peak power / angular velocity, so these bound each other.
+_MIN_HP = 40.0
+_MAX_HP = 900.0
+
+
+def build_power_curve(
+    hp: float,
+    peak_rpm: int,
+    rpm_limit: int,
+    shape: list[tuple[int, float]] | None = None,
+) -> tuple[list[tuple[int, float]], float]:
+    """Reshape SCS's torque curve to deliver `hp` with peak power at `peak_rpm`.
+
+    Returns (curve fractions, peak torque in Nm). The curve keeps SCS's shape
+    and its (0, 0) origin; only its rpm axis is stretched to place the power
+    peak where asked, and its amplitude scaled to the horsepower asked for.
+
+    The returned curve is written with `torque:` set to the returned peak, so
+    the archive follows SCS's own convention: `torque` is peak newton-metres
+    and the curve is a 0..1 shape over it.
+    """
+    shape = shape or SCS_TORQUE_SHAPE
+    # rpm at which this shape peaks in power, so we can move that peak.
+    ref = max(r * f for r, f in shape)
+    if ref <= 0:
+        raise ValueError("torque shape has no power peak")
+
+    # The curve is a list of discrete samples, so argmax(r*f) is quantised and
+    # lands beside the requested rev rather than on it. Re-stretch on the
+    # clipped, rounded curve a few times to converge on it -- otherwise a
+    # request for 5000 rpm silently produces 5882.
+    stretch = peak_rpm / ref
+    curve: list[tuple[int, float]] = []
+    for _ in range(6):
+        moved = [(int(round(r * stretch)), f) for r, f in shape]
+        moved = [(r, f) for r, f in moved if 0 <= r <= rpm_limit]
+        if not moved or moved[-1][0] < rpm_limit:
+            moved.append((rpm_limit, 0.0))
+        curve = moved
+        got = max(curve, key=lambda p: p[0] * p[1])[0]
+        if got == peak_rpm or got <= 0:
+            break
+        stretch *= peak_rpm / got
+
+    # Scale from the curve that will actually be written, not the unclipped
+    # one: dropping points above the rev limit can remove the power peak, and
+    # sizing from the unclipped list would then deliver less than asked. A
+    # rev limit below the shape's own power peak leaves nothing to size from.
+    top = max(f * r for r, f in curve)
+    if top <= 0:
+        raise ValueError(
+            f"a rev limit of {rpm_limit} rpm is too low to place a power peak")
+    peak_torque = (hp * 745.699872) / (top * 2 * math.pi / 60)
+    return curve, round(peak_torque)
+
+
 def torque_for_time(mass_kg: float, seconds: float) -> float:
     """Peak engine torque that yields `seconds` to 60 mph at `mass_kg`.
 
@@ -1169,6 +1250,68 @@ def torque_for_time(mass_kg: float, seconds: float) -> float:
     seconds_at_reference = _CAL_TIME_S * mass_factor
     nm = _CAL_TORQUE_NM * (seconds_at_reference / seconds) ** (1 / _CAL_EXPONENT)
     return max(_CAL_MIN_NM, min(_CAL_MAX_NM, nm))
+
+
+def prompt_power(mass_kg: float) -> tuple[float | None, int | None]:
+    """Ask how much power the car should make, and where it should peak.
+
+    Returns (hp, peak_power_rpm), either of which may be None to keep the
+    default. Skipped entirely when stdin is not a terminal, so scripted runs
+    and CI never block.
+    """
+    if not _tty():
+        return None, None
+
+    default_hp = _DEFAULT_HP_PER_TONNE * mass_kg / 1000.0
+    print()
+    print("  How powerful should this car be?")
+    print("    Enter peak power in horsepower. SCS's own Road Trip cars make")
+    print("    202-398 hp, so 250-400 suits most cars.")
+    print(f"    Press Enter for {default_hp:.0f} hp.")
+    print()
+    hp: float | None = None
+    while hp is None:
+        try:
+            raw = input(f"  Power [{default_hp:.0f} hp]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  cancelled -- using the measured default.")
+            return None, None
+        if not raw:
+            hp = default_hp
+            break
+        try:
+            value = float(raw.lower().rstrip("hp ").rstrip())
+        except ValueError:
+            print("  -> enter a number of horsepower, e.g. 350")
+            continue
+        if not (_MIN_HP <= value <= _MAX_HP):
+            print(f"  -> between {_MIN_HP:.0f} and {_MAX_HP:.0f} hp")
+            continue
+        hp = value
+
+    peak = _DEFAULT_PEAK_POWER_RPM
+    print()
+    print("  Where should that power peak?")
+    print("    Higher revs give more mid-range pull and a higher top speed;")
+    print("    lower revs give a softer launch. SCS's cars peak at 4500-6000.")
+    print(f"    Press Enter for {peak} rpm.")
+    print()
+    while True:
+        try:
+            raw = input(f"  Peak power [{peak} rpm]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return hp, None
+        if not raw:
+            return hp, None
+        try:
+            value = int(float(raw.lower().rstrip("rpm ").rstrip()))
+        except ValueError:
+            print("  -> enter a rev number, e.g. 4500")
+            continue
+        if not (1000 <= value <= 9000):
+            print("  -> between 1000 and 9000 rpm")
+            continue
+        return hp, value
 
 
 def prompt_acceleration(mass_kg: float) -> float | None:
@@ -1552,11 +1695,88 @@ def _ensure_torque_origin(text: str) -> tuple[str, bool]:
     return "\n".join(lines) + "\n", True
 
 
+def _declared_peak_nm(text: str) -> float:
+    """Peak newton-metres the engine currently declares (torque x curve max)."""
+    tq = get_key(text.splitlines(), "torque")
+    peak = _primary_curve_peak(text)
+    if not tq or not peak:
+        return 0.0
+    m = re.match(r"^([+-]?\d+(?:\.\d+)?)", tq)
+    return float(m.group(1)) * peak if m else 0.0
+
+
+def _tune_engine_to_hp(text: str, rep: Report, hp: float,
+                       peak_rpm: int | None,
+                       target_source: str | None,
+                       force: bool = False) -> str:
+    """Rebuild the engine to make `hp`, using SCS's torque curve shape.
+
+    Scaling the declared `torque` alone cannot fix a top-end problem. The mods'
+    curves are flat diesel shapes that never taper -- the Pilot is still at 93%
+    of peak torque at its 6400 rpm limiter -- so power keeps climbing to the
+    limiter however the scalar is set, and the car pulls to 140 mph with
+    nothing to stop it. The shape has to change, and the shape to change it to
+    is the one SCS ships.
+
+    Rebuilding also brings the bottom end back in line, because SCS's curve
+    starts at (0, 0): idle torque falls from roughly 800 Nm to something in the
+    low hundreds, which is what stops the car walking away when Drive is
+    selected.
+    """
+    m = re.search(r"^\s*rpm_limit:\s*(\d+)", text, re.M)
+    if m:
+        rpm_limit = int(m.group(1))
+    else:
+        points = re.findall(r"^\s*torque_curve\[\]:\s*\(\s*(\d+)\s*,",
+                            text, re.M)
+        if not points:
+            rep.warn("engine has no rpm_limit and no torque_curve; "
+                     "leaving it alone")
+            return text
+        rpm_limit = max(int(p) for p in points)
+
+    peak = max(1000, min(int(peak_rpm or _DEFAULT_PEAK_POWER_RPM), rpm_limit))
+    hp = max(_MIN_HP, min(float(hp), _MAX_HP))
+    curve, peak_torque = build_power_curve(hp, peak, rpm_limit)
+    if peak_torque < 1:
+        return text
+
+    lines = text.splitlines()
+    kept = [ln for ln in lines
+            if not re.match(r"^\s*torque_curve\[\]:", ln)]
+    if len(kept) == len(lines):
+        rep.warn("engine has no torque_curve to reshape; leaving it alone")
+        return text
+
+    end = unit_body_end(kept)
+    kept[end:end] = [f"\ttorque_curve[]: ({r}, {f})" for r, f in curve]
+
+    # `torque` is peak newton-metres and the curve is a 0..1 shape over it --
+    # SCS's own convention.
+    kept = set_key(kept, "torque", str(peak_torque))
+
+    # secondary_torque followed the scalar before; keep it proportional to the
+    # change in peak so the ratio the mod author chose survives.
+    old_peak = _declared_peak_nm(text)
+    if old_peak > 0:
+        kept, _ = _rescale_in_place(kept, "secondary_torque",
+                                    peak_torque / old_peak)
+
+    rep.action(
+        f"engine rebuilt to {hp:.0f} hp peaking at {peak} rpm: "
+        f"{peak_torque} Nm peak over {len(curve)} curve points, on SCS's shape"
+        + (f" ({target_source})" if target_source else "")
+    )
+    return "\n".join(kept) + "\n"
+
+
 def tune_engine(text: str, rep: Report, force: bool = False,
                 target_nm: int | None = None,
                 nm_per_tonne: float | None = _DEFAULT_NM_PER_TONNE,
                 tonnes: float = 1.0,
-                target_source: str | None = None) -> str:
+                target_source: str | None = None,
+                target_hp: float | None = None,
+                peak_power_rpm: int | None = None) -> str:
     """Rescale an engine's output to the figure its own info[] declares.
 
     `torque` is multiplied down and `secondary_torque` by the same factor, so
@@ -1578,10 +1798,18 @@ def tune_engine(text: str, rep: Report, force: bool = False,
     if tonnes <= 0:
         raise ValueError("tonnes must be positive")
 
-    # An explicit --engine-torque replaces the ratio; it is a deliberate
-    # override, not a second opinion.
+    # An explicit --engine-torque or --acceleration replaces the ratio; both
+    # are deliberate overrides, not second opinions.
     if target_nm is not None:
         nm_per_tonne = None
+
+    # Horsepower is the preferred target: it bounds the top end directly,
+    # whereas torque alone does not, because a flat curve keeps producing
+    # power all the way to the rev limiter. It rebuilds the curve from SCS's
+    # shape rather than scaling the mod's.
+    if target_hp is not None:
+        return _tune_engine_to_hp(text, rep, target_hp, peak_power_rpm,
+                                  target_source, force=force)
 
     stated = stated_engine_torque(text)
     if stated is None and target_nm is None and nm_per_tonne is None:
@@ -1784,6 +2012,8 @@ def convert(
     engine_torque: int | None = None,
     engine_nm_per_tonne: float | None = None,
     target_source: str | None = None,
+    engine_hp: float | None = None,
+    peak_power_rpm: int | None = None,
 ) -> Report:
     rep = Report()
     if src.wrapper_note:
@@ -1925,7 +2155,9 @@ def convert(
                               if engine_nm_per_tonne is None
                               else engine_nm_per_tonne),
                 target_source=target_source,
-                tonnes=tonnes)
+                tonnes=tonnes,
+                target_hp=engine_hp,
+                peak_power_rpm=peak_power_rpm)
         elif car_tune and re.match(
             r"^def/vehicle/[a-z_]*tire/.*\.sii$", name
         ):
@@ -2467,6 +2699,23 @@ def main(argv: list[str] | None = None) -> int:
              "whose target is not the real engine's output",
     )
     ap.add_argument(
+        "--power",
+        type=float,
+        metavar="HP",
+        help="target peak power in horsepower. Preferred: the engine's torque "
+             "curve is rebuilt on SCS's shape to make this much power, which "
+             "bounds the top speed and keeps idle torque low. SCS's own Road "
+             "Trip cars make 202-398 hp",
+    )
+    ap.add_argument(
+        "--peak-power-rpm",
+        type=int,
+        metavar="RPM",
+        help="rev at which peak power occurs, e.g. 4500. Sets where the "
+             "torque curve starts to fall away; SCS's cars peak at "
+             "4500-6000 rpm",
+    )
+    ap.add_argument(
         "--acceleration",
         type=float,
         metavar="SECONDS",
@@ -2641,15 +2890,25 @@ def main(argv: list[str] | None = None) -> int:
     # Every path must bind `wanted`: --mass skips the guided prompts entirely,
     # and an unbound name here would only surface at the end of the run.
     wanted = args.acceleration
+    power = args.power
+    peak_rpm = args.peak_power_rpm
     if guided:
         # Interactive: only when a terminal is attached, so scripted runs
         # and CI never block on stdin.
         _ui.step(4, total, "Set the kerb weight")
         mass = prompt_weight(args.vtype, None)
-        if wanted is None:
+        kerb = sum(mass) if mass else default_total(args.vtype)
+        # Power is asked for first and is the preferred target; 0-60 is the
+        # older proxy, kept for scripts, and only offered when neither a
+        # --power nor a --acceleration was given on the command line.
+        if power is None and wanted is None:
+            _ui.step(5, total, "Set the power")
+            power, peak_rpm = prompt_power(kerb)
+        elif wanted is None:
             _ui.step(5, total, "Set the acceleration")
-            wanted = prompt_acceleration(
-                sum(mass) if mass else default_total(args.vtype))
+            wanted = prompt_acceleration(kerb)
+
+    kerb = sum(mass) if mass else default_total(args.vtype)
 
     # A target 0-60 supersedes the fitted Nm/t constant: it is measured from
     # the user's own two numbers instead of extrapolated from one car. Seeded
@@ -2658,9 +2917,16 @@ def main(argv: list[str] | None = None) -> int:
     target_source = (f"--engine-nm-per-tonne {engine_nm_per_tonne:g}"
                      if engine_nm_per_tonne is not None else None)
     if wanted is not None:
-        kerb = sum(mass) if mass else default_total(args.vtype)
         engine_nm_per_tonne = torque_for_time(kerb, wanted) / (kerb / 1000.0)
         target_source = f"{wanted:.1f}s 0-60 at {kerb:.0f} kg"
+
+    # With no explicit target at all, power defaults to the band SCS's own
+    # cars occupy rather than the old 760 Nm/t constant, which produced 1424 hp.
+    if power is None and wanted is None and args.engine_nm_per_tonne is None \
+            and args.engine_torque is None:
+        power = _DEFAULT_HP_PER_TONNE * kerb / 1000.0
+        target_source = (f"{_DEFAULT_HP_PER_TONNE:g} hp/tonne default "
+                         f"({kerb:.0f} kg)")
 
     # ---- 6. output -------------------------------------------------------
     if args.output is not None:
@@ -2688,6 +2954,8 @@ def main(argv: list[str] | None = None) -> int:
         engine_torque=args.engine_torque,
         engine_nm_per_tonne=engine_nm_per_tonne,
         target_source=target_source,
+        engine_hp=power,
+        peak_power_rpm=peak_rpm,
         dry_run=args.dry_run,
         car_tune=args.car_tune,
         mass=mass,

@@ -13,6 +13,7 @@ Two levels:
 from __future__ import annotations
 
 import functools
+import math
 import hashlib
 import os
 import re
@@ -578,17 +579,23 @@ def test_default_engine_target_applies() -> None:
         mass = sum(float(x) for x in re.findall(
             r"^\s*kerb_weight(?:\[\d+\])?\s*:\s*([\d.]+)",
             z.read(ch).decode(), re.M))
-        peak = C._primary_curve_peak(et)
+        curve = {int(m.group(1)): float(m.group(2)) for m in re.finditer(
+            r"^\s*torque_curve\[\]:\s*\(\s*(\d+)\s*,\s*([\d.]+)", et, re.M)}
         tq = float(C.get_key(et.splitlines(), "torque"))
-        # This regressed once: convert() passed the CLI's None straight through,
-        # which overrode tune_engine's own default and silently fell back to
-        # the mod's stated torque (833 Nm instead of 1672).
-        check("default target is applied without any flag",
-              abs(tq * peak - 760 * mass / 1000) < 2,
-              f"peak {tq * peak:.0f} Nm, expected "
-              f"{760 * mass / 1000:.0f} Nm for {mass:.0f} kg")
-        check("...and it is far above the mod's stated output",
-              tq * peak > 1000, f"{tq * peak:.0f} Nm")
+        # With no flags the engine is rebuilt to the default 150 hp/tonne on
+        # SCS's curve shape -- which is what replaced the old 760 Nm/t scalar
+        # default, and the reason the car no longer pulls to 140 mph.
+        peak_rpm = max(curve, key=lambda r: r * curve[r])
+        hp = tq * curve[peak_rpm] * peak_rpm * 2 * math.pi / 60 / 745.699872
+        want_hp = C._DEFAULT_HP_PER_TONNE * mass / 1000.0
+        check("default power is the SCS band, not the old Nm/t constant",
+              abs(hp - want_hp) < 2, f"{hp:.0f} hp, expected {want_hp:.0f}")
+        check("...and that is in the range SCS's own cars occupy",
+              150 <= hp <= 600, f"{hp:.0f} hp")
+        check("curve ends at zero, so there is no endless pull",
+              curve[max(curve)] == 0.0, str(curve[max(curve)]))
+        check("...and keeps the (0, 0) origin every SCS engine has",
+              curve.get(0) == 0.0)
 
 
 def test_tune_wheel_adds_car_grip() -> None:
@@ -2500,6 +2507,84 @@ def test_every_brand_gets_its_own_vendor() -> None:
               str(sorted(logo))[:2])
 
 
+def test_build_power_curve_hits_its_target() -> None:
+    section("the rebuilt curve makes the horsepower asked for")
+    import math
+
+    for hp, rpm in ((250, 4500), (330, 4500), (350, 5000), (398, 6000)):
+        curve, peak = C.build_power_curve(hp, rpm, 6400)
+        d = dict(curve)
+        got_rpm = max(d, key=lambda r: r * d[r])
+        got_hp = peak * d[got_rpm] * got_rpm * 2 * math.pi / 60 / 745.699872
+        check(f"{hp} hp peaks at {rpm} rpm",
+              abs(got_hp - hp) < 1.5, f"delivered {got_hp:.0f} hp at {got_rpm}")
+        check(f"...at the requested rev, not a neighbouring sample",
+              got_rpm == rpm, f"peaked at {got_rpm}")
+        check("...curve keeps the (0, 0) origin", d.get(0) == 0.0)
+        check("...and returns to zero at the engine's rev limit",
+              d[max(d)] == 0.0)
+
+    # A low rev limit must not let SCS's 8000 rpm top end in.
+    short, _ = C.build_power_curve(350, 4500, 4000)
+    check("a low rev limit clips the shape", max(dict(short)) == 4000)
+    check("...and the clip still ends at zero", dict(short)[4000] == 0.0)
+    # A rev limit below where the shape peaks leaves nothing to size from, and
+    # used to divide by zero.
+    try:
+        C.build_power_curve(350, 4500, 900)
+        check("an impossible rev limit raises", False, "no error")
+    except ValueError:
+        check("an impossible rev limit raises cleanly", True)
+
+    # Monotonic: more horsepower must mean more torque.
+    a = C.build_power_curve(300, 4500, 6400)[1]
+    b = C.build_power_curve(400, 4500, 6400)[1]
+    check("more hp => more peak torque", b > a)
+
+
+def test_prompt_power_never_blocks() -> None:
+    section("the power prompt respects a non-interactive stdin")
+    real = C._tty
+    try:
+        C._tty = lambda: False
+        check("skipped when stdin is not a terminal",
+              C.prompt_power(2200) == (None, None))
+    finally:
+        C._tty = real
+
+    import builtins
+    real_input = builtins.input
+    builtins.input = lambda prompt="": (_ for _ in ()).throw(
+        AssertionError("prompt must not block without a terminal"))
+    try:
+        check("and never prompts in that case",
+              C.prompt_power(2200) == (None, None))
+    finally:
+        builtins.input = real_input
+
+
+@guard
+def test_real_engine_power_shape() -> None:
+    section("real mods: engine lands in SCS's power band")
+    for label, path in (("Pilot", PILOT), ("W223", W223)):
+        src = C.ModSource(path)
+        for e in [n for n in src.readable
+                  if re.search(r"/engine/.*\.sii$", n)]:
+            out = C._tune_engine_to_hp(src.read(e), C.Report(), 350, 5000, None)
+            curve = {int(m.group(1)): float(m.group(2)) for m in re.finditer(
+                r"^\s*torque_curve\[\]:\s*\(\s*(\d+)\s*,\s*([\d.]+)", out, re.M)}
+            tq = float(C.get_key(out.splitlines(), "torque"))
+            got_rpm = max(curve, key=lambda r: r * curve[r])
+            hp = tq * curve[got_rpm] * got_rpm * 2 * math.pi / 60 / 745.699872
+            check(f"{label}: makes the requested 350 hp", abs(hp - 350) < 2,
+                  f"{hp:.0f} hp")
+            check(f"{label}: taper ends at zero",
+                  curve[max(curve)] == 0.0)
+            check(f"{label}: peak torque is in SCS's car range (350-700 Nm)",
+                  250 <= tq <= 750, f"{tq:.0f} Nm")
+            check(f"{label}: unit stays balanced", out.count("{") == out.count("}"))
+
+
 def test_windows_compatibility() -> None:
     """Platform contracts that are silent on Linux and fatal on Windows 11.
 
@@ -2747,6 +2832,8 @@ def main() -> int:
     test_job_tags_use_the_games_vocabulary()
     test_readme_category_table_matches_code()
     test_every_brand_gets_its_own_vendor()
+    test_build_power_curve_hits_its_target()
+    test_prompt_power_never_blocks()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():
@@ -2757,6 +2844,7 @@ def main() -> int:
     test_real_wheel_grip()
     test_real_tags_are_recognised()
     test_real_engine_origin()
+    test_real_engine_power_shape()
     test_real_transmission_tuning()
     test_engine_target_uses_written_mass()
     test_default_engine_target_applies()
