@@ -2379,6 +2379,51 @@ def test_real_engine_origin() -> None:
                   str(pts[:2]))
 
 
+def test_job_tags_use_the_games_vocabulary() -> None:
+    section("tags[] match car_job.vehicle_types[]")
+    # Read from all 149 car_job units in def.scs/base_vehicle.scs. SCS calls
+    # our `sports` "sport" and our `classic` "veteran". A tag the game does not
+    # recognise matches no job at all, so those two presets were writing a car
+    # that could take zero car jobs.
+    check("SCS's type list is what we think it is",
+          C.CAR_JOB_TYPES == {"pickup", "suv", "sedan", "muscle", "veteran",
+                              "sport", "offroad"},
+          str(sorted(C.CAR_JOB_TYPES)))
+    for vtype in C.VEHICLE_TYPES:
+        tag = C.job_tag(vtype)
+        check(f"--type {vtype} writes a tag the game knows",
+              tag in C.CAR_JOB_TYPES, f"tag {tag!r}")
+    check("sports maps to sport", C.job_tag("sports") == "sport")
+    check("classic maps to veteran", C.job_tag("classic") == "veteran")
+    check("a type that already matches is untouched",
+          C.job_tag("suv") == "suv")
+    check("SCS's own spellings are accepted as input",
+          C.normalise_type("sport") == "sports"
+          and C.normalise_type("veteran") == "classic")
+
+
+@guard
+def test_real_tags_are_recognised() -> None:
+    section("real mods: the written tags[] are all real job types")
+    for label, path, vtype in (("Pilot", PILOT, "suv"),
+                               ("Pilot-sports", PILOT, "sports"),
+                               ("W223-classic", W223, "classic")):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / f"{vtype}.scs"
+            C.main([str(path), "--type", vtype, "--brand", "t",
+                    "-o", str(out)])
+            z = zipfile.ZipFile(out)
+            ds = [n for n in z.namelist() if n.endswith("/data.sii")]
+            check(f"{label}: data.sii written", bool(ds))
+            if not ds:
+                continue
+            tags = re.findall(r'tags\[\]:\s*"([^"]+)"',
+                              z.read(ds[0]).decode())
+            check(f"{label}: tags written", tags, str(tags))
+            bad = [t for t in tags if t not in C.CAR_JOB_TYPES]
+            check(f"{label}: every tag is a real car_job type", not bad, str(bad))
+
+
 def test_windows_compatibility() -> None:
     """Platform contracts that are silent on Linux and fatal on Windows 11.
 
@@ -2623,6 +2668,7 @@ def main() -> int:
     test_tune_transmission_stall_ratio()
     test_launch_force_matches_after_stall_fix()
     test_torque_curve_gets_scs_origin()
+    test_job_tags_use_the_games_vocabulary()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():
@@ -2631,6 +2677,7 @@ def main() -> int:
     test_physics_sii_policy()
     test_real_engine_scaling()
     test_real_wheel_grip()
+    test_real_tags_are_recognised()
     test_real_engine_origin()
     test_real_transmission_tuning()
     test_engine_target_uses_written_mass()

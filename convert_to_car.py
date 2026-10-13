@@ -49,6 +49,29 @@ VEHICLE_TYPES = ["pickup", "suv", "sedan", "muscle", "classic", "sports", "offro
 # an unusual token can be tested without editing this file. Whether the base
 # game's car_job vehicle_types[] accepts a given spelling can only be confirmed
 # in-game, so these are offered rather than asserted to be correct.
+# The vocabulary `car_job.vehicle_types[]` actually uses, read from all 149
+# car_job units in def.scs/base_vehicle.scs. It is NOT the same as our preset
+# names: SCS calls our `sports` "sport" and our `classic` "veteran", and it
+# has a type we never emit.
+#
+# This matters more than it looks. A tag the game does not recognise matches
+# no job at all, so a `--type sports` or `--type classic` car could take zero
+# car jobs -- which is exactly the "I can only job with pickups" report.
+CAR_JOB_TYPES = {"pickup", "suv", "sedan", "muscle", "veteran", "sport", "offroad"}
+
+# Preset name -> the tag the game matches on. Types absent from this table
+# already share their name with the game.
+TAG_FOR_TYPE = {
+    "sports": "sport",
+    "classic": "veteran",
+}
+
+
+def job_tag(vtype: str) -> str:
+    """The `tags[]` value the game will match against car_job.vehicle_types[]."""
+    return TAG_FOR_TYPE.get(vtype, vtype)
+
+
 TYPE_ALIASES = {
     "off-road": "offroad",
     "off_road": "offroad",
@@ -56,6 +79,8 @@ TYPE_ALIASES = {
     "suvs": "suv",
     "cross-over": "suv",
     "crossover": "suv",
+    "sport": "sports",
+    "veteran": "classic",
     "estate": "sedan",
     "wagon": "sedan",
     "saloon": "sedan",
@@ -1899,7 +1924,7 @@ def convert(
         files[name] = new_text
 
     # 2. data.sii with the vehicle type tag (create if absent)
-    all_tags = tags or [vtype]
+    all_tags = tags or [job_tag(vtype)]
     tag_desc = ", ".join(f'"{t}"' for t in all_tags)
     data_path = f"{vehicle_dir}data.sii"
     if data_path not in files:
@@ -2391,7 +2416,9 @@ def main(argv: list[str] | None = None) -> int:
         "--extra-tags",
         help="comma-separated extra vehicle types to add to tags[], e.g. "
              "'pickup,sedan'. Extra tags let the car satisfy more than one "
-             "car_job category.",
+             "car_job category. 'sport' and 'veteran' are written as tags[] "
+             "spelled 'sports' and 'classic' are, because those are the names "
+             "car_job.vehicle_types[] actually matches",
     )
     ap.add_argument("--slug", help="vehicle slug; defaults to source folder name")
     ap.add_argument("--asset-root", help="rewrite model roots to this, e.g. /vehicle/car/my_car")
@@ -2507,12 +2534,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # Secondary tags: a comma-separated list adds further vehicle types to
     # tags[] so the car can satisfy more than one car_job category.
-    tags = [args.vtype]
+    tags = [job_tag(args.vtype)]
     if args.extra_tags:
         for extra in args.extra_tags.split(","):
-            extra = normalise_type(extra)
+            extra = job_tag(normalise_type(extra))
             if extra not in tags:
                 tags.append(extra)
+    unknown = [t for t in tags if t not in CAR_JOB_TYPES]
+    if unknown:
+        print("  " + _ui.paint(
+            f"warning: tag(s) {', '.join(unknown)} are not in the base game's "
+            "car_job vehicle_types[] list, so they will match no jobs",
+            "yellow"))
 
     # ---- 3. brand --------------------------------------------------------
     if args.brand is None:
