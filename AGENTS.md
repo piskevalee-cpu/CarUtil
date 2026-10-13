@@ -17,7 +17,7 @@ used only to convert brand logo images.
 | `brands.py` | ~92 | The brand list and the mapping to each logo file. |
 | `logo.py` | ~195 | Image → 256×64 DDS conversion. Uses ImageMagick. |
 | `ui.py` | ~192 | Banner, colour, arrow-key menus. Pure presentation. |
-| `test_converter.py` | ~1860 | The suite. Run it before every commit. |
+| `test_converter.py` | ~1900 | The suite. Run it before every commit. |
 | `FINDINGS.md` | — | Research log. **Several early sections were wrong; see Corrections.** |
 | `logos/` | — | 22 brand images. Not all are actually PNGs. |
 
@@ -90,6 +90,25 @@ defs that *do* contain CRLF are the mod author's own, carried through
 verbatim. Do not "fix" this by writing defs in binary.
 
 ## Non-obvious constraints
+
+**A converted car cannot have a realistic engine *and* SCS's drag.** SCS ships
+`air_resistance` 0.37-0.596; a 2200 kg car with a sane engine runs past
+150 mph at those values. `--air-resistance` exists because of this, and the
+value we ship (`2.4`, ~4x SCS's highest) is a **fudge factor with exactly one
+in-game data point behind it**, not a calibrated figure. Do not "correct" it
+toward the SCS range without a measurement. See `FINDINGS.md` §29.
+
+**The engine curve cannot control the mid-range.** Top gear is `0.63 x 3.73 =
+2.35:1`, so the engine is in the same 1500-4000 rpm band at 120 mph that it
+uses for 0-60. Any future attempt to slow 60-120 with `--peak-power-rpm` will
+fail, and will look like a bug in the curve shape. Only drag separates the two
+phases. See `FINDINGS.md` §29.
+
+**Car price is not a key in ATS.** The dealer sums the `price:` of every
+accessory its `data_path` lists; SCS's own four Road Trip dealer units declare
+no price at all. Anything that re-prices a car must therefore touch the listed
+components, and must leave the mod's wider upgrade menu alone or it will
+inflate everything the player can still buy afterwards. See `FINDINGS.md` §30.
 
 **The test fixtures are third-party assets and must never be committed.** Real
 car mods live in `../testing-covnverter/` — the typo is in the real directory

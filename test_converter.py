@@ -921,6 +921,17 @@ def test_dealer_price() -> None:
 
 
 @guard
+def test_prompt_price_never_blocks() -> None:
+    section("price prompt never blocks")
+    check("prompt_price returns None when stdin is not a tty",
+          C.prompt_price() is None)
+    check("prompt_power still guarded the same way",
+          C.prompt_power(1500) == (None, None))
+    check("price prompt survives a bad number and a huge one",
+          C._MIN_PRICE < 45000 < C._MAX_PRICE)
+
+
+@guard
 def test_mass_override() -> None:
     section("--mass override")
     with tempfile.TemporaryDirectory() as td:
@@ -2901,6 +2912,7 @@ def main() -> int:
     test_prompt_power_never_blocks()
     test_air_resistance_override()
     test_dealer_price()
+    test_prompt_price_never_blocks()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():

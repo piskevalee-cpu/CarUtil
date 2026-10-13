@@ -1473,3 +1473,128 @@ So 6000 rpm is the creep answer as well as the top-speed one.
 `--acceleration` is kept as the older proxy. It targets a 0-60 time, which
 forces high torque, which forces high power. Horsepower is the honest knob:
 it bounds the top end directly and leaves the low end to the shape.
+
+## 29. Measured acceleration: the three-way tension between launch, mid-range and creep
+
+Four in-game tests on the same Pilot, same 2200 kg, same gearing. Only the
+engine and drag changed.
+
+| build | peak torque | hp | idle | 0-60 | 60-120 | in-game result |
+|---|---|---|---|---|---|---|
+| 1424 hp, flat curve | 1694 Nm | 1424 | 800 Nm | ~5 s | 17 s | 140 mph flat out, crept to 10 mph |
+| 330 hp @ 6000 | 426 Nm | 330 | 160 Nm | 16.8 s | — | no creep, far too slow |
+| 814 hp @ 6000, k=0.55 | 1050 Nm | 814 | 394 Nm | ~8 s | 10 s | "builds speed way too fast after 60" |
+| 814 hp @ 6000, k=2.0 | 1050 Nm | 814 | 394 Nm | ~8 s | much slower | "about perfect" |
+
+### 0-60 is torque, not power
+
+Two measured points give the exponent:
+
+    k = ln(16.8/8.0) / ln(1050/426) = 0.82
+
+So acceleration scales as roughly `T^-0.82` — near enough to purely
+torque-limited that horsepower is a poor proxy for it. Targeting 0-60 needs a
+torque number; targeting top speed needs a power number. They are different
+knobs and `--power` was only ever fixing one of them.
+
+### The torque curve cannot separate 0-60 from 60-120
+
+This is the finding that cost the most and should have come first.
+
+The mods' 10-speed box is geared for a 9 t truck: `differential_ratio 3.73`,
+top gear `0.63`, so **2.35:1 overall**. On a 0.37 m wheel that puts the engine
+at:
+
+| speed | engine rpm, top gear |
+|---|---|
+| 60 mph | 1627 |
+| 90 mph | 2440 |
+| 120 mph | 3253 |
+| 140 mph | 3796 |
+
+The engine is in the **same 1500-4000 rpm band at 120 mph that it uses to do
+0-60 in 1st-5th.** No torque taper can slow the mid-range while leaving the
+launch alone — the two phases occupy the same revs. Every attempt to do it
+with `--peak-power-rpm` fails for this reason, not because the shape is wrong.
+
+At fixed launch torque, moving the power peak only trades idle against
+mid-range:
+
+| power peak | hp | torque @3000 | @4000 | @5000 | idle |
+|---|---|---|---|---|---|
+| 3500 rpm | 438 | 91% | 49% | 0% | 719 Nm |
+| 4500 rpm | 564 | 90% | 90% | 57% | 630 Nm |
+| 6000 rpm | 814 | 79% | 88% | 93% | 394 Nm |
+
+Killing the mid-range costs idle torque, because `SCS_TORQUE_SHAPE` is 0.60 at
+1000 rpm. That hot low end is a truck trait, and it means **peak torque and
+idle torque are the same number wearing two hats.** A road car curve that
+stayed near zero until ~2000 rpm would break the coupling; SCS ships no such
+curve, and inventing one is a bigger change than it looks.
+
+### Drag is the lever, because it is not measured in revs
+
+Drag force is `k*v^2`, engine force is `P/v`, so drag's share of the available
+push is `k*v^3/P` — it rises with **v³** while torque depends on rpm. That is
+the one axis where the phases do not overlap.
+
+| `air_resistance` | push left @60 | @80 | @120 | modelled flat-out |
+|---|---|---|---|---|
+| 0.55 (SCS suv) | 98% | 96% | 86% | 231 mph |
+| 2.0 | 94% | 90% | 78% | 150 mph |
+| 2.4 | 92% | 82% | 39% | 141 mph |
+
+Because the share climbs with v³, raising `k` costs almost nothing at launch:
+**2.0 → 2.4 is −1.4% of the push available at 60 mph.** That is what makes
+`--air-resistance` usable at all, and it corrects an earlier misreading in
+which the change was assumed to be a uniform slowdown.
+
+`air_resistance: 2.4` is roughly **4x SCS's highest shipped value** (0.596).
+It is a fudge factor justified by one in-game result, not a calibrated
+figure, and the modelled flat-out speed is known to be optimistic — a
+1424 hp build modelled at 231 mph actually stopped at 140. Treat the column as
+directional only.
+
+## 30. Car price is not a key: the dealer sums the parts it lists
+
+Pulled SCS's own four Road Trip dealer units out of `dlc_rt_ford.scs`
+(`f150_23`, `bronco_24`, `mustang_67`, `victoria_06`). **None declares a
+price.** They carry `accessories[]` and `data_path` and nothing else.
+
+The Car Dealer totals the `price:` of every accessory named by a `data_path`.
+The `accessories[]` array **is** the price breakdown; there is no headline
+number to edit anywhere.
+
+This converter touched no prices at all — they passed through from the mod
+author — which is why a converted Pilot asked $84,505, the sum of the mod's
+own truck part prices:
+
+| component | price | component | price |
+|---|---|---|---|
+| chassis `awd.sii` | 35,000 | headlight `xenon.sii` | 5,000 |
+| cabin `yg2_2025.sii` | 10,000 | paint `color1.sii` | 3,000 |
+| interior `black.sii` | 10,000 | mirror `shape1.sii` | 500 |
+| engine `35l.sii` | 10,000 | steering_w `default.sii` | 1,000 |
+| transmission `10_speed.sii` | 8,700 | tyres/discs/hubs/nuts | 1,307 |
+
+`--price 45000` rescales exactly those listed components to the target, with
+largest-remainder correction so rounding never leaves the total a few dollars
+short. The wider upgrade menu is deliberately left alone — the mod's other
+paint jobs, spare interiors and optional parts keep their own prices — so
+re-pricing the base car never inflates what the player can still buy.
+
+Components priced at `$1` floor at `$1` rather than scaling below it, which
+flattens the cheap end slightly but keeps the total exact.
+
+## 31. Prompting, and the `--mass` shortcut that suppresses it
+
+`--mass` skips the guided prompts entirely. `--price` was added to guided mode
+later and initially had no prompt at all, because "leave the mod's prices and
+report the total" was chosen over "prompt" — so the flag existed only on the
+command line and the walkthrough never mentioned it.
+
+The prompt cannot show the mod's current total, because the dealer unit is
+only assembled during conversion, from the accessory list the vehicle's
+`data.sii` resolves to. So it offers a target rather than a delta, and the
+conversion reports the resulting total either way. Anything else would need
+the conversion to run twice.

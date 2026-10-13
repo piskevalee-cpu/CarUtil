@@ -1186,6 +1186,11 @@ _DEFAULT_PEAK_POWER_RPM = 4500
 _MIN_HP = 40.0
 _MAX_HP = 900.0
 
+# A converted car lands in the tens of thousands. Anything outside this is a
+# typo, not a price -- SCS's own Road Trip cars sit well inside it.
+_MIN_PRICE = 1000
+_MAX_PRICE = 2_000_000
+
 
 def build_power_curve(
     hp: float,
@@ -1351,6 +1356,44 @@ def prompt_acceleration(mass_kg: float) -> float | None:
             print("  -> between 1 and 30 seconds is a car, not a spaceship")
             continue
         return value
+
+def prompt_price() -> int | None:
+    """Ask what the Car Dealer should charge, or None to keep the mod's own.
+
+    The mod's total cannot be shown here: the dealer unit is only assembled
+    during the conversion, from the accessory list the vehicle's data.sii
+    resolves to. So the prompt offers a target rather than a delta, and the
+    conversion reports the resulting total either way.
+    """
+    if not _tty():
+        return None
+
+    print()
+    print("  How much should this car cost?")
+    print("    ATS has no single price key -- the dealer adds up the price of")
+    print("    every part it lists, so this rescales those parts to reach your")
+    print("    figure. The rest of the upgrade menu keeps the mod's prices.")
+    print("    Press Enter to keep the mod author's own pricing.")
+    print()
+    while True:
+        try:
+            raw = input("  Price [$0 = keep the mod's]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  cancelled -- keeping the mod's own prices.")
+            return None
+        if not raw:
+            return None
+        raw = raw.lower().replace("$", "").replace(",", "").rstrip("k")
+        try:
+            value = int(float(raw))
+        except ValueError:
+            print("  -> enter a dollar amount, e.g. 45000")
+            continue
+        if not (_MIN_PRICE <= value <= _MAX_PRICE):
+            print(f"  -> between ${_MIN_PRICE:,} and ${_MAX_PRICE:,}")
+            continue
+        return value
+
 
 # Per-type overrides applied on top of the baseline. Only numeric tuning.
 # Per-type overrides on top of the baseline. Every value is copied from one of
@@ -2878,7 +2921,7 @@ def main(argv: list[str] | None = None) -> int:
         print(_ui.banner())
 
     guided = _tty() and not args.no_prompt
-    total = 6
+    total = 7
 
     # Optional but wanted-by-default: offer to install ImageMagick before the
     # user invests answers in the walkthrough. Cheap when it is already there.
@@ -2995,6 +3038,7 @@ def main(argv: list[str] | None = None) -> int:
     wanted = args.acceleration
     power = args.power
     peak_rpm = args.peak_power_rpm
+    price = args.price
     if guided:
         # Interactive: only when a terminal is attached, so scripted runs
         # and CI never block on stdin.
@@ -3010,6 +3054,9 @@ def main(argv: list[str] | None = None) -> int:
         elif wanted is None:
             _ui.step(5, total, "Set the acceleration")
             wanted = prompt_acceleration(kerb)
+        if args.price is None:
+            _ui.step(6, total, "Set the price")
+            price = prompt_price()
 
     kerb = sum(mass) if mass else default_total(args.vtype)
 
@@ -3042,7 +3089,7 @@ def main(argv: list[str] | None = None) -> int:
         out = args.input / f"{RT_PREFIX}_{slug}.scs"
 
     if guided:
-        _ui.step(6, total, "Convert")
+        _ui.step(7, total, "Convert")
         print()
 
     rep = convert(
@@ -3060,7 +3107,7 @@ def main(argv: list[str] | None = None) -> int:
         engine_hp=power,
         peak_power_rpm=peak_rpm,
         air_resistance=args.air_resistance,
-        price=args.price,
+        price=price,
         dry_run=args.dry_run,
         car_tune=args.car_tune,
         mass=mass,
