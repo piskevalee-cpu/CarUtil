@@ -2424,6 +2424,31 @@ def test_real_tags_are_recognised() -> None:
             check(f"{label}: every tag is a real car_job type", not bad, str(bad))
 
 
+def test_readme_category_table_matches_code() -> None:
+    """The README's category table must not drift from _MASS and TYPE_HELP.
+
+    The tag vocabulary drifted for exactly this reason: the presets were
+    documented in prose and nothing checked the two against each other.
+    """
+    section("README category table matches the code")
+    readme = (HERE / "README.md").read_text(encoding="utf-8", errors="replace")
+    missing = []
+    for vtype in C.VEHICLE_TYPES:
+        row = f"| `{vtype}` | {C.TYPE_HELP[vtype]} | {sum(C._MASS[vtype])} kg |"
+        if row not in readme:
+            missing.append(row)
+    check("every preset appears in the README table with its real weight",
+          not missing, "; ".join(missing[:2]))
+    check("all seven presets are documented",
+          all(f"`{v}`" in readme for v in C.VEHICLE_TYPES))
+    # The tag mapping is the thing that was wrong for years; make sure the
+    # README states the game's spellings rather than ours.
+    for tag in ("veteran", "sport"):
+        check(f"README names the game's `{tag}` tag", f"`{tag}`" in readme)
+    check("README does not claim an unrecognised tag works",
+          "`tags[]` must spell the type the way the base game does" in readme)
+
+
 def test_windows_compatibility() -> None:
     """Platform contracts that are silent on Linux and fatal on Windows 11.
 
@@ -2669,6 +2694,7 @@ def main() -> int:
     test_launch_force_matches_after_stall_fix()
     test_torque_curve_gets_scs_origin()
     test_job_tags_use_the_games_vocabulary()
+    test_readme_category_table_matches_code()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():

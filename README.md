@@ -30,6 +30,62 @@ and only used to convert brand logo images. If it is missing, the script says so
 up front and offers to install it for your platform; decline and the car still
 converts, just with the mod's own logo or a flat placeholder.)
 
+## Choosing the car category
+
+`--type` picks the car's category. It decides three things at once: the car's
+handling preset, its default kerb weight, and which **jobs it can take** — so
+it is worth getting right.
+
+| `--type` | Means | Default weight |
+|---|---|---|
+| `pickup` | pickup truck | 2400 kg |
+| `offroad` | off-road / 4x4 | 2200 kg |
+| `suv` | crossover / SUV | 2200 kg |
+| `muscle` | muscle car | 1700 kg |
+| `classic` | classic car | 1550 kg |
+| `sedan` | saloon / hatchback | 1220 kg |
+| `sports` | sports car | 1280 kg |
+
+Leave it off and the guided run asks. Alternative spellings are normalised
+(`off-road`→`offroad`, `crossover`→`suv`, `wagon`→`sedan`, `coupe`→`sports`),
+and the game's own names `sport` and `veteran` are accepted too.
+
+### Picking a category that fits the real vehicle
+
+The category's default weight is a *starting point*, not a fact about your
+mod. Most truck mods sit at 9–10 t in their own chassis file, so the preset is
+always wrong for them. For anything real, set the weight yourself:
+
+```bash
+python3 convert_to_car.py mod.scs --type suv --mass 2069 --brand mercedes
+```
+
+Mass is the single most consequential value in the conversion — it drives
+acceleration, braking and suspension response together. A 2069 kg S-Class
+classified as `classic` inherits a 1550 kg preset and will drive wrong no
+matter how good the handling numbers are.
+
+### How the category affects jobs
+
+The tag the game matches on is not always spelled the way you asked for. SCS's
+own vocabulary is `pickup`, `suv`, `sedan`, `muscle`, `veteran`, `sport`,
+`offroad`, so `--type sports` is stored as `sport` and `--type classic` as
+`veteran`. A tag the game does not recognise matches **no jobs at all**, so
+this is worth knowing rather than assuming.
+
+Of the base game's 149 car jobs, 95 accept only `offroad`, `pickup`, `sedan`
+and `suv` — the heavy-cargo work. `muscle`, `sport` and `veteran` are excluded
+from those and appear only in the two premium jobs. So a muscle or classic car
+takes a narrower set of work, not none. `--extra-tags pickup` widens it:
+
+```bash
+python3 convert_to_car.py mod.scs --type classic --extra-tags pickup --brand mercedes
+```
+
+See [Vehicle types and cargo](#vehicle-types-and-cargo) for the full picture.
+
+---
+
 ## Usage
 
 Run the script with `python3`. There is nothing to install, no `chmod +x`, and
