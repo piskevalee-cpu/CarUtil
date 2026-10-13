@@ -814,10 +814,33 @@ TYPE_HELP = {
 
 RT_PREFIX = "rt"
 
-# Folder the converted car is filed under in def/vehicle/car_dealer/. The Car
-# Dealer looks the brand logo up by this name, so the logo files and the
-# registration path must agree on it.
+# The converted car is filed under def/vehicle/car_dealer/<vendor>/, and the
+# Car Dealer looks the brand logo up by that same name, so the folder and the
+# logo files must agree.
+#
+# It used to be the constant "mod" for every car, which filed all of them under
+# one vendor sharing one logo file -- so whichever car was converted last owned
+# the vendor's logo. SCS's own Road Trip DLC files four differently-named cars
+# (bronco_24, f150_23, mustang_67, victoria_06) under a single manufacturer
+# folder, so one vendor per manufacturer is the game's own convention, and
+# naming it after the brand is both correct and what makes each car's logo its
+# own.
+#
+# Collisions remain possible between two mods converted with the same brand;
+# that is inherent to sharing a manufacturer name and is the same situation as
+# two mods shipping the same brand's real logo.
 DEALER_FOLDER = "mod"
+
+
+def dealer_folder(brand: str) -> str:
+    """The vendor folder a car is filed under, from its brand.
+
+    Falls back to "other" for a brand with no logo, matching brands.py's own
+    catch-all, so an unknown brand cannot produce a vendor the game cannot
+    draw a logo for.
+    """
+    name = (brand or "").strip().lower() or "other"
+    return name if _brands.logo_path(name) is not None else "other"
 
 
 def _tty() -> bool:
@@ -1810,6 +1833,11 @@ def convert(
     #
     # SCS resolves absolute virtual paths (e.g. /vehicle/truck/pilot_2024/car.pmd)
     # against every mounted mod, so the mod author's own paths already work.
+    # The vendor the Car Dealer files this car under. Derived from the brand,
+    # so each manufacturer's cars share a vendor folder and its logo -- which is
+    # how SCS's own Road Trip DLC is laid out.
+    vendor = dealer_folder(brand)
+
     # Rewriting them by default broke real mods: the Pilot's assets live under
     # /model/flare, and blindly forcing /vehicle/car/<slug> pointed the chassis
     # at files that do not exist -> purple square, then a crash on load.
@@ -1961,7 +1989,7 @@ def convert(
     )
     car_binding = build_binding(parts, ".car", header)
     bindings = {
-        f"def/vehicle/car_dealer/{DEALER_FOLDER}/{slug}.sii": car_binding,
+        f"def/vehicle/car_dealer/{vendor}/{slug}.sii": car_binding,
         f"def/vehicle/car_desktop/{slug}.sii": car_binding,
         f"def/vehicle/car_company/{slug}.sii": car_binding,
         f"def/vehicle/truck_desktop/{slug}.sii": build_binding(
@@ -2052,13 +2080,13 @@ def convert(
 
         logo = build_brand_logo(logo_brand, tobj_tpl, src_dds,
                                 dirs=(_TRUCK_LOGO_DIR,))
-        logo.update(build_brand_logo(DEALER_FOLDER, tobj_tpl, src_dds,
+        logo.update(build_brand_logo(vendor, tobj_tpl, src_dds,
                                      dirs=(_CAR_LOGO_DIR,)))
         if logo:
             assets.update(logo)
             rep.action(
                 f"brand logo ({logo_source}): {_TRUCK_LOGO_DIR}/{logo_brand}.* "
-                f"and {_CAR_LOGO_DIR}/{DEALER_FOLDER}.*"
+                f"and {_CAR_LOGO_DIR}/{vendor}.*"
             )
 
         _write_scs(files, out_path, assets)

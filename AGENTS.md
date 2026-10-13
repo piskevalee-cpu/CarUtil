@@ -126,7 +126,9 @@ This project has been wrong repeatedly in ways that cost hours. Don't repeat
 them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
 
 - **`car_job` / `tags[]` is not about job visibility.** Quick Jobs *lend you a
-  vehicle* by design. Your own car belongs in the **Dispatch Market**, once owned.
+  vehicle* by design — the company supplies the car. Your own car belongs in the
+  **Dispatch Market**, once owned, where the 149 `car_job` units apply and do
+  match on `tags[]`. Not appearing in Quick Jobs is correct, not a bug.
   See `FINDINGS.md` §17.
 - **`tags[]` must use the game's own vocabulary.** All 149 `car_job` units
   match on exactly seven values: `pickup, suv, sedan, muscle, veteran, sport,
@@ -187,6 +189,11 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   declare exactly `roll_resistance` (11-13) and `grip_factor` (1.1-1.2). Drive
   force scales linearly with the declared `torque` scalar. When a value looks
   wrong, check what SCS itself ships before inventing a replacement.
+- **The Car Dealer vendor is the manufacturer, not the car.** SCS's own Road
+  Trip DLC files `mustang_67`, `f150_23`, `bronco_24` and `victoria_06` under one
+  `car_dealer/<folder>/`. Hardcoding a single `"mod"` vendor made every
+  converted car share one logo file, so the last mod loaded owned it.
+  `dealer_folder(brand)` names it per brand. See `FINDINGS.md` §27.
 - **Game file layout is not textbook.** The logo DDS reads its pixel-format
   block at **offset 76**, not 32; `dwCaps` is `0x00401008`. The `.tobj` stores
   its length as u32 at offset 40, has **four padding bytes at 44–47**, and the

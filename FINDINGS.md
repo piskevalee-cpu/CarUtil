@@ -1371,3 +1371,44 @@ preset names stay, because they drive the physics tables and the menu.
 `--type sport` and `--type veteran` are accepted as input aliases, and an
 unrecognised tag now warns at conversion time instead of failing silently in
 game.
+
+## 27. One vendor per brand, and why Quick Jobs stay empty
+
+### The vendor question
+
+Every converted car was filed under `def/vehicle/car_dealer/mod/` with
+`material/ui/car_brand_logo/mod.dds`. One folder, one logo, shared by every car
+in the game — so whichever mod loaded last owned the vendor's logo, which is
+exactly what was reported.
+
+Per-brand vendors turned out to be **the game's own convention**, not an
+invented workaround. Walking the directory tree of `dlc_rt_ford.scs` (the
+metadata table's type-129 records hold real directory listings, so the paths
+are recoverable) shows the four Road Trip cars registered like this:
+
+    /car_dealer/<one folder>/  containing  /mustang_67 /f150_23 /bronco_24 /victoria_06
+
+Four differently-named cars under **one manufacturer folder**, not four
+vendors. So the vendor is the *manufacturer*, and naming it after the brand is
+both correct and what stops the logo collision. `DEALER_FOLDER` was a constant
+and is now `dealer_folder(brand)`, falling back to `other` for a brand with no
+shipped logo so an unknown name cannot produce a vendor the game cannot draw.
+
+The one residual collision is two mods converted with the *same* brand sharing
+a vendor folder. That is inherent to sharing a manufacturer name and is the
+same situation as two mods shipping the same brand's real logo.
+
+### Quick Jobs
+
+`car_job_data` is the job-market unit, and all 149 of them are in
+`def.scs`/`base_vehicle.scs`. The base game references **no** `car_dealer` path
+anywhere in those archives — the registration directories exist only inside the
+Road Trip DLC. The Car Dealer's `desktop_screen_config` grants
+`screen_access_list[]: "jobs.quick"`, and Quick Job is the market where the
+*company* lends you a vehicle.
+
+That is the design, not a defect in the conversion: a converted car is stock
+you own, and it is offered in the **Dispatch Market**, not Quick Jobs. The 149
+`car_job` units are the Dispatch Market's jobs and they do match on
+`tags[]` — which is why the tag fix in section 26 matters, and why a car that
+appears in neither market is a different fault entirely.

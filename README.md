@@ -197,8 +197,14 @@ python3 convert_to_car.py mod.scs --type suv --extra-tags pickup,sedan --brand h
 
 ### Brand logos
 
-`--brand` selects the name the Car Dealer files the car under, and the logo it
+`--brand` selects the vendor the Car Dealer files the car under, and the logo it
 shows. Omit it and the guided prompt lists the brands in `brands.py`.
+
+The vendor is the **manufacturer**, which is what the game expects: SCS's own
+Road Trip DLC files `mustang_67`, `f150_23`, `bronco_24` and `victoria_06` under
+a single Ford folder. So every Ford you convert shares one vendor and one logo,
+and two different brands never overwrite each other's. A brand with no shipped
+logo falls back to `other`.
 
 Logos live in `logos/` and may be PNG, WebP or SVG — the game never reads those
 directly. Each is letterboxed onto the 256×64 canvas and converted to the DDS

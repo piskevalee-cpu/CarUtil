@@ -1889,12 +1889,16 @@ def test_brand_logo() -> None:
         out = Path(td) / "logo.scs"
         C.main([str(W223), "--type", "sedan", "--brand", "mercedes",
                 "--mass", "1900", "-o", str(out), "--no-prompt"])
+        # The vendor folder and the logo stem come from the brand. Filing every
+        # car under a single "mod" vendor made each new conversion overwrite the
+        # previous car's logo.
+        vendor = C.dealer_folder("mercedes")
         with zipfile.ZipFile(out) as z:
             names = set(z.namelist())
             for ext in (".dds", ".mat", ".tobj"):
-                check(f"output has car_brand_logo/mod{ext}",
-                      f"material/ui/car_brand_logo/mod{ext}" in names)
-            real = z.read("material/ui/car_brand_logo/mod.dds")
+                check(f"output has car_brand_logo/{vendor}{ext}",
+                      f"material/ui/car_brand_logo/{vendor}{ext}" in names)
+            real = z.read(f"material/ui/car_brand_logo/{vendor}.dds")
             check("car_brand_logo dds is the right size and format",
                   real.startswith(b"DDS ")
                   and struct.unpack("<I", real[16:20])[0] == 256
@@ -1906,13 +1910,21 @@ def test_brand_logo() -> None:
             # converted logo, not the flat placeholder.
             check("logo is converted art, not the placeholder",
                   real != C._make_dds())
-            t = z.read("material/ui/car_brand_logo/mod.tobj")
+            t = z.read(f"material/ui/car_brand_logo/{vendor}.tobj")
             ln = struct.unpack("<I", t[40:44])[0]
             check("output tobj points at the car_brand_logo dds",
-                  t[48:48 + ln] == b"/material/ui/car_brand_logo/mod.dds",
+                  t[48:48 + ln]
+                  == f"/material/ui/car_brand_logo/{vendor}.dds".encode(),
                   t[48:48 + ln].decode("ascii", "replace"))
-            mat = z.read("material/ui/car_brand_logo/mod.mat").decode()
-            check("output mat references mod.tobj", 'texture : "mod.tobj"' in mat)
+            mat = z.read(f"material/ui/car_brand_logo/{vendor}.mat").decode()
+            check("output mat references its own tobj",
+                  f'texture : "{vendor}.tobj"' in mat)
+            # And the dealer folder must agree with the logo stem, or the
+            # Car Dealer looks up a logo the mod never wrote.
+            check("dealer folder is the brand, not a shared 'mod'",
+                  any(n.startswith(f"def/vehicle/car_dealer/{vendor}/")
+                      for n in names),
+                  [n for n in sorted(names) if "car_dealer" in n][:4])
 
 
 @guard
