@@ -1406,10 +1406,81 @@ TRUCK_ONLY_PHYSICS = [
 ]
 
 
-def car_physics(vtype: str, axles: int, mass: list[int] | None = None) -> dict:
-    """Build the car physics key set for a vehicle type, scaled to `axles`."""
+def dealer_listed_paths(dealer_text: str) -> list[str]:
+    """The component files a dealer unit sells, in the order it lists them.
+
+    ATS has no single car-price key. The Car Dealer totals the `price:` of
+    every accessory named by a data_path, so this list IS the car's price
+    breakdown -- verified against SCS's own f150_23/bronco_24/mustang_67/
+    victoria_06 dealer units, none of which declares a price at all.
+    """
+    return re.findall(r'data_path:\s*"([^"]+)"', dealer_text)
+
+
+def dealer_price(files: dict, dealer_name: str) -> tuple[int, list[tuple[str, int]]]:
+    """Current dealer total, and the (file, price) breakdown behind it."""
+    text = files.get(dealer_name)
+    if text is None:
+        return 0, []
+    rows: list[tuple[str, int]] = []
+    for path in dealer_listed_paths(text):
+        name = path.lstrip("/")
+        cur = get_key((files.get(name) or "").splitlines(), "price")
+        rows.append((name, int(float(cur)) if cur else 0))
+    return sum(p for _, p in rows), rows
+
+
+def apply_dealer_price(
+    files: dict, dealer_name: str, target: int | None, rep: Report
+) -> int:
+    """Report the dealer total, and re-scale it when `target` is given.
+
+    Only the accessories the dealer LISTS are rescaled. The mod's paint
+    library, spare interiors and the rest of the upgrade menu keep their own
+    prices, so re-pricing the base car never inflates what the player can
+    still buy afterwards.
+    """
+    total, rows = dealer_price(files, dealer_name)
+    if target is None:
+        rep.action(f"car dealer price: ${total:,} (the mod's own part prices)")
+        return total
+    priced = [(n, p) for n, p in rows if p > 0]
+    if not priced:
+        rep.warn("--price ignored: no listed accessory declares a price to scale")
+        return total
+    factor = target / total
+    scaled = {n: max(1, int(round(p * factor))) for n, p in priced}
+    # Rounding leaves the total a few dollars off. Put the whole drift on the
+    # largest line so the dealer charges exactly what was asked for.
+    drift = target - sum(scaled.values())
+    if drift:
+        scaled[max(scaled, key=lambda n: scaled[n])] += drift
+    for name, _ in priced:
+        files[name] = "\n".join(
+            set_key(files[name].splitlines(), "price", str(scaled[name]))
+        ) + "\n"
+    rep.action(
+        f"car dealer price: ${total:,} -> ${target:,}, spread across "
+        f"{len(scaled)} listed accessories (upgrade menu untouched)"
+    )
+    return target
+
+
+def car_physics(
+    vtype: str,
+    axles: int,
+    mass: list[int] | None = None,
+    overrides: dict | None = None,
+) -> dict:
+    """Build the car physics key set for a vehicle type, scaled to `axles`.
+
+    `overrides` wins over the preset so a caller can pin one key (see
+    --air-resistance) without editing the tuning tables.
+    """
     cfg = dict(_PARATI)
     cfg.update(_TUNING.get(vtype, {}))
+    if overrides:
+        cfg.update(overrides)
     kg = mass or _MASS.get(vtype, _MASS["sedan"])
     cfg["kerb_weight"] = [str(v) for v in kg]
 
@@ -1481,6 +1552,7 @@ def tune_chassis(
     mass: list[int] | None,
     rep: Report,
     force: bool = False,
+    overrides: dict | None = None,
 ) -> str:
     """Rewrite a chassis unit so the vehicle drives like a car, not a truck.
 
@@ -1496,7 +1568,7 @@ def tune_chassis(
     lines = text.splitlines()
     axles = count_indexed(lines, "kerb_weight") or count_indexed(lines, "powered_axle") or 2
 
-    cfg = car_physics(vtype, axles, mass)
+    cfg = car_physics(vtype, axles, mass, overrides)
 
     # Strip truck-only trailer/cab parameters if the mod carries them inline.
     dropped = [k for k in TRUCK_ONLY_PHYSICS if get_key(lines, k) is not None]
@@ -1508,7 +1580,7 @@ def tune_chassis(
     kept: list[str] = []
 
     def wants(key: str, current: str | list[str] | None) -> bool:
-        if force or current is None:
+        if force or current is None or (overrides and key in overrides):
             return True
         return _is_truck_scale(key, current)
 
@@ -2014,8 +2086,13 @@ def convert(
     target_source: str | None = None,
     engine_hp: float | None = None,
     peak_power_rpm: int | None = None,
+    air_resistance: float | None = None,
+    price: int | None = None,
 ) -> Report:
     rep = Report()
+    overrides = {}
+    if air_resistance is not None:
+        overrides["air_resistance"] = str(air_resistance)
     if src.wrapper_note:
         rep.action(src.wrapper_note)
     if getattr(src, "fake_encryption", False):
@@ -2136,7 +2213,9 @@ def convert(
         elif car_tune and re.match(
             re.escape(vehicle_dir) + r"chassis/.*\.sii$", name
         ):
-            new_text = tune_chassis(new_text, vtype, mass, rep, force=force_physics)
+            new_text = tune_chassis(
+                new_text, vtype, mass, rep, force=force_physics, overrides=overrides
+            )
         elif car_tune and re.match(
             re.escape(vehicle_dir) + r"transmission/.*\.sii$", name
         ):
@@ -2262,6 +2341,10 @@ def convert(
 
     # report bindings actually emitted
     rep.bound = list(parts["accessories"]) + list(parts["wheels"])
+
+    apply_dealer_price(
+        files, f"def/vehicle/car_dealer/{vendor}/{slug}.sii", price, rep
+    )
 
     if dry_run:
         rep.warn("dry run -- nothing written")
@@ -2716,6 +2799,26 @@ def main(argv: list[str] | None = None) -> int:
              "4500-6000 rpm",
     )
     ap.add_argument(
+        "--price",
+        type=int,
+        metavar="DOLLARS",
+        help="set what the Car Dealer charges for the finished car. ATS has no "
+             "single price key: the dealer sums the price of every accessory "
+             "it lists, so this rescales exactly those components. The rest "
+             "of the mod's upgrade menu keeps its own prices",
+    )
+    ap.add_argument(
+        "--air-resistance",
+        type=float,
+        metavar="COEFF",
+        help="override the chassis drag coefficient. Drag rises with the "
+             "square of speed, so it barely touches 0-60 but caps top speed "
+             "and settles the 60-120 run. The engine curve CANNOT do this: in "
+             "top gear the engine is still in the same 1500-4000 rpm band it "
+             "uses for 0-60, so the two phases cannot be separated by torque. "
+             "SCS's own cars use 0.37-0.596",
+    )
+    ap.add_argument(
         "--acceleration",
         type=float,
         metavar="SECONDS",
@@ -2956,6 +3059,8 @@ def main(argv: list[str] | None = None) -> int:
         target_source=target_source,
         engine_hp=power,
         peak_power_rpm=peak_rpm,
+        air_resistance=args.air_resistance,
+        price=args.price,
         dry_run=args.dry_run,
         car_tune=args.car_tune,
         mass=mass,

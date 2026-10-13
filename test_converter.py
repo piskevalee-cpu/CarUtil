@@ -856,6 +856,71 @@ def test_tune_chassis_drops_truck_keys() -> None:
 
 
 @guard
+def test_air_resistance_override() -> None:
+    section("--air-resistance override")
+    # A mod's own car-sane value is normally PRESERVED. An explicit
+    # --air-resistance must still win, or the flag would silently do nothing.
+    chassis = (
+        "SiiNunit\n{\naccessory_chassis_data : a.b\n{\n"
+        "\tkerb_weight[]: 1150\n\tkerb_weight[]: 1050\n"
+        "\tair_resistance: 0.16\n}\n}\n"
+    )
+    kept = C.tune_chassis(chassis, "suv", None, C.Report())
+    check("car-sane value preserved without the flag",
+          "air_resistance: 0.16" in kept)
+
+    forced = C.tune_chassis(
+        chassis, "suv", None, C.Report(), overrides={"air_resistance": "1.5"}
+    )
+    check("override wins over a car-sane value",
+          "air_resistance: 1.5" in forced)
+    check("old value gone", "air_resistance: 0.16" not in forced)
+
+    check("override does not touch the preset",
+          C.car_physics("suv", 2)["air_resistance"] == "0.55")
+    check("override reaches the physics table",
+          C.car_physics("suv", 2, None, {"air_resistance": "1.5"})
+          ["air_resistance"] == "1.5")
+
+
+@guard
+def test_dealer_price() -> None:
+    section("--price")
+    defs = {
+        "def/vehicle/car_dealer/x/y.sii": (
+            'data_path: "/def/vehicle/truck/y/chassis.sii"\n'
+            'data_path: "/def/vehicle/truck/y/engine.sii"\n'
+            'data_path: "/def/vehicle/truck/y/data.sii"\n'
+        ),
+        "def/vehicle/truck/y/chassis.sii": "price: 35000\nkerb_weight[]: 1\n",
+        "def/vehicle/truck/y/engine.sii": "price: 10000\ntorque: 400\n",
+        "def/vehicle/truck/y/data.sii": "info[]: \"Y\"\n",
+        "def/vehicle/truck/y/paint_job/color2.sii": "price: 3000\n",
+    }
+    total, rows = C.dealer_price(defs, "def/vehicle/car_dealer/x/y.sii")
+    check("dealer totals the listed accessories", total == 45000)
+    check("a listed file with no price counts as zero", len(rows) == 3)
+
+    rep = C.Report()
+    C.apply_dealer_price(defs, "def/vehicle/car_dealer/x/y.sii", None, rep)
+    check("default run reports the total",
+          any("$45,000" in a for a in rep.actions))
+    check("default run changes nothing",
+          "price: 35000" in defs["def/vehicle/truck/y/chassis.sii"])
+
+    C.apply_dealer_price(defs, "def/vehicle/car_dealer/x/y.sii", 90000, rep)
+    after, _ = C.dealer_price(defs, "def/vehicle/car_dealer/x/y.sii")
+    check("target total hit exactly, rounding included", after == 90000)
+    check("proportions kept",
+          "price: 70000" in defs["def/vehicle/truck/y/chassis.sii"])
+    check("upgrade menu NOT rescaled",
+          "price: 3000" in defs["def/vehicle/truck/y/paint_job/color2.sii"])
+    check("non-price keys survive",
+          "kerb_weight[]: 1" in defs["def/vehicle/truck/y/chassis.sii"]
+          and "torque: 400" in defs["def/vehicle/truck/y/engine.sii"])
+
+
+@guard
 def test_mass_override() -> None:
     section("--mass override")
     with tempfile.TemporaryDirectory() as td:
@@ -2834,6 +2899,8 @@ def main() -> int:
     test_every_brand_gets_its_own_vendor()
     test_build_power_curve_hits_its_target()
     test_prompt_power_never_blocks()
+    test_air_resistance_override()
+    test_dealer_price()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():

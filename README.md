@@ -158,9 +158,46 @@ You can always type a name instead of using the arrows (e.g. `sedan`,
 | `--no-car-tune` | Leave chassis physics alone (still writes `tags[]` + dealer bindings). |
 | `--power` | Target peak power in horsepower (SCS's own Road Trip cars make 202-398 hp). **Preferred.** Rebuilds the torque curve on SCS's shape. |
 | `--peak-power-rpm` | Rev at which peak power occurs, e.g. `4500` (SCS's cars: 4500-6000). A higher value also lowers idle torque, so the car creeps less. |
+| `--air-resistance` | Chassis drag coefficient. Use this to settle top speed and the 60-120 run — see below. |
+| `--price` | What the Car Dealer charges for the finished car, in dollars — see below. |
 | `--acceleration` | Target 0-60 mph in seconds. The engine is tuned to hit it at the given `--mass`. Preferred over `--engine-nm-per-tonne`. |
 | `--force-physics` | Overwrite chassis physics even when the mod already has car-sane values. |
 | `--keep-physics` | Keep the global truck `physics.sii`. **Off by default** — see below. |
+
+### Top speed, and why the engine curve can't fix it
+
+Drag rises with the square of speed; engine torque depends on revs. In a truck
+10-speed box those two do not line up: top gear is so short that the engine is
+still in the same 1500-4000 rpm band at 120 mph that it uses for 0-60. So there
+is no torque taper that slows 60-120 while leaving the launch alone — the two
+phases occupy the same revs.
+
+`--air-resistance` is therefore the only lever that separates them, and because
+drag share climbs with v³, raising it barely touches 0-60:
+
+| `--air-resistance` | push left @60 | @80 | @120 | 0-60 cost |
+|---|---|---|---|---|
+| `0.55` (default for an SUV) | 98% | 96% | 86% | — |
+| `2.4` | 92% | 82% | 39% | −1.4% |
+
+SCS's own cars ship `0.37-0.596`. A converted car with a realistic engine will
+run away well past 150 mph at those values, which is why the override exists.
+
+### Price
+
+ATS has **no single car-price key**. The Car Dealer totals the `price:` of every
+accessory named by a `data_path` in the dealer unit — SCS's own `f150_23`,
+`bronco_24`, `mustang_67` and `victoria_06` dealer files declare no price at all.
+The `accessories[]` list *is* the price breakdown.
+
+`--price 45000` rescales exactly those listed components so the dealer totals
+the figure you asked for, keeping their proportions. The mod's wider upgrade
+menu — the rest of the paint library, spare interiors, optional parts — is
+deliberately left alone, so re-pricing the base car never inflates what you can
+still buy afterwards.
+
+Without the flag the mod's own prices are kept untouched and the resulting total
+is printed in the report.
 
 ### Vehicle types and cargo
 
