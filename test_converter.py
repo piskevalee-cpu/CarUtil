@@ -884,6 +884,88 @@ def test_air_resistance_override() -> None:
 
 
 @guard
+def test_addons_bound_by_directory_not_filename() -> None:
+    section("addons bound by directory, not filename")
+    vdir = "def/vehicle/truck/testcar/"
+    files = {
+        "manifest.sii": "SiiNunit\n{\npackage[]: \"test\"\n}\n",
+        f"{vdir}data.sii": (
+            "SiiNunit\n{\naccessory_truck_data : vehicle.testcar\n{\n"
+            '\tinfo[]: "Test"\n'
+            '\trequire[]: mirror\n'
+            '\trequire[]: f_light_chs\n'
+            '\trequire[]: steering_w\n'
+            "}\n}\n"
+        ),
+    }
+    for part in ("chassis/awd", "cabin/c", "interior/i", "engine/e",
+                 "transmission/t", "head_light/led", "paint_job/color0"):
+        files[f"{vdir}{part}.sii"] = "SiiNunit\n{\n\tname: \"x\"\n}\n"
+    # The GLS's front-light addon is led.sii, NOT shape1.sii. It is the only
+    # unit carrying the headlight's exterior_model, so dropping it leaves the
+    # converted car with no headlights at all.
+    files[f"{vdir}accessory/mirror/shape1.sii"] = "SiiNunit\n{\n}\n"
+    files[f"{vdir}accessory/steering_w/default.sii"] = "SiiNunit\n{\n}\n"
+    files[f"{vdir}accessory/f_light_chs/led.sii"] = "SiiNunit\n{\n}\n"
+    for wheel in ("f_tire/t", "f_disc/d", "f_hub/h", "f_nuts/n",
+                  "r_tire/t", "r_disc/d", "r_hub/h", "r_nuts/n"):
+        files[f"def/vehicle/{wheel}.sii"] = "SiiNunit\n{\n}\n"
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "testcar.scs"
+        with zipfile.ZipFile(path, "w") as z:
+            for name, body in files.items():
+                z.writestr(name, body)
+        parts, rep = C.discover_parts(C.ModSource(path), vdir, "testcar",
+                                      "/vehicle/car/testcar")
+
+    bound = parts["accessories"]
+    check("shape-named addon still binds", "mirror" in bound)
+    check("steering_w special case still binds", "steering_w" in bound)
+    check("non-shape addon binds (the GLS headlight)", "f_light_chs" in bound,
+          str(sorted(bound)))
+    check("it binds the right file",
+          bound.get("f_light_chs", ("", ""))[1]
+          == f"/{vdir}accessory/f_light_chs/led.sii")
+    check("requires captured from data.sii",
+          parts["requires"] == ["mirror", "f_light_chs", "steering_w"],
+          str(parts.get("requires")))
+
+    # every require[] must resolve, or the vehicle can never be completed
+    unsatisfied = [r for r in parts["requires"] if r not in bound]
+    check("no unsatisfied require[]", unsatisfied == [], str(unsatisfied))
+    check("no gap reported for a fully satisfiable mod",
+          not [g for g in rep.gaps if "requires" in g], str(rep.gaps))
+
+
+@guard
+def test_unsatisfied_require_is_reported() -> None:
+    section("an unbindable require[] is reported")
+    vdir = "def/vehicle/truck/testcar/"
+    files = {
+        f"{vdir}data.sii": (
+            "SiiNunit\n{\naccessory_truck_data : vehicle.testcar\n{\n"
+            '\trequire[]: mirror\n'
+            '\trequire[]: nonexistent_addon\n'
+            "}\n}\n"
+        ),
+    }
+    for part in ("chassis/awd", "cabin/c", "interior/i", "engine/e",
+                 "transmission/t", "head_light/led", "paint_job/color0"):
+        files[f"{vdir}{part}.sii"] = "SiiNunit\n{\n}\n"
+    files[f"{vdir}accessory/mirror/shape1.sii"] = "SiiNunit\n{\n}\n"
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "testcar.scs"
+        with zipfile.ZipFile(path, "w") as z:
+            for name, body in files.items():
+                z.writestr(name, body)
+        parts, rep = C.discover_parts(C.ModSource(path), vdir, "testcar",
+                                      "/vehicle/car/testcar")
+    check("the missing require is named in a gap",
+          any("nonexistent_addon" in g for g in rep.gaps), str(rep.gaps))
+
+
+@guard
 def test_dealer_price() -> None:
     section("--price")
     defs = {
@@ -2913,6 +2995,8 @@ def main() -> int:
     test_air_resistance_override()
     test_dealer_price()
     test_prompt_price_never_blocks()
+    test_addons_bound_by_directory_not_filename()
+    test_unsatisfied_require_is_reported()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():

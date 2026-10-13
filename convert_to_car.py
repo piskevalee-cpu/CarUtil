@@ -671,20 +671,43 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     # 5. addons. Every accessory/<dir> the mod ships is bound under its own
     # name, which is what the reference converter does -- including steering_w,
     # which it binds as ".steering_w" rather than renaming to ".swheel".
+    #
+    # Bound by DIRECTORY, never by filename. An earlier version matched
+    # shape<N>.sii and special-cased steering_w, which silently dropped any
+    # addon whose file was named otherwise. The GLS's f_light_chs shipped as
+    # accessory/f_light_chs/led.sii and went unbound -- and since that unit is
+    # the only thing carrying the headlight's exterior_model, the car converted
+    # with no headlights at all. Slot names, not filenames, are the game's
+    # contract; nothing requires an addon to be called shape1.sii.
     addon_root = f"{vdir}accessory/"
+    addons: dict[str, str] = {}
     for n in sorted(src.readable):
-        m = re.match(re.escape(addon_root) + r"([^/]+)/shape(\d+)\.sii$", n)
-        if m:
-            key = m.group(1)
-            if key not in parts["accessories"]:
-                add_accessory(key, "addon", f"/{n}")
+        if not n.startswith(addon_root) or not n.endswith(".sii"):
+            continue
+        key = n[len(addon_root):].split("/", 1)[0]
+        if key and key not in addons:
+            addons[key] = n
+    for key, n in addons.items():
+        if key not in parts["accessories"]:
+            add_accessory(key, "addon", f"/{n}")
 
-    steering = sorted(
-        n for n in src.readable
-        if n.startswith(f"{addon_root}steering_w/") and n.endswith(".sii")
-    )
-    if steering:
-        add_accessory("steering_w", "addon", f"/{steering[0]}")
+    # data.sii is carried through verbatim, so its require[] entries survive
+    # while the dealer may not offer them. An unsatisfied require means an
+    # accessory the vehicle insists on can never be fitted -- which is how the
+    # missing headlight stayed invisible until the game was launched.
+    if src.exists(f"{vdir}data.sii"):
+        requires = re.findall(
+            r'require\[\]\s*:\s*"?([\w.]+)"?',
+            src.read(f"{vdir}data.sii"),
+        )
+        parts["requires"] = requires
+        bound = set(parts["accessories"])
+        for req in requires:
+            if req not in bound:
+                rep.gap(
+                    f"vehicle requires '{req}' but no such accessory is bound; "
+                    "it will be missing in game"
+                )
     return parts, rep
 
 
