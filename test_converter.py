@@ -2461,6 +2461,45 @@ def test_readme_category_table_matches_code() -> None:
           "`tags[]` must spell the type the way the base game does" in readme)
 
 
+def test_every_brand_gets_its_own_vendor() -> None:
+    """No brand may silently fall back to the shared "other" vendor.
+
+    A brand with no shipped logo resolves to "other", which would put it in the
+    same vendor as the catch-all and reintroduce the logo collision that
+    per-brand vendors exist to prevent. Adding a brand to brands.py without
+    dropping an image into logos/ would cause exactly that.
+    """
+    section("every supported brand gets its own vendor")
+    import brands as B
+
+    check("the brand list is populated", len(B.BRANDS) >= 16, str(len(B.BRANDS)))
+    no_logo = [n for n, _l, _s in B.BRANDS if B.logo_path(n) is None]
+    check("every listed brand has a logo file", not no_logo, str(no_logo))
+    check("no logo file is orphaned",
+          all(B.logo_path(n) is not None for n in B.available()), "unreachable")
+
+    # Each brand must resolve to a distinct vendor, so two brands can never
+    # overwrite each other's logo.
+    vendors = {}
+    for name, _l, _s in B.BRANDS:
+        vendors.setdefault(C.dealer_folder(name), []).append(name)
+    shared = {v: bs for v, bs in vendors.items() if len(bs) > 1}
+    check("no two brands share a vendor folder", not shared, str(shared))
+    check("the vendor is the brand's own name",
+          all(C.dealer_folder(n) == n for n, _l, _s in B.BRANDS))
+    check("an unknown brand falls back to other",
+          C.dealer_folder("not-a-brand") == "other"
+          and C.dealer_folder("") == "other")
+
+    # And the stem must survive the sanitising build_brand_logo applies.
+    for name, _l, _s in B.BRANDS:
+        logo = C.build_brand_logo(C.dealer_folder(name), None, None,
+                                  dirs=("material/ui/car_brand_logo",))
+        stem = f"material/ui/car_brand_logo/{name}.dds"
+        check(f"{name}: logo stem survives sanitising", stem in logo,
+              str(sorted(logo))[:2])
+
+
 def test_windows_compatibility() -> None:
     """Platform contracts that are silent on Linux and fatal on Windows 11.
 
@@ -2707,6 +2746,7 @@ def main() -> int:
     test_torque_curve_gets_scs_origin()
     test_job_tags_use_the_games_vocabulary()
     test_readme_category_table_matches_code()
+    test_every_brand_gets_its_own_vendor()
     test_windows_compatibility()
     test_dependency_check()
     if not FIXTURES.is_dir():
