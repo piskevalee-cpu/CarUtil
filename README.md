@@ -116,13 +116,22 @@ reason a converted car looks "missing":
 
 So a car that is absent from Quick Jobs but works for jobs is working
 correctly. `tags[]` does not decide whether a car shows up at all; it decides
-which **cargo** the car qualifies to haul, and only `muscle`, `classic` and
-`sports` are restricted from certain cargoes.
+which **cargo** the car qualifies to haul.
+
+`tags[]` must spell the type the way the base game does. All 149 of its
+`car_job` units match on seven values: `pickup`, `suv`, `sedan`, `muscle`,
+`veteran`, `sport`, `offroad`. The converter writes those, so `--type sports`
+is stored as `sport` and `--type classic` as `veteran`; an unrecognised tag
+matches no job at all, and is now warned about at conversion time.
+
+Of the 149 jobs, 95 accept only `offroad`, `pickup`, `sedan` and `suv` — the
+heavy-cargo work. `muscle`, `sport` and `veteran` are excluded from those and
+appear only in the two premium jobs.
 
 The seven presets are `pickup`, `suv`, `sedan`, `muscle`, `classic`, `sports`,
 `offroad`. `--type` is not restricted to them: alternative spellings are
 normalised (`off-road`→`offroad`, `crossover`→`suv`, `wagon`→`sedan`,
-`coupe`→`sports`) and anything unrecognised is written through as given.
+`coupe`→`sports`, and the game's own `sport`/`veteran` are accepted too).
 
 `--extra-tags` adds further types so a car qualifies for more cargo:
 

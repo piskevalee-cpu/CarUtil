@@ -1327,3 +1327,47 @@ opposite mistake and cost a day; this was the same mistake in miniature.
 It is also a reminder that a name is not a mechanism. `crawl` describes the
 SCS unit's intent; the torque comes from the engine curve, and that is where
 the fault was.
+
+## 26. Job availability: our tag names are not the game's names
+
+"I can do jobs with pickups but not with some other kinds of car." The cause is
+a vocabulary mismatch, and it is in the base game's `car_job` units, which are
+readable like everything else.
+
+All **149** car_job units across `def.scs` and `base_vehicle.scs` declare
+`vehicle_types[]` drawn from exactly seven values:
+
+    pickup, suv, sedan, muscle, veteran, sport, offroad
+
+Our preset names are not that set. `VEHICLE_TYPES` contained `sports` and
+`classic`, and SCS has never heard of either. A tag the game does not recognise
+matches **no job at all**, so every `--type sports` and `--type classic` car was
+built with a tag that silently did nothing. Pickups worked, which is why it
+looked like a classification issue rather than a spelling one.
+
+### It is not a uniform list either
+
+Three distinct sets, and the split matters for which cargo a car can haul:
+
+| `vehicle_types[]` | jobs |
+|---|---|
+| all seven | 52 |
+| `offroad, pickup, sedan, suv` | 95 |
+| `muscle, sport, veteran` | 2 (`car_job.prem_*`) |
+
+The 95-job set is the heavy-cargo work -- `car_cargo.mach_parts`, `ore_smpl`,
+`drillcores`, `pack_proto`. **`muscle`, `sport` and `veteran` are excluded from
+it**, which is the one restriction section 17 was reaching for and could not
+confirm offline. Those three types are in the premium jobs instead.
+
+So a converted muscle or classic car does not take no jobs -- it takes a
+narrower set, and only once its tag is one the game recognises at all.
+
+### Fix
+
+`job_tag()` maps preset name to the tag the game matches on (`sports` ->
+`sport`, `classic` -> `veteran`); the rest already share their names. The
+preset names stay, because they drive the physics tables and the menu.
+`--type sport` and `--type veteran` are accepted as input aliases, and an
+unrecognised tag now warns at conversion time instead of failing silently in
+game.

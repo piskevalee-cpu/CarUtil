@@ -127,9 +127,16 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
 
 - **`car_job` / `tags[]` is not about job visibility.** Quick Jobs *lend you a
   vehicle* by design. Your own car belongs in the **Dispatch Market**, once owned.
-  `tags[]` decides which *cargo* a car may haul, and only `muscle`, `classic` and
-  `sports` are restricted. A converted car missing from Quick Jobs is working
-  correctly. See `FINDINGS.md` §17.
+  See `FINDINGS.md` §17.
+- **`tags[]` must use the game's own vocabulary.** All 149 `car_job` units
+  match on exactly seven values: `pickup, suv, sedan, muscle, veteran, sport,
+  offroad`. Our presets are named `sports` and `classic`, which SCS has never
+  used — a tag the game does not recognise matches **no job at all**, so those
+  two types could take zero car jobs. `job_tag()` maps them to `sport` and
+  `veteran`. See `FINDINGS.md` §26.
+- **Only `muscle`, `sport` and `veteran` are restricted.** 95 of the 149 jobs
+  list only `offroad, pickup, sedan, suv`, so those three types are excluded
+  from the heavy-cargo work and appear only in the two premium jobs.
 - **Never express a physics target as an absolute number.** `--engine-torque
   1125` was fitted on a `--type classic` car whose preset mass was 1550 kg when
   the real vehicle was 2069 kg, so it was 34% out before it was ever driven.
