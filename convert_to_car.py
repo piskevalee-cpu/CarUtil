@@ -689,15 +689,20 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     # namespace ATS does not have: the game died with
     # "Can not open '/vehicle/truck/upgrade/interior_decors/...pmd'". They are
     # still carried through in the archive; they are just never auto-bound.
-    DECORATIVE = (
-        "toy", "toybig", "toyseat", "toystand", "toybox", "toyset",
-        "set_dashbrd", "interior_decor", "interior_decors", "decoration",
-        "dashboard_toy", "ornament",
-    )
+    #
+    # Matched as whole directory names, NOT as prefixes. A prefix test on "toy"
+    # also swallows accessory/toyota_livery/ and accessory/toybox_trim/, which
+    # are real parts -- and a slot silently left unbound is a car with a hole
+    # in it, which is the same class of fault this list exists to prevent.
+    DECORATIVE = frozenset({
+        "toybig", "toyseat", "toystand", "toyseat_chs", "toybig_chs",
+        "toystand_chs", "set_dashbrd", "set_dashboard", "dashboard_toy",
+        "interior_decor", "interior_decors", "decoration", "ornament",
+        "coaster", "airfreshener",
+    })
 
     def _is_decorative(name: str) -> bool:
-        low = name.lower()
-        return any(low == d or low.startswith(d) for d in DECORATIVE)
+        return name.lower() in DECORATIVE
 
     def add_accessory(name: str, kind: str, path: str, slot: str | None = None) -> None:
         key = slot or name

@@ -428,12 +428,15 @@ def test_decorative_slots_are_never_auto_bound() -> None:
     """
     section("decorative slots are left out of the car")
     decoys = ("toybig", "toyseat", "toystand", "set_dashbrd", "interior_decors")
+    # Names that merely START with "toy" or "interior_decor" and are real
+    # parts. A prefix match would swallow these.
+    keepers = ("toyota_livery", "toybox_trim", "interior_decor_lights")
     with tempfile.TemporaryDirectory() as td:
         extra = {
             f"accessory/{d}/x.sii":
                 f'SiiNunit\n{{\naccessory_truck_addon : {d}\n{{\n'
                 f'\tui_name: "{d}"\n}}\n}}\n'
-            for d in decoys
+            for d in decoys + keepers
         }
         mod = synthetic_mod(Path(td) / "mod", extra_defs=extra)
         out = Path(td) / "o.scs"
@@ -449,6 +452,11 @@ def test_decorative_slots_are_never_auto_bound() -> None:
         for d in decoys:
             check(f"{d} def is still in the archive",
                   any(d in n for n in names), str(names[:5]))
+        # The whole point of matching whole names: a real part whose name
+        # starts with a decorative word must still be bound.
+        for d in keepers:
+            check(f"{d} is a real part and IS bound",
+                  f"accessory/{d}/" in bound, bound[:400])
 
 
 def _chassis_unit(*body: str) -> str:
