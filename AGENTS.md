@@ -229,12 +229,27 @@ Every path component is matched case-insensitively. ext4 is case-sensitive by
 default, so an exact-case probe finds the directory on NTFS and on a
 case-insensitive btrfs but misses it on a stock Linux Mint install.
 
-`test_find_mod_folders_layouts` builds a synthetic `$HOME` with 14 real layouts —
+`test_find_mod_folders_layouts` builds a synthetic `$HOME` with 16 real layouts —
 Proton/Wine/Flatpak/Snap/Lutris, `My Documents`, a prefix with no `pfx/`,
-`profiles/` instead of `config.cfg`, a lowercase directory, and both symlink
-shapes — and asserts each is found. It also asserts the search completes in under
-two seconds, which is what stops anyone reintroducing a walk. It runs **before**
-the fixture gate, since it needs no real mods.
+`profiles/` instead of `config.cfg`, a lowercase directory, both symlink shapes,
+and both Flatpak arrangements — and asserts each is found. It also asserts the
+search completes in under two seconds, which is what stops anyone reintroducing a
+walk. It runs **before** the fixture gate, since it needs no real mods.
+
+**Enumerate Steam *roots*, not finished `compatdata` paths.** Steam's layout is
+not one thing: `~/.steam` is normally a symlink farm whose `root` and `steam`
+entries point back into `~/.local/share/Steam`, but on some builds they are real
+directories, and Flatpak adds a sandbox root on top. Hand-listing
+`.steam/steamapps/compatdata` covered the symlink case and silently missed the
+real-directory one. `_prefix_candidates()` now lists roots
+(`~/.steam`, `~/.steam/root`, `~/.steam/debian-installation`,
+`~/.var/app/com.valvesoftware.Steam/…`, `~/snap/steam/…`) and appends
+`steamapps/compatdata` itself, so both arrangements resolve and adding a launcher
+means adding one root rather than remembering every permutation beneath it.
+
+**The Flatpak and Snap support is reasoned from their documented layouts, not
+verified against a live install** — this machine has neither. The synthetic
+tests cover the shapes; `--mod-dir` covers anything they miss.
 
 **The test fixtures are third-party assets and must never be committed.** Real
 car mods live in `../testing-covnverter/` — the typo is in the real directory

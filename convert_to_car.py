@@ -2734,27 +2734,49 @@ def _synth_tobj(path: str) -> bytes:
 
 _ATS_DIR = "American Truck Simulator"
 
-# Prefixes that can hold a Windows ATS install on Linux. Kept as a list rather
-# than a set because the order decides which one is offered first when several
-# exist, and ~/Documents is the most likely to be the one in use.
+
 def _prefix_candidates(home: Path) -> list[Path]:
-    return [
-        home / ".local" / "share" / "Steam" / "steamapps" / "compatdata",
-        home / ".steam" / "steamapps" / "compatdata",
-        home / ".steam" / "root" / "steamapps" / "compatdata",
-        home / ".steam" / "steam" / "steamapps" / "compatdata",
-        # Flatpak and Snap both hide the real install under a sandbox root,
-        # and Lutris keeps whole prefixes in ~/Games. These were all missing
-        # until a Linux Mint user reported the finder coming up empty.
+    """Directories that can hold a Windows ATS install on Linux.
+
+    Steam is the awkward one. A plain install keeps its tree in
+    ~/.local/share/Steam, but ~/.steam is a symlink farm whose root and steam
+    entries point back into it, the Debian package installs to
+    ~/.steam/debian-installation, and Flatpak and Snap bury the whole thing
+    under a sandbox root. Each of those can hold real files or a symlink, and
+    the two cases resolve to the same place, so rather than guess which
+    arrangement a given machine has, every known Steam root is listed and the
+    is_dir() probe discards the ones that are not there.
+
+    Listing the *roots* rather than the finished compatdata paths is what keeps
+    this honest: adding one launcher means adding one root here, not
+    remembering every permutation of .steam/root, .steam/steam and
+    .steam/steamapps beneath it.
+    """
+    steam_roots = [
+        home / ".local" / "share" / "Steam",
+        home / ".steam",
+        home / ".steam" / "root",
+        home / ".steam" / "steam",
+        home / ".steam" / "debian-installation",
+        # Flatpak: data/Steam is the real tree, .steam/ is a symlink farm into
+        # it, and .local/share/Steam appears on some builds.
+        home / ".var" / "app" / "com.valvesoftware.Steam" / "data" / "Steam",
+        home / ".var" / "app" / "com.valvesoftware.Steam" / ".steam",
+        home / ".var" / "app" / "com.valvesoftware.Steam" / ".steam" / "root",
+        home / ".var" / "app" / "com.valvesoftware.Steam" / ".steam" / "steam",
         home / ".var" / "app" / "com.valvesoftware.Steam"
-             / "data" / "Steam" / "steamapps" / "compatdata",
-        home / ".var" / "app" / "com.valvesoftware.Steam"
-             / ".steam" / "steamapps" / "compatdata",
-        home / "snap" / "steam" / "common" / ".local" / "share" / "Steam"
-             / "steamapps" / "compatdata",
+             / ".local" / "share" / "Steam",
+        # Snap: 'current' is a symlink to the installed revision.
+        home / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
+        home / "snap" / "steam" / "current" / ".local" / "share" / "Steam",
+    ]
+    candidates = [r / "steamapps" / "compatdata" for r in steam_roots]
+    # Wine and Lutris keep whole prefixes, so the base is drive_c/users itself.
+    candidates += [
         home / ".wine" / "drive_c" / "users",
         home / "Games" / "lutris" / "drive_c" / "users",
     ]
+    return candidates
 
 
 def _looks_like_ats_data(p: Path) -> bool:

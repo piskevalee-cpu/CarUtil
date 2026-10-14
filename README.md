@@ -240,8 +240,18 @@ python3 convert_to_car.py mod.scs --type suv --extra-tags pickup,sedan --brand h
 At the end of a conversion the tool prints your ATS mod folder. It finds that by
 constructing the paths a Windows ATS install can occupy rather than searching for
 one: `~/Documents`, a Proton prefix (`<appid>/pfx/drive_c/users/<user>/Documents`),
-a Wine prefix, and the Flatpak, Snap and Lutris layouts. Symlinks are resolved by
-the filesystem, so a linked prefix or Steam library is found without being walked.
+a Wine prefix, and the Flatpak, Snap and Lutris layouts.
+
+For Steam it lists every **Steam root** it might sit under — `~/.local/share/Steam`,
+`~/.steam`, `~/.steam/debian-installation`, the Flatpak sandbox
+(`~/.var/app/com.valvesoftware.Steam/…`) and Snap (`~/snap/steam/…`) — and probes
+each for `steamapps/compatdata`. That matters because Steam installs vary: `~/.steam`
+is normally a symlink farm whose `root` and `steam` entries point back into the real
+tree, but on some builds they are real directories instead. Listing roots rather than
+one finished path per launcher means both resolve.
+
+Symlinks are handled by the filesystem, so a linked prefix or Steam library is found
+without anything being traversed.
 
 Two things it deliberately does **not** do. It does not walk the prefix tree —
 a Proton prefix holds over a thousand symlinks into the runtime, so following them

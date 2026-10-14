@@ -1757,6 +1757,32 @@ def test_find_mod_folders_layouts() -> None:
             want["symlinked_steamapps"] = linked
         except (OSError, NotImplementedError):
             skip("symlinked steam library", "symlinks unavailable here")
+
+        # Flatpak lays Steam out as data/Steam plus a .steam symlink farm into
+        # it. That works via data/Steam. The case that does not is a build
+        # where .steam/root is a real directory instead of a symlink -- which
+        # is why the candidate list enumerates Steam *roots* rather than
+        # remembering one path per launcher.
+        fp = root / ".var/app/com.valvesoftware.Steam"
+        fp_data = mk(f".var/app/com.valvesoftware.Steam/data/Steam"
+                     f"/steamapps/compatdata/4130880446/pfx/drive_c"
+                     f"/users/steamu/Documents/{data}")
+        (fp / ".steam").mkdir(parents=True, exist_ok=True)
+        for link, target in (("root", "../data/Steam"),
+                             ("steam", "../data/Steam")):
+            try:
+                os.symlink(target, fp / ".steam" / link)
+            except (OSError, NotImplementedError):
+                pass
+        try:
+            os.symlink("root/steamapps", fp / ".steam" / "steamapps")
+        except (OSError, NotImplementedError):
+            pass
+        want["flatpak_symlink_farm"] = fp_data
+
+        want["flatpak_real_steam_root"] = mk(
+            ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps"
+            f"/compatdata/4130880446/pfx/drive_c/users/steamu/Documents/{data}")
         return want
 
     with tempfile.TemporaryDirectory() as td:
