@@ -275,7 +275,7 @@ Adding a brand is two steps: drop its image in `logos/`, and add a row to
 with no image falls back to the flat placeholder rather than failing.
 `--brand-logo` uses a specific file, `--brand-logo-dir` a directory of your own.
 
-All 22 brands currently have artwork. Note the files are not all actually PNGs
+All 23 brands currently have artwork. Note the files are not all actually PNGs
 despite the extension — some are WebP and some SVG — which is why conversion
 goes through ImageMagick rather than a PNG decoder.
 
@@ -290,7 +290,9 @@ The tool prints three groups at the end: **changes**, **parts bound**, and
 python3 test_converter.py
 ```
 
-515 checks. The important one is the **reference fidelity check**: it converts the
+Hundreds of checks — the exact number moves with the brand list and with whether
+the fixtures are set, so read the exit code rather than a remembered total. The
+important one is the **reference fidelity check**: it converts the
 Volkswagen Parati (a mod already known to work in Car Mode) and asserts the
 generated `car_dealer` binding covers every accessory the original binds, and
 that every `data_path` it emits resolves to a real file.

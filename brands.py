@@ -37,6 +37,7 @@ BRANDS: list[tuple[str, str, str]] = [
     ("subaru",      "Subaru",        "subaru"),
     ("tesla",       "Tesla",         "tesla"),
     ("toyota",      "Toyota",        "toyota"),
+    ("volvo",       "Volvo",         "volvo"),
 ]
 
 # Friendly spellings mapped onto a canonical brand name.

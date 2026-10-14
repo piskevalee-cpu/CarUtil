@@ -213,18 +213,55 @@ class ModSource:
         self.local = recoverable
         self.fake_encryption = True
 
+    def _central_method(self, name: str, local_method: int) -> int:
+        """The compression method to actually decode `name` with.
+
+        The local header is authoritative for the offset and the encryption
+        flag, but NOT for the method. Measured across the three mods in
+        testing-covnverter, the local method byte is 1 for *every* entry --
+        509 of 509 in the Escalade, 463 of 463 in the W223, 326 of 326 in the
+        Pilot -- whether the payload is genuinely deflated (central says 8) or
+        genuinely stored (central says 0). It is simply a constant in these
+        archives, so it carries no information at all.
+
+        The central directory's compress_type is the one that matches the
+        bytes. See _read_local for what went wrong when we trusted the other
+        one.
+        """
+        if self.zf is not None:
+            try:
+                return self.zf.getinfo(name).compress_type
+            except KeyError:
+                pass
+        return local_method
+
     def _read_local(self, name: str) -> bytes:
         """Read an entry using its LOCAL header, which is what actually matches
-        the bytes on disk when the central directory disagrees."""
+        the bytes on disk when the central directory disagrees.
+
+        _central_method supplies the method, because the local one is a
+        constant 1 in these archives and means nothing. Getting this wrong is
+        what made the Escalade crash the game: the payload is *stored*, we
+        asked zlib to inflate it, and raw deflate lets a stored-block header
+        sit inside arbitrary bytes -- so zlib found a fake one, decoded it
+        happily and returned 10 bytes of a 61-byte definition WITHOUT raising.
+        The "if that fails, treat the bytes as stored" fallback below could
+        therefore never fire, and read()'s errors="replace" then laundered the
+        10 junk bytes into valid-looking UTF-8 that we wrote out as a def. The
+        camera unit vanished from the archive, data.sii's interior_camera_oculus
+        became a dangling pointer, and load_unit() killed the game when the
+        save spawned the car.
+        """
         offset, csize, method, _flag = self.local[name]
+        method = self._central_method(name, method)
         with open(self.path, "rb") as f:
             f.seek(offset)
             data = f.read(csize) if csize else f.read()
 
-        # The local header is authoritative, but these archives sometimes use
-        # a junk method value (1) for data that is simply stored -- the sound
-        # banks are raw RIFF/WAV. So: try to inflate, and if that fails treat
-        # the bytes as stored.
+        # method == 0 means stored, and means it; no guessing. For a genuine
+        # deflate stream, still keep the retry: the sound banks and some .mat
+        # files have historically arrived truncated, and a short inflate is
+        # better than refusing to read the entry at all.
         if method == 0:
             return data
         try:
@@ -268,11 +305,46 @@ class ModSource:
             return None
 
     def read(self, name: str) -> str:
+        """Best-effort text of an entry, tolerating undecodable bytes.
+
+        Safe for searching and for optional files whose absence is normal.
+        NOT safe for a definition you intend to write back out: see
+        read_def, which refuses instead of substituting U+FFFD.
+        """
         if name in getattr(self, "local", {}):
             return self._read_local(name).decode("utf-8", "replace")
         if self.zf is not None:
             return self.zf.read(name).decode("utf-8", "replace")
         return (self.path / name).read_text(encoding="utf-8", errors="replace")
+
+    def read_def(self, name: str) -> str:
+        """Read a .sii/.sii definition, refusing to guess at its bytes.
+
+        read()'s errors="replace" turns every undecodable byte into U+FFFD, so
+        a file we misread comes back looking like text and gets written out as
+        a definition. The game rejects it with "does not contain serialised
+        units - missing magic mark", every unit in it becomes a dangling
+        pointer, and the crash lands in load_unit() the moment a save spawns
+        the vehicle -- hours later, with nothing pointing back here. Failing at
+        conversion time costs one clear message instead.
+        """
+        data = self.read_bytes(name)
+        if data is None:
+            raise SystemExit(
+                f"error: cannot read {name} from {self.path.name}."
+            )
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SystemExit(
+                f"error: {name} is not a readable definition file.\n"
+                f"  It is {len(data)} bytes and decodes as {exc.reason} at "
+                f"byte {exc.start}, which means the entry is not the "
+                f"definition it claims to be.\n"
+                "  The conversion has stopped rather than write out a file the "
+                "game would reject. If the mod ships this file intact, "
+                "re-download it and try again."
+            )
 
     def read_bytes(self, name: str) -> bytes | None:
         """Raw bytes of any entry, or None if it cannot be read."""
@@ -419,7 +491,10 @@ def asset_roots(src: ModSource) -> list[str]:
     for name in src.readable:
         if not name.endswith((".sii", ".sui")):
             continue
-        text = src.read_opt(name) or ""
+        try:
+            text = src.read_def(name)
+        except SystemExit:
+            continue  # unreadable def: reported by the conversion pass below
         for m in re.finditer(r'"(/[A-Za-z0-9_./-]+?\.(?:pmd|pmc|tobj|pma|ods))"', text):
             p = m.group(1)
             parts = p.split("/")
@@ -662,7 +737,7 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
         # (stock: false), which is the wrong default for a delivered car.
         stock = [
             n for n in pj
-            if re.search(r"\bstock:\s*true\b", src.read(n))
+            if re.search(r"\bstock:\s*true\b", src.read_def(n))
         ]
         add_accessory("paint_job", "paint", f"/{(stock or pj)[0]}", "paint")
     else:
@@ -698,7 +773,7 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     if src.exists(f"{vdir}data.sii"):
         requires = re.findall(
             r'require\[\]\s*:\s*"?([\w.]+)"?',
-            src.read(f"{vdir}data.sii"),
+            src.read_def(f"{vdir}data.sii"),
         )
         parts["requires"] = requires
         bound = set(parts["accessories"])
@@ -1117,19 +1192,22 @@ def prompt_weight(vtype: str, preset: str | None) -> list[int] | None:
     suggestion = default_total(vtype)
     print()
     print("  How much do you want this car to weigh?")
-    print(f"    Enter the total in kg (a typical {vtype} is about {suggestion} kg),")
+    print(f"    Enter the total in kg (a typical {vtype} is about "
+          f"{suggestion} kg),")
     print("    or 'f,r' to set front and rear axles separately,")
-    print("    or press Enter to accept the default.")
+    print(f"    between {_MIN_KG} and {_MAX_KG} kg.")
     print()
     while True:
         try:
-            raw = input(f"  Weight [{suggestion} kg]: ").strip()
+            raw = input("  Weight in kg: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  cancelled -- using the type default.")
             return None
 
         if not raw:
-            return None
+            print(f"  -> enter a number, e.g. 1650, or front,rear "
+                  f"(a typical {vtype} is about {suggestion} kg)")
+            continue
         raw = raw.lower().replace(" ", "").replace("_", "")
 
         if raw in ("q", "quit", "exit"):
@@ -1295,18 +1373,19 @@ def prompt_power(mass_kg: float) -> tuple[float | None, int | None]:
     print("  How powerful should this car be?")
     print("    Enter peak power in horsepower. SCS's own Road Trip cars make")
     print("    202-398 hp, so 250-400 suits most cars.")
-    print(f"    Press Enter for {default_hp:.0f} hp.")
+    print(f"    Around {default_hp:.0f} hp suits {mass_kg:.0f} kg.")
     print()
     hp: float | None = None
     while hp is None:
         try:
-            raw = input(f"  Power [{default_hp:.0f} hp]: ").strip()
+            raw = input("  Horsepower: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  cancelled -- using the measured default.")
             return None, None
         if not raw:
-            hp = default_hp
-            break
+            print(f"  -> enter a number, e.g. 350 ({_MIN_HP:.0f} to "
+                  f"{_MAX_HP:.0f})")
+            continue
         try:
             value = float(raw.lower().rstrip("hp ").rstrip())
         except ValueError:
@@ -1322,15 +1401,15 @@ def prompt_power(mass_kg: float) -> tuple[float | None, int | None]:
     print("  Where should that power peak?")
     print("    Higher revs give more mid-range pull and a higher top speed;")
     print("    lower revs give a softer launch. SCS's cars peak at 4500-6000.")
-    print(f"    Press Enter for {peak} rpm.")
     print()
     while True:
         try:
-            raw = input(f"  Peak power [{peak} rpm]: ").strip()
+            raw = input("  Peak power rev: ").strip()
         except (EOFError, KeyboardInterrupt):
             return hp, None
         if not raw:
-            return hp, None
+            print("  -> enter a number, e.g. 4500 (1000 to 9000)")
+            continue
         try:
             value = int(float(raw.lower().rstrip("rpm ").rstrip()))
         except ValueError:
@@ -1359,16 +1438,17 @@ def prompt_acceleration(mass_kg: float) -> float | None:
     print("  How quick should this car be?")
     print("    Enter the 0-60 mph time in seconds. Most cars are 4-7 s;")
     print("    a truck-based conversion lands near 12 s otherwise.")
-    print(f"    Press Enter for {default:.1f} s.")
+    print(f"    Around {default:.1f} s suits {mass_kg:.0f} kg.")
     print()
     while True:
         try:
-            raw = input(f"  0-60 seconds [{default:.1f}]: ").strip()
+            raw = input("  0-60 seconds: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  cancelled -- using the measured default.")
             return None
         if not raw:
-            return None
+            print("  -> enter a number, e.g. 5.0 (1 to 30)")
+            continue
         raw = raw.lower().rstrip("s ").replace(",", ".")
         try:
             value = float(raw)
@@ -1385,8 +1465,12 @@ def prompt_price() -> int | None:
 
     The mod's total cannot be shown here: the dealer unit is only assembled
     during the conversion, from the accessory list the vehicle's data.sii
-    resolves to. So the prompt offers a target rather than a delta, and the
+    resolves to. So the prompt asks for a figure rather than a delta, and the
     conversion reports the resulting total either way.
+
+    The field takes a bare number. Entering nothing is an omission, not a
+    request for the default, so it re-asks; cancelling the prompt (Ctrl-C)
+    still returns None and keeps the mod author's own pricing.
     """
     if not _tty():
         return None
@@ -1396,24 +1480,25 @@ def prompt_price() -> int | None:
     print("    ATS has no single price key -- the dealer adds up the price of")
     print("    every part it lists, so this rescales those parts to reach your")
     print("    figure. The rest of the upgrade menu keeps the mod's prices.")
-    print("    Press Enter to keep the mod author's own pricing.")
     print()
     while True:
         try:
-            raw = input("  Price [$0 = keep the mod's]: ").strip()
+            raw = input("  Price: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  cancelled -- keeping the mod's own prices.")
             return None
         if not raw:
-            return None
-        raw = raw.lower().replace("$", "").replace(",", "").rstrip("k")
+            print(f"  -> enter a number, or Ctrl-C to keep the mod's own "
+                  f"({_MIN_PRICE:,} to {_MAX_PRICE:,})")
+            continue
+        raw = raw.lower().replace(",", "").rstrip("k")
         try:
             value = int(float(raw))
         except ValueError:
-            print("  -> enter a dollar amount, e.g. 45000")
+            print("  -> enter a number, e.g. 45000")
             continue
         if not (_MIN_PRICE <= value <= _MAX_PRICE):
-            print(f"  -> between ${_MIN_PRICE:,} and ${_MAX_PRICE:,}")
+            print(f"  -> between {_MIN_PRICE:,} and {_MAX_PRICE:,}")
             continue
         return value
 
@@ -2271,7 +2356,7 @@ def convert(
             continue
         if stale_binding.match(name):
             continue
-        text = src.read(name)
+        text = src.read_def(name)
         new_text, _ = rewrite_asset_paths(text, mapping)
 
         if name.endswith(f"{vehicle_dir}data.sii"):

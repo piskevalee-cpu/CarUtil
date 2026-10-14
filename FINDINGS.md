@@ -1598,3 +1598,100 @@ only assembled during conversion, from the accessory list the vehicle's
 `data.sii` resolves to. So it offers a target rather than a delta, and the
 conversion reports the resulting total either way. Anything else would need
 the conversion to run twice.
+
+## 32. The Escalade crashed the game, and the archive had silently eaten a file
+
+Reported as "my game crashes". The converted Cadillac Escalade 2021 loaded,
+then took the game down as soon as a save spawned it. `game.log.txt` ended
+mid-line:
+
+    <ERROR> [unit] The file '.../camera_storage.oculus.dlc_escalade.21.sii'
+            does not contain serialised units - missing magic mark.
+    <ERROR> [unit] The unit 'vehicle.escalade_21' of type 'accessory_truck_data'
+            has dangling pointer (to 'camera.interior.escalade.21.oculus') in
+            the attribute named 'interior_camera_oculus'.
+    <ERROR> load_unit() - Failed to load units from file (.../escalade_21/data.sii)
+
+That chain is a game-side symptom with an obvious converter-side cause, and one
+file accounts for the whole thing:
+
+| | bytes | content |
+|---|---|---|
+| original mod | 61 | `SiiNunit\n{\n@include "units/interior_escalade.21_oculus.sui"\n}` |
+| converted output | 20 | `$<U+FFFD><U+FFFD>eC<U+FFFD><U+FFFD>BV<U+FFFD><U+FFFD>` |
+
+The converter had destroyed the file that defines the interior camera unit, so
+the unit did not exist, so `data.sii`'s pointer dangled, so `load_unit()` died
+when the vehicle was instantiated. Nothing upstream of the archive mentioned it.
+
+### The local method byte is a constant, and carries no information
+
+These archives are packaged so that standard readers (7-Zip, `zipfile`) see the
+encryption flag in the central directory and refuse to open anything, while the
+local headers describe plain data. `ModSource` already recovered from that by
+walking local headers and trusting them — the offset and the flag are right,
+but the **method is not**.
+
+Measured across all three reference mods, the local method byte is `1` for
+*every single entry*:
+
+| mod | local says 1, central says deflate | local says 1, central says stored |
+|---|---|---|
+| Escalade | 498 | 11 |
+| W223 | 455 | 8 |
+| Pilot | 316 | 10 |
+
+It is `1` whether the payload is genuinely deflated or genuinely stored, so it
+distinguishes nothing. Only the central directory's `compress_type` matches the
+bytes. `_central_method()` now takes it from there.
+
+### Why "try to inflate, fall back to stored" did not save us
+
+The old `_read_local()` carried a comment saying the method value can be junk,
+so it tried `zlib.decompress` and fell back to the stored bytes if that raised.
+It never raised:
+
+    zlib.decompress(stored_def_bytes, -15) -> 10 b'$\x84\x83eC\x84\x81BV\xe5'
+
+Raw deflate permits a *stored block* header to appear inside arbitrary bytes. In
+ASCII data zlib finds one, decodes it, reports end-of-stream, and hands back a
+short garbage slice **without error**. An exception-based fallback cannot catch
+that, because there is no exception. The sound banks survived only by luck —
+their leading bytes fail to parse as deflate, so the fallback did fire for them.
+
+Now `_read_local()` returns the stored bytes outright when the central
+directory says stored, and no longer infers anything from an exception.
+
+### `errors="replace"` is what turned a misread into corruption
+
+`read()` decoded every entry with `errors="replace"`. Applied to the 10 junk
+bytes that produced `$<U+FFFD><U+FFFD>eC...` — which is *valid UTF-8*. The
+def pass then wrote it back out as a definition, and the converter reported
+success. The failure mode was not "the file is broken" but "we confidently
+produced a broken file".
+
+`read_def()` now decodes strictly and stops the conversion, naming the file.
+For a mod file that is the right trade: one clear message at conversion time
+instead of a crash in `load_unit()` hours later, with nothing pointing back.
+
+### Scope
+
+Checked all three mods with the exact predicate (a def whose bytes are not valid
+UTF-8, i.e. anything `errors="replace"` would mangle): Escalade 1, W223 0,
+Pilot 0. That is the whole reason only this car failed and the other two were
+fine — a single ASCII file unlucky enough to parse as a complete deflate
+stream.
+
+`test_stored_entry_is_not_inflated` now reproduces it with the real 61-byte
+payload, and `test_readable_defs_are_valid_utf8` asserts the premise across the
+fixture mods.
+
+### The lesson
+
+Both of these had been treated as known quirks rather than as bugs. §16 and §20
+each show a "we know it is wrong but the workaround has been fine so far"
+moment, and here the workaround was fine for 21 sound banks and one ASCII file.
+A fallback that only fires on an exception is not a fallback; it is a guess.
+When the archive disagrees with itself, one of the two fields is noise, and the
+only way to know which is to measure across the real mods rather than reason
+about which one "should" be authoritative.

@@ -87,6 +87,16 @@ def guard(fn):
         except FileNotFoundError as exc:
             skip(name, f"fixture not present: {Path(exc.filename or '').name}"
                         " (set CARUTIL_FIXTURES)")
+        except SystemExit as exc:
+            # main() reports a missing input with SystemExit rather than
+            # FileNotFoundError, so a half-populated CARUTIL_FIXTURES used to
+            # abort the whole run instead of skipping the checks that need the
+            # absent mod. Point it at a directory holding every fixture.
+            msg = str(exc)
+            if "no such file or folder" not in msg:
+                raise
+            skip(name, f"fixture not present: {msg.split(':')[-1].strip()}"
+                        " (set CARUTIL_FIXTURES)")
 
     return run
 
@@ -1002,7 +1012,102 @@ def test_dealer_price() -> None:
           and "torque: 400" in defs["def/vehicle/truck/y/engine.sii"])
 
 
-@guard
+def _answer(answers: list[str] | None = None):
+    """A scripted stand-in for input() that records every prompt shown."""
+    prompts: list[str] = []
+
+    def fake(prompt: str = "") -> str:
+        prompts.append(prompt)
+        if not answers:
+            raise AssertionError(f"prompted past the end: {prompt!r}")
+        return answers.pop(0)
+
+    return fake, prompts
+
+
+def test_prompts_demand_a_value() -> None:
+    """Empty input is an omission, not a request for the default.
+
+    Every prompt re-asks instead of silently applying a suggestion, and the
+    label carries no bracketed default for the eye to fall back on. Ctrl-C
+    must still cancel, or a mandatory field becomes unescapable.
+    """
+    section("prompts demand a value")
+    import builtins
+    import io
+
+    real_tty = C._tty
+    real_input = builtins.input
+    real_stdout = sys.stdout
+    C._tty = lambda: True
+    try:
+        def drive(fn, answers, *args):
+            fake, prompts = _answer(list(answers))
+            builtins.input = fake
+            buf = io.StringIO()
+            sys.stdout = buf
+            try:
+                result = fn(*args)
+            finally:
+                sys.stdout = real_stdout
+            return result, prompts, buf.getvalue()
+
+        cases = [
+            ("weight", C.prompt_weight, ("suv", None), ["", "1650"], [862, 788]),
+            ("weight split", C.prompt_weight, ("suv", None),
+             ["", "1150,1050"], [1150, 1050]),
+            ("power", C.prompt_power, (2200,), ["", "350", "5000"], (350.0, 5000)),
+            ("acceleration", C.prompt_acceleration, (2200,), ["", "5.5"], 5.5),
+            ("price", C.prompt_price, (), ["", "45000"], 45000),
+        ]
+        for label, fn, args, answers, expected in cases:
+            got, prompts, text = drive(fn, answers, *args)
+            check(f"{label}: empty input re-asks", len(prompts) == len(answers),
+                  f"{len(prompts)} prompts")
+            check(f"{label}: accepted value returned", got == expected,
+                  f"{got!r} != {expected!r}")
+            check(f"{label}: the re-ask explains itself",
+                  "enter a number" in text, text.strip().splitlines()[-1:])
+            check(f"{label}: no bracketed suggestion in the label",
+                  "[" not in "".join(prompts), str(prompts))
+
+        # A bad value must be rejected in its own right, not just when empty.
+        _r, _p, text = drive(C.prompt_price, ["abc", "45000"])
+        check("nonsense price is rejected", "enter a number" in text)
+        _r, _p, text = drive(C.prompt_price, ["99999999", "45000"])
+        check("absurd price is rejected", "between" in text)
+        _r, _p, text = drive(C.prompt_power, ["5000", "350", "4500"], 2200)
+        check("peak rev out of range is rejected", "between" in text)
+
+        # The money symbol is gone, and so are the unit suffixes in the labels
+        # for the field the user asked to be bare.
+        _r, prompts, text = drive(C.prompt_price, ["45000"])
+        check("the price field carries no dollar sign",
+              "$" not in prompts[0] and "$" not in text, text)
+
+        # Cancelling is still an escape from a mandatory field.
+        def cancel(fn, *args):
+            def boom(prompt: str = "") -> str:
+                raise KeyboardInterrupt
+            builtins.input = boom
+            buf = io.StringIO()
+            sys.stdout = buf
+            try:
+                return fn(*args)
+            finally:
+                sys.stdout = real_stdout
+
+        check("Ctrl-C cancels the weight prompt",
+              cancel(C.prompt_weight, "suv", None) is None)
+        check("Ctrl-C cancels the power prompt",
+              cancel(C.prompt_power, 2200) == (None, None))
+        check("Ctrl-C cancels the price prompt",
+              cancel(C.prompt_price) is None)
+    finally:
+        C._tty = real_tty
+        builtins.input = real_input
+
+
 def test_prompt_price_never_blocks() -> None:
     section("price prompt never blocks")
     check("prompt_price returns None when stdin is not a tty",
@@ -1315,6 +1420,104 @@ def _make_mislabelled_zip(dest: Path) -> bool:
     r = subprocess.run(["zip", "-q", "-r", str(plain), "."], cwd=work,
                        capture_output=True)
     return plain if (r.returncode == 0 and plain.exists()) else None
+
+
+def _make_junk_method_zip(dest: Path, name: str, payload: bytes) -> Path:
+    """An archive whose entries are STORED but whose local headers claim
+    method 1 (deflate) -- the packaging seen in every mod in testing-covnverter.
+
+    The local method byte is 1 for 100% of entries there, whether the payload
+    is really deflated or really stored, so it carries no information. Trusting
+    it is what corrupted the Escalade's camera definition.
+    """
+    out = dest / "junk.scs"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
+        z.writestr(name, payload)
+    raw = bytearray(out.read_bytes())
+    # Set the local file header's method field (offset 8) to 1. The central
+    # directory keeps saying 0, which is the disagreement under test.
+    i = raw.find(b"PK\x03\x04")
+    raw[i + 8:i + 10] = b"\x01\x00"
+    out.write_bytes(bytes(raw))
+    return out
+
+
+def test_stored_entry_is_not_inflated() -> None:
+    """A stored payload must come back byte-identical, junk method or not.
+
+    This is the regression that would have caught the Escalade crash.
+    """
+    section("a stored entry is never inflated")
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        # The exact bytes of the definition that got corrupted, at the exact
+        # length. The payload is pure ASCII, which is the whole problem: raw
+        # deflate permits a stored-block header inside arbitrary bytes, so
+        # zlib "successfully" inflates this to 10 junk bytes and never raises.
+        payload = (b'SiiNunit\n{\n'
+                   b'@include "units/interior_escalade.21_oculus.sui"\n}\n')
+        built = _make_junk_method_zip(td, "def/camera/cam.sii", payload)
+
+        with zipfile.ZipFile(built) as z:
+            check("central directory still says stored",
+                  z.getinfo("def/camera/cam.sii").compress_type == 0)
+
+        # Drive the local-header path the converter actually uses.
+        src = C.ModSource(built, plain_read=False)
+        src.local = C.scan_local_headers(built)
+        check("local header claims deflate",
+              src.local["def/camera/cam.sii"][2] == 1)
+        check("_central_method overrides it",
+              src._central_method("def/camera/cam.sii", 1) == 0)
+
+        got = src._read_local("def/camera/cam.sii")
+        check("payload survives byte-identical", got == payload,
+              f"{len(got)}b vs {len(payload)}b")
+        check("it still parses as a definition",
+              got.startswith(b"SiiNunit"))
+
+        # And the text reader must refuse to launder a genuinely binary file.
+        broken = _make_junk_method_zip(td, "def/vehicle/x.sii",
+                                       b"SiiNunit\n{\n\xff\xfe\x00broken\n}\n")
+        bsrc = C.ModSource(broken, plain_read=False)
+        bsrc.local = C.scan_local_headers(broken)
+        try:
+            bsrc.read_def("def/vehicle/x.sii")
+            check("read_def refuses undecodable defs", False, "no error raised")
+        except SystemExit as exc:
+            check("read_def refuses undecodable defs", True)
+            check("the error names the file", "def/vehicle/x.sii" in str(exc))
+            check("the error explains itself",
+                  "not a readable definition" in str(exc))
+
+
+def test_readable_defs_are_valid_utf8() -> None:
+    """No mod may ship a definition we cannot decode cleanly.
+
+    errors="replace" used to turn a misread into plausible text, so this
+    asserts the premise directly against the fixture mods.
+    """
+    section("every readable def decodes as UTF-8")
+    if not FIXTURES.is_dir():
+        skip("real mods decode cleanly", "fixtures not present")
+        return
+    bad = []
+    for scs in sorted(FIXTURES.glob("*.scs")):
+        try:
+            src = C.ModSource(scs, plain_read=True)
+        except Exception:
+            continue
+        for name in src.readable:
+            if not name.endswith((".sii", ".sui")):
+                continue
+            data = src.read_bytes(name)
+            if data is None:
+                continue
+            try:
+                data.decode("utf-8")
+            except UnicodeDecodeError:
+                bad.append(f"{scs.name}:{name}")
+    check("no mod ships a def that is not UTF-8", not bad, "; ".join(bad[:3]))
 
 
 @guard
@@ -2994,6 +3197,7 @@ def main() -> int:
     test_prompt_power_never_blocks()
     test_air_resistance_override()
     test_dealer_price()
+    test_prompts_demand_a_value()
     test_prompt_price_never_blocks()
     test_addons_bound_by_directory_not_filename()
     test_unsatisfied_require_is_reported()
@@ -3027,6 +3231,8 @@ def main() -> int:
     test_missing_required_off_terminal()
     test_rt_prefix_default_output()
     test_dry_run_writes_nothing()
+    test_stored_entry_is_not_inflated()
+    test_readable_defs_are_valid_utf8()
     test_locked_archive_errors_cleanly()
     test_password_unlocks()
     test_zip_wrapper_is_unwrapped()
