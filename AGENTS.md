@@ -268,6 +268,24 @@ vanished entirely rather than dimming. `require[]` is validated against the
 bound accessories and unsatisfied entries are reported as gaps at conversion
 time, precisely so this class of fault is visible before the game is launched.
 
+**`ModSource` owns two resources and must release both.** The `ZipFile` handle
+and, when a `.zip` was unwrapped, the temp dir it was unpacked into. Windows
+cannot delete an open file, so an unreleased handle makes every enclosing
+`TemporaryDirectory` raise at teardown — and this suite runs inside 46 of them.
+`/tmp` is tmpfs, so an unreleased scratch dir is RAM. Use `close()` or `with`;
+`__del__` is a backstop, not the mechanism. **Do not null `self.zf` on close** —
+a closed `ZipFile` raises "archive was already closed", whereas `None` would
+send reads down the folder branch and silently misread the `.scs` as text.
+
+**Some mods ship two archives and the error must not lie about it.** A plain-ZIP
+`.scs` holding the definitions plus a second `.scs` in SCS's HashFS container
+(`SCS#`) holding geometry, textures, sounds and usually `data.sii`. The
+converter reads the first and not the second, so "no `def/vehicle/truck/` found"
+is *false* — the mod has one. `_no_vehicle_dir_message()` names both halves and
+says which is which. There is no HashFS reader yet; the container half is
+solved (entry tables decompress to exactly `count x 16`), but path lookup needs
+CityHash64, which is not in the standard library.
+
 **Never make `find_mod_folders()` a tree walk.** It resolves the mod folder by
 *constructing* the known paths (`<appid>/pfx/drive_c/users/<user>/Documents/…`)
 rather than searching. An `os.walk(followlinks=True)` attempt took **over ten

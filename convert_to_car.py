@@ -1949,6 +1949,101 @@ def check_asset_integrity(src: ModSource, roots: list[str], rep: Report) -> None
         )
 
 
+HASHFS_MAGIC = b"SCS#"
+
+
+def _hashfs_version(path: Path) -> int | None:
+    """The HashFS version of `path`, or None if it is not a HashFS archive.
+
+    SCS containers open with `SCS#`, a u16 version and a u16 salt. v1 and v2
+    differ in how their tables are laid out; both are recognised so the
+    message can be specific.
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+    except OSError:
+        return None
+    if len(head) < 8 or head[:4] != HASHFS_MAGIC:
+        return None
+    return struct.unpack_from("<H", head, 4)[0]
+
+
+def _human_size(path: Path) -> str:
+    """File size for a diagnostic line. MB alone rounds 27 KB to '0 MB'."""
+    try:
+        n = path.stat().st_size
+    except OSError:
+        return "?"
+    if n < 1000:
+        return f"{n} B"
+    if n < 1_000_000:
+        return f"{n / 1000:.0f} KB"
+    return f"{n / 1_000_000:.0f} MB"
+
+
+def _no_vehicle_dir_message(src: ModSource) -> str:
+    """Say WHY there is no def/vehicle/truck/, which is rarely the real reason.
+
+    The plain message is usually a lie. Some mods ship their definitions and
+    their assets as two archives, the definitions in a plain ZIP and the assets
+    in an SCS HashFS container, and this tool reads only the former. Pointed at
+    the folder, the old message claimed the mod had no vehicle directory --
+    which is exactly what it says and exactly what is wrong.
+    """
+    base = (
+        "error: no def/vehicle/truck/<slug>/ found.\n"
+        "This converter targets truck-classified mods. Road Trip cars keep\n"
+        "the def/vehicle/truck/ path, so that directory must exist."
+    )
+
+    # What else is sitting next to the input?
+    siblings: list[Path] = []
+    try:
+        parent = src.path if src.path.is_dir() else src.path.parent
+        siblings = sorted(p for p in parent.iterdir()
+                          if p.is_file() and p.suffix.lower() == ".scs")
+    except OSError:
+        siblings = []
+
+    hashfs = [(p, _hashfs_version(p)) for p in siblings]
+    hashfs = [(p, v) for p, v in hashfs if v is not None]
+    if not hashfs:
+        return base
+
+    lines = [
+        "error: this mod's files are split across two archives, and only one"
+        " of them can be read.",
+        "",
+        "This converter reads plain-ZIP .scs archives and folders. It does not",
+        "read SCS's own HashFS container (the `SCS#` format the game uses), so:",
+        "",
+    ]
+    for path, ver in hashfs:
+        lines.append(f"    {path.name}  ({_human_size(path)}, HashFS v{ver})"
+                     "  <- unreadable")
+    for path in siblings:
+        if _hashfs_version(path) is None:
+            lines.append(f"    {path.name}  ({_human_size(path)}, plain ZIP)"
+                         "  <- readable")
+    lines += [
+        "",
+        "The vehicle definitions are in the readable one, but the geometry,",
+        "textures, sounds and usually the root data.sii are in the HashFS one,",
+        "so converting this folder alone cannot produce a working car.",
+        "",
+        "What to do:",
+        "  - Extract the HashFS archive with a tool that understands SCS",
+        "    containers, and point the converter at the extracted folder. The",
+        "    resulting folder has both halves and converts normally.",
+        "  - If the mod's author offers an unpacked or extracted version, use",
+        "    that.",
+        "  - --mod-dir will not help here; this is about the input, not where",
+        "    the game looks for it.",
+    ]
+    return "\n".join(lines)
+
+
 def tune_chassis(
     text: str,
     vtype: str,
@@ -2614,11 +2709,7 @@ def convert(
                 f"  {len(locked_defs)} def/vehicle/ entries are password-protected.\n"
                 "  Re-run with --password if you have it."
             )
-        raise SystemExit(
-            "error: no def/vehicle/truck/<slug>/ found.\n"
-            "This converter targets truck-classified mods. Road Trip cars keep\n"
-            "the def/vehicle/truck/ path, so that directory must exist."
-        )
+        raise SystemExit(_no_vehicle_dir_message(src))
     src_slug = src_slug or slug
     slug = slug or src_slug
     # vdir is the shared parent; each mod has its own subdirectory

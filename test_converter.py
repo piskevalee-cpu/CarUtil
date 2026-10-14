@@ -4006,6 +4006,72 @@ def test_windows_compatibility() -> None:
           "finally:" in csrc and "src.close()" in csrc)
 
 
+def test_hashfs_sibling_gets_an_honest_error() -> None:
+    """A mod split across a ZIP and a HashFS container must not be misdiagnosed.
+
+    Reported on a real mod shipped as two files: `... Def.scs`, a plain ZIP
+    holding manifest.sii and five defs, and `..._1.61x.scs`, a 58 MB SCS HashFS
+    container holding data.sii, the geometry, textures and sounds. Pointed at
+    the folder the converter said "no def/vehicle/truck/<slug>/ found" -- which
+    is precisely what it said and precisely what was wrong, because the mod does
+    have def/vehicle/truck/bmw.135im/. The user had no way to tell why.
+    """
+    section("a HashFS sibling is diagnosed, not misreported")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+
+        # The readable half: a plain-ZIP mod archive.
+        inner = root / "car Def.scs"
+        with zipfile.ZipFile(inner, "w") as z:
+            z.writestr("manifest.sii", 'SiiNunit\n{\n}\n')
+        # The unreadable half: a real SCS HashFS header, which is all the
+        # detection needs to look at.
+        (root / "car_1.61x.scs").write_bytes(
+            b"SCS#" + b"\x01\x00" + b"\x00\x00" + b"CITY" + b"\x00" * 40)
+
+        src = C.ModSource(root)
+        try:
+            msg = C._no_vehicle_dir_message(src)
+        finally:
+            src.close()
+
+        check("it does not claim the mod has no vehicle directory",
+              "no def/vehicle/truck" not in msg.split("\n")[0], msg[:120])
+        check("it names the HashFS archive",
+              "car_1.61x.scs" in msg, msg[:400])
+        check("it says which half is readable",
+              "Def.scs" in msg and "plain ZIP" in msg, msg[:400])
+        check("it gives the HashFS version", "v1" in msg, msg[:400])
+        check("it says what the user should do",
+              "Extract the HashFS archive" in msg, msg[-400:])
+        check("and it does not send them to --mod-dir",
+              "--mod-dir will not help" in msg, msg[-400:])
+
+        # A plain mod with no vehicle dir keeps the original message: this is a
+        # targeted diagnosis, not a new catch-all.
+        plain = root / "plain"
+        (plain / "def" / "vehicle" / "tires").mkdir(parents=True)
+        (plain / "manifest.sii").write_text("SiiNunit\n{\n}\n")
+        s2 = C.ModSource(plain)
+        try:
+            msg2 = C._no_vehicle_dir_message(s2)
+        finally:
+            s2.close()
+        check("an ordinary mod still gets the original message",
+              msg2.startswith("error: no def/vehicle/truck"),
+              msg2[:120])
+        check("and no HashFS advice leaks into it",
+              "HashFS" not in msg2, msg2[:200])
+
+        # And the detector really does tell the two formats apart.
+        check("a plain ZIP is not mistaken for HashFS",
+              C._hashfs_version(root / "car Def.scs") is None)
+        check("a real HashFS header is recognised",
+              C._hashfs_version(root / "car_1.61x.scs") == 1)
+        check("a missing file is not mistaken for HashFS",
+              C._hashfs_version(root / "does-not-exist.scs") is None)
+
+
 def test_modsource_releases_its_handle() -> None:
     """A conversion must not leave the input archive open afterwards.
 
@@ -4229,6 +4295,7 @@ def main() -> int:
     test_build_power_curve_hits_its_target()
     test_prompt_power_never_blocks()
     test_air_resistance_override()
+    test_hashfs_sibling_gets_an_honest_error()
     test_modsource_releases_its_handle()
     test_dealer_price()
     test_price_keeps_the_menu_proportionate()

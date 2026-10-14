@@ -577,6 +577,27 @@ definitions, it is unpacked automatically and the inner mod is converted:
   - MyMod.zip contained a mod archive; read MyMod.scs inside it
 ```
 
+**Mods split across two archives.** Some ship as a plain-ZIP `.scs` holding
+the definitions, plus a second `.scs` in SCS's own **HashFS** container
+(`SCS#` — the format the game itself uses) holding everything else. The
+converter reads plain ZIPs and folders; it does not read HashFS. Pointed at
+such a folder it says so, and names which half it can read:
+
+```
+error: this mod's files are split across two archives, and only one of them
+can be read.
+
+    2023 BMW 135i M_1.61x.scs  (58 MB, HashFS v1)  <- unreadable
+    2023 BMW 135i M Def.scs  (27 KB, plain ZIP)  <- readable
+```
+
+This used to report `no def/vehicle/truck/<slug>/ found`, which was false —
+the mod does have one. The definitions sit in the readable archive, but the
+geometry, textures, sounds and usually the root `data.sii` sit in the HashFS
+one, so converting the folder alone cannot produce a working car. Extract the
+HashFS archive with a tool that understands SCS containers and point the
+converter at the extracted folder.
+
 **Incomplete extractions.** Some mods ship without directory listings for part
 of their tree, so a plain extraction comes up hundreds of files short — the
 engine's sound bank, most of the textures and models. Every definition still
