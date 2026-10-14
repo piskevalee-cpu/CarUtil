@@ -725,21 +725,39 @@ The mod's own `truck_dealer` entry is **left exactly as shipped**.
 | `tank_size` | fuel is economy, not driving physics — see below |
 | axle/rim model paths | would import foreign assets |
 
-### Fuel is deliberately left alone
+### Fuel: the consumption model is truck-era, so it is removed
 
 `tank_size` is **not** rewritten, even when the mod carries a truck's 1200 L
-tank, and `--force-physics` does not reach it either.
+tank, and `--force-physics` does not reach it either. But the keys that decide
+how fast that fuel is burned **are** removed:
 
-This was briefly wrong in the other direction: `tank_size` *was* written, with
-car-sized presets per vehicle type. That made range worse, not better. A real
-mod's 291 L tank became 79 L while its fuel consumption — which nothing in this
-tool touches — stayed at the truck's rate, and a smaller tank at a truck's
-consumption is a strictly shorter range than the tank the mod shipped with.
+```
+  ! dropped truck fuel key(s) consumption_coef. No car in the base game sets
+    these -- all four SCS Road Trip cars take the default consumption -- so
+    this puts the car's burn rate back on the game's own scale instead of the
+    truck's.
+```
 
-Half-fixing fuel economy is worse than not fixing it. Calibrating capacity
-*and* consumption together against SCS's own Road Trip cars needs
-`dlc_rt_ford.scs` from an ATS install; until that is measured, the mod's own
-figures are left alone rather than guessed at.
+The measurement behind that: recovering the **657 definition units** SCS ships
+for its own four Road Trip cars (`mustang_67`, `victoria_06`, `bronco_24`,
+`f150_23`) from `dlc_rt_ford.scs`, `consumption_coef` appears **zero times**.
+The only fuel key present is `adblue_consumption: 0.0`. Every truck mod
+carries one anyway — `0.42` (Pilot, W223), `0.52` and `0.70` (Escalade), `1`
+(BMW 135i) — and those are truck burn rates. `adblue_consumption` and
+`no_adblue_power_limit` go with it.
+
+Removing the key beats retuning it, because there is no measured car value to
+substitute. What can be said is that removing it puts the car on exactly the
+same footing as the Mustang and the Bronco, which take the base game's own
+consumption. That moves it toward the reference rather than away — but it is
+still an **in-game** question whether the range is right.
+
+**Why the tank is left alone.** Rewriting `tank_size` was tried and reverted: a
+mod's 291 L tank became 79 L while its consumption stayed at the truck's rate,
+and a smaller tank at a truck's consumption is a strictly *shorter* range. Once
+the coefficient is dropped, the mod's oversized tank is merely generous rather
+than broken. Capacity and consumption have to move together, or not at all.
+
 
 ## What it does not do
 

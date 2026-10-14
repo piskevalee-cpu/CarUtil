@@ -496,11 +496,32 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   and add a test that reads it back out of a converted chassis.
 - **…and a half-fix is worse than no fix.** `tank_size` was then wired in, and
   that made fuel range *worse*: a mod's 291 L tank became 79 L while its fuel
-  consumption — which nothing here touches — stayed at the truck's rate.
-  Capacity and consumption have to move together, and calibrating both means
-  measuring `dlc_rt_ford.scs`, which is not on every machine. Until it is,
-  fuel is left alone. A threshold branch with no writer is dead code that
-  reads like a working rule, so remove the branch rather than leave it dormant.
+  consumption — which nothing here touched — stayed at the truck's rate. A
+  smaller tank at a truck's consumption is a strictly shorter range. Capacity
+  and consumption have to move together, or not at all. A threshold branch with
+  no writer is dead code that reads like a working rule, so remove the branch
+  rather than leave it dormant.
+- **Fuel: drop the truck's consumption model, leave the tank.** Recovering the
+  **657 definition units** SCS ships for its own four Road Trip cars from
+  `dlc_rt_ford.scs` shows `consumption_coef` appears **zero times**; the only
+  fuel key present is `adblue_consumption: 0.0`. Every truck mod carries one
+  anyway — `0.42` (Pilot, W223), `0.52`/`0.70` (Escalade), `1` (BMW 135i) —
+  and those are truck burn rates. So `consumption_coef`, `adblue_consumption`
+  and `no_adblue_power_limit` are dropped on car conversion, **warned not
+  merely reported**, because they change how the car drives in the world.
+  Removing beats retuning: there is no measured car value to substitute, and
+  removing puts the car on the same footing as the Mustang. **It still needs an
+  in-game range check** — moving toward the reference is not the same as
+  calibrated. `tank_size` stays the mod's own; SCS's four cars measure 61–98 L
+  (Mustang 61, Victoria 72, Bronco 79, F-150 98), so the presets at 47–80 are
+  themselves extrapolations and should be corrected before anyone rewrites the
+  tank.
+- **HashFS content extraction works, and is how the 657 units were read.** No
+  reader, no CityHash: scan the archive for zlib streams, decompress, and match
+  on content (`SiiNunit`, or any distinctive key). Enough to answer questions
+  about SCS's own cars. It does *not* recover file paths — those are stored as
+  64-bit hashes — so it cannot build an archive.
+
 - **`resistance_torque` is a fraction of `torque`, not a fixed number.** It has
   to be rescaled by the same factor whenever torque is, or a 476 Nm engine
   inherits a 9.4 t truck's 320 Nm of drag — 67% of peak, which is why lifting

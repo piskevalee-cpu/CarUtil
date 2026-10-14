@@ -662,6 +662,89 @@ def test_secondary_torque_is_dropped_for_a_car() -> None:
           get_key(edit_lines(scaled), "secondary_torque") is None, scaled)
 
 
+def test_truck_fuel_keys_are_dropped_for_a_car() -> None:
+    """Fuel burn is a truck-era model; no SCS car declares it.
+
+    Across the 657 definition units recovered from dlc_rt_ford.scs -- every
+    definition SCS ships for its own four Road Trip cars -- consumption_coef
+    appears ZERO times. The only fuel key present is adblue_consumption: 0.0.
+
+    Every truck mod carries one anyway: 0.42 (Pilot, W223), 0.52 and 0.70
+    (Escalade), 1 (BMW 135i). Those are truck burn rates, and leaving one on a
+    car engine is what a driver reports as "fuel lasts way too little".
+
+    Removing the key beats retuning it: there is no measured car value to
+    substitute, whereas removing it puts the car on exactly the same footing as
+    the Mustang and the Bronco, which take the base game's consumption.
+    """
+    section("truck fuel keys are dropped, not retuned")
+    engine = _engine_unit(
+        "torque: 1400",
+        "consumption_coef: 0.42",
+        "adblue_consumption: 0.035",
+        "no_adblue_power_limit: 0.75",
+        "torque_curve[]: (1000, 0.5)",
+        "torque_curve[]: (2000, 1.0)",
+        "rpm_limit: 4000",
+    )
+    rep = C.Report()
+    out = C.tune_engine(engine, rep, force=True, target_hp=200.0, tonnes=1.5)
+    lines = edit_lines(out)
+
+    check("consumption_coef is gone",
+          get_key(lines, "consumption_coef") is None, out)
+    check("adblue_consumption is gone",
+          get_key(lines, "adblue_consumption") is None, out)
+    check("no_adblue_power_limit is gone",
+          get_key(lines, "no_adblue_power_limit") is None, out)
+    # A WARN, not a quiet action: this changes how the car drives in the world
+    # and the user has to be able to see it and object.
+    check("the fuel drop is warned about, not silently applied",
+          any("truck fuel key" in w for w in rep.warnings), str(rep.warnings))
+    check("the warning names the key",
+          any("consumption_coef" in w for w in rep.warnings),
+          str(rep.warnings))
+
+    # Both engine paths, or the torque-rescale route would keep the truck rate.
+    scaled = C.tune_engine(engine, C.Report(), force=True, nm_per_tonne=250.0,
+                           tonnes=1.5)
+    check("dropped on the torque-rescale path too",
+          get_key(edit_lines(scaled), "consumption_coef") is None, scaled)
+
+    # An engine that never had them must be left alone, and must NOT warn --
+    # otherwise every SCS-clean mod gets a spurious warning.
+    clean = _engine_unit("torque: 500",
+                         "torque_curve[]: (1000, 0.5)",
+                         "torque_curve[]: (2000, 1.0)", "rpm_limit: 4000")
+    rep2 = C.Report()
+    C.tune_engine(clean, rep2, force=True, target_hp=200.0, tonnes=1.5)
+    check("an engine without them is not warned about",
+          not any("truck fuel key" in w for w in rep2.warnings),
+          str(rep2.warnings))
+
+    # The point of the exercise: tuning still ran, and only the fuel keys went.
+    new_tq = float(get_key(edit_lines(out), "torque"))
+    check("and the torque was still retargeted, so only fuel changed",
+          new_tq < 1400 and new_tq > 50, f"{new_tq} Nm from 1400")
+
+
+def test_tank_size_is_still_left_to_the_mod() -> None:
+    """The tank is deliberately NOT rewritten, and the reason is now known.
+
+    Consumption is the truck-side problem; capacity is not. Once
+    consumption_coef is dropped, the car takes the base game's own burn rate,
+    and the mod's oversized tank is merely generous rather than broken. A
+    car-sized tank against a still-trucked consumption coefficient is
+    strictly worse range, which is why the tank is left alone.
+    """
+    section("tank_size stays the mod's own decision")
+    text = _chassis_unit("kerb_weight[0]: 1150", "kerb_weight[1]: 1050",
+                         "tank_size: 868")
+    check("a truck-sized tank is preserved verbatim",
+          get_key(edit_lines(C.tune_chassis(text, "sedan", None, C.Report())),
+                  "tank_size") == "868", text)
+
+
 def test_missing_assets_are_reported() -> None:
     """A mod whose defs point at files it does not ship must say so.
 
@@ -4456,6 +4539,8 @@ def main() -> int:
     test_suspension_class_is_validated()
     test_resistance_torque_is_rescaled_with_the_engine()
     test_secondary_torque_is_dropped_for_a_car()
+    test_truck_fuel_keys_are_dropped_for_a_car()
+    test_tank_size_is_still_left_to_the_mod()
     test_missing_assets_are_reported()
     test_slug_never_collapses_to_a_bare_number()
     test_vehicle_types()

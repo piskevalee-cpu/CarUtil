@@ -2532,29 +2532,67 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
 
 
 def _drop_truck_engine_keys(lines: list[str], rep: Report) -> list[str]:
-    """Remove the truck-only torque multiplier from an engine unit.
+    """Remove the truck-only keys from an engine unit.
 
-    secondary_torque / secondary_torque_gear_ratio / secondary_torque_curve
-    multiply torque in the lower gears. Every one of SCS's 181 engine units
-    leaves them alone, and no production car has one: keeping them
-    proportional handed a converted Pilot 1.7x torque in every gear at or
-    below the ratio, and a Prado 1.5x.
+    Two groups, both measured rather than guessed.
+
+    Torque multiplier: secondary_torque / secondary_torque_gear_ratio /
+    secondary_torque_curve multiply torque in the lower gears. Every one of
+    SCS's 181 engine units leaves them alone, and no production car has one:
+    keeping them proportional handed a converted Pilot 1.7x torque in every
+    gear at or below the ratio, and a Prado 1.5x.
+
+    Fuel: consumption_coef / adblue_consumption / no_adblue_power_limit are a
+    truck-era consumption model. Across the 657 definition units recovered
+    from dlc_rt_ford.scs -- every definition SCS ships for its own four Road
+    Trip cars -- consumption_coef appears ZERO times, and the only fuel key
+    present is adblue_consumption: 0.0. Every truck mod carries one anyway:
+    0.42 (Pilot, W223), 0.52/0.70 (Escalade), 1 (BMW 135i). Those are truck
+    burn rates, and leaving them on a car engine is what a driver feels as
+    "fuel lasts way too little".
+
+    Removing the key rather than retuning it is deliberate: there is no measured
+    car value to substitute. What we CAN say is that removing it puts the car
+    on exactly the same footing as the Mustang and the Bronco, which take the
+    base game's own consumption. That is a move toward the reference, not away
+    from it -- but it still needs an in-game range check before anyone calls it
+    calibrated.
     """
     out = list(lines)
-    dropped = {k for k in ("secondary_torque", "secondary_torque_gear_ratio")
-               if get_key(out, k) is not None}
+    torque, fuel = set(), set()
+    for k in ("secondary_torque", "secondary_torque_gear_ratio"):
+        if get_key(out, k) is not None:
+            torque.add(k)
     for curve in ("secondary_torque_curve", "secondary_torque_curve2"):
         if count_indexed(out, curve):
-            dropped.add(curve)
-    if not dropped:
+            torque.add(curve)
+    for k in ("consumption_coef", "adblue_consumption",
+              "no_adblue_power_limit"):
+        if get_key(out, k) is not None:
+            fuel.add(k)
+
+    if not torque and not fuel:
         return out
-    out = remove_keys(out, dropped)
+    out = remove_keys(out, torque | fuel)
     out = [ln for ln in out
            if not re.match(r"^\s*secondary_torque_curve2?\[\]:", ln)]
-    rep.action(
-        "dropped truck-only " + ", ".join(sorted(dropped))
-        + "; a production car has no second torque multiplier"
-    )
+
+    if torque:
+        rep.action(
+            "dropped truck-only " + ", ".join(sorted(torque))
+            + "; a production car has no second torque multiplier"
+        )
+    if fuel:
+        # Warned, not just reported: this changes how the car drives in the
+        # world, and the user should be able to see it and object.
+        rep.warn(
+            "dropped truck fuel key(s) " + ", ".join(sorted(fuel))
+            + ". No car in the base game sets these -- all four SCS Road Trip "
+            "cars take the default consumption -- so this puts the car's burn "
+            "rate back on the game's own scale instead of the truck's. Worth "
+            "a full tank in game; if the range still looks wrong, that is an "
+            "in-game question, not something this tool guessed at."
+        )
     return out
 
 
