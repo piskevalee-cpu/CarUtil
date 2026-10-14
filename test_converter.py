@@ -3991,6 +3991,80 @@ def test_windows_compatibility() -> None:
         text = (HERE / name).read_text(encoding="utf-8")
         check(f"{name} has no hardcoded /tmp path", '"/tmp' not in text)
 
+    # 11. ModSource must release its archive handle. Windows cannot delete a
+    #     file that is still open, so an unreleased ZipFile makes every
+    #     enclosing tempfile.TemporaryDirectory raise PermissionError at
+    #     teardown -- and the whole suite runs inside one. Silent on Linux,
+    #     where unlinking an open file is allowed, which is exactly why it
+    #     survives review. Asserted structurally because this box cannot
+    #     reproduce the failure by running the code.
+    csrc = (HERE / "convert_to_car.py").read_text(encoding="utf-8")
+    check("ModSource defines close()", "def close(self)" in csrc)
+    check("ModSource is a context manager",
+          "__enter__" in csrc and "__exit__" in csrc)
+    check("main releases the source in a finally block",
+          "finally:" in csrc and "src.close()" in csrc)
+
+
+def test_modsource_releases_its_handle() -> None:
+    """A conversion must not leave the input archive open afterwards.
+
+    This is the behavioural half of the Windows contract above: it runs here
+    and passes on Linux, but the failure it prevents (PermissionError while a
+    TemporaryDirectory unwinds) only exists on Windows. What it proves here is
+    the part that IS observable everywhere -- close() is idempotent, a closed
+    source refuses further reads loudly instead of silently misreading the
+    .scs as text, and an unwrapped archive leaves nothing behind.
+    """
+    section("ModSource releases the archive and its scratch directory")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        mod = synthetic_mod(root / "mod")
+
+        # An inner .scs holding the defs, wrapped in an outer .zip. The
+        # unwrap path only fires for exactly one .scs and no .sii of its own,
+        # which is the shape a redistributable wrapper actually has.
+        inner = root / "car.scs"
+        with zipfile.ZipFile(inner, "w") as z:
+            z.writestr("def/vehicle/truck/testcar/data.sii",
+                       "SiiNunit\n{\naccessory_truck_data : vehicle.testcar\n"
+                       "{\n\tui_name: \"T\"\n}\n}\n")
+        wrapped = root / "wrapped.zip"
+        with zipfile.ZipFile(wrapped, "w") as z:
+            z.write(inner, "car.scs")
+
+        src = C.ModSource(root / "mod")
+        check("a folder source has no handle to leak", src.zf is None)
+        src.close()
+        src.close()                       # idempotent
+        check("close() twice is safe", True)
+
+        # The wrapped-zip path is where the scratch dir is created.
+        src2 = C.ModSource(wrapped)
+        check("a wrapped archive is unwrapped", src2._tmpdir is not None,
+              str(src2._tmpdir))
+        scratch = src2._tmpdir
+        check("the scratch dir exists before close", scratch.is_dir())
+        check("and the conversion can still read through it",
+              "vehicle.testcar" in src2.read_def("def/vehicle/truck/testcar/data.sii"))
+        src2.close()
+        check("close() removes the unpacked scratch directory",
+              not scratch.exists(), str(scratch))
+
+        # A closed handle must fail loudly, not fall through to a text read.
+        zsrc = C.ModSource(inner)
+        zsrc.close()
+        try:
+            zsrc.read("def/vehicle/truck/testcar/data.sii")
+            check("a closed source refuses further reads", False,
+                  "it silently returned something")
+        except ValueError as exc:
+            check("a closed source refuses further reads loudly",
+                  "closed" in str(exc).lower(), str(exc))
+        except Exception as exc:
+            check("a closed source refuses further reads loudly", False,
+                  f"{type(exc).__name__}: {exc}")
+
 
 def test_dependency_check() -> None:
     section("dependency preflight")
@@ -4155,6 +4229,7 @@ def main() -> int:
     test_build_power_curve_hits_its_target()
     test_prompt_power_never_blocks()
     test_air_resistance_override()
+    test_modsource_releases_its_handle()
     test_dealer_price()
     test_price_keeps_the_menu_proportionate()
     test_prompts_demand_a_value()

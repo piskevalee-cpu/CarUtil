@@ -141,6 +141,8 @@ class ModSource:
         self.plain_read = plain_read
         self.local: dict = {}
         self.fake_encryption = False
+        # Temp dir we unpacked a wrapped archive into, removed by close().
+        self._tmpdir: Path | None = None
 
         # Mods are often distributed as a .zip wrapping a single .scs. Unwrap
         # that transparently instead of reporting "no vehicle definition".
@@ -309,9 +311,55 @@ class ModSource:
                     out = dest / Path(scs[0]).name
                     with open(out, "wb") as fh:
                         fh.write(src.read())
+                # Recorded, not leaked. A mod is 100-200 MB and /tmp is tmpfs
+                # on Linux -- RAM, not disk -- so a handful of wrapped-zip
+                # conversions used to fill it and take the machine down.
+                self._tmpdir = dest
                 return out
         except (zipfile.BadZipFile, OSError):
             return None
+
+    def close(self) -> None:
+        """Release the archive handle and remove any unpacked temp dir.
+
+        Windows cannot delete a file that is still open. The test suite wraps
+        conversions in tempfile.TemporaryDirectory, so an unreleased ZipFile
+        makes teardown raise PermissionError -- silently fine on Linux, where
+        unlinking an open file is allowed, and fatal on Windows. That is the
+        whole reason this is explicit rather than left to the collector.
+
+        The handle is closed but NOT set to None: using a closed ZipFile raises
+        a clear "archive was already closed", whereas nulling it would send
+        reads down the folder branch and silently misread the .scs as text.
+
+        Idempotent, and safe to call from __del__.
+        """
+        zf = getattr(self, "zf", None)
+        if zf is not None:
+            try:
+                zf.close()
+            except OSError:
+                pass
+        # Order matters: the handle may be the very file inside this dir.
+        tmp, self._tmpdir = getattr(self, "_tmpdir", None), None
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def __enter__(self) -> "ModSource":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.close()
+        return False
+
+    def __del__(self) -> None:
+        # Backstop only; callers should use close() or `with`. Wrapped because
+        # this can run during interpreter shutdown, when module globals may
+        # already be gone.
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def read(self, name: str) -> str:
         """Best-effort text of an entry, tolerating undecodable bytes.
@@ -3553,180 +3601,186 @@ def main(argv: list[str] | None = None) -> int:
 
     src = ModSource(args.input, password=args.password,
                      plain_read=not args.strict_encryption)
-    src.check_readable()
-    slug = args.slug or slug_from(args.input)
+    try:
+        src.check_readable()
+        slug = args.slug or slug_from(args.input)
 
-    # ---- 2. type ---------------------------------------------------------
-    if args.vtype is None:
-        if not guided:
-            raise SystemExit("error: --type is required in scripted mode")
-        _ui.step(2, total, "Choose the body type")
-        args.vtype = prompt_type()
-    args.vtype = normalise_type(args.vtype)
+        # ---- 2. type ---------------------------------------------------------
+        if args.vtype is None:
+            if not guided:
+                raise SystemExit("error: --type is required in scripted mode")
+            _ui.step(2, total, "Choose the body type")
+            args.vtype = prompt_type()
+        args.vtype = normalise_type(args.vtype)
 
-    # Secondary tags: a comma-separated list adds further vehicle types to
-    # tags[] so the car can satisfy more than one car_job category.
-    tags = [job_tag(args.vtype)]
-    if args.extra_tags:
-        for extra in args.extra_tags.split(","):
-            extra = job_tag(normalise_type(extra))
-            if extra not in tags:
-                tags.append(extra)
-    unknown = [t for t in tags if t not in CAR_JOB_TYPES]
-    if unknown:
-        print("  " + _ui.paint(
-            f"warning: tag(s) {', '.join(unknown)} are not in the base game's "
-            "car_job vehicle_types[] list, so they will match no jobs",
-            "yellow"))
+        # Secondary tags: a comma-separated list adds further vehicle types to
+        # tags[] so the car can satisfy more than one car_job category.
+        tags = [job_tag(args.vtype)]
+        if args.extra_tags:
+            for extra in args.extra_tags.split(","):
+                extra = job_tag(normalise_type(extra))
+                if extra not in tags:
+                    tags.append(extra)
+        unknown = [t for t in tags if t not in CAR_JOB_TYPES]
+        if unknown:
+            print("  " + _ui.paint(
+                f"warning: tag(s) {', '.join(unknown)} are not in the base game's "
+                "car_job vehicle_types[] list, so they will match no jobs",
+                "yellow"))
 
-    # ---- 3. brand --------------------------------------------------------
-    if args.brand is None:
-        if not guided:
-            raise SystemExit("error: --brand is required in scripted mode")
-        _ui.step(3, total, "Choose the brand")
-        args.brand = prompt_brand(slug)
-    args.brand = _brands.normalise(args.brand) or "other"
+        # ---- 3. brand --------------------------------------------------------
+        if args.brand is None:
+            if not guided:
+                raise SystemExit("error: --brand is required in scripted mode")
+            _ui.step(3, total, "Choose the brand")
+            args.brand = prompt_brand(slug)
+        args.brand = _brands.normalise(args.brand) or "other"
 
-    # ---- 3b. brand logo -------------------------------------------------
-    logo_dds = None
-    if args.brand_logo:
-        try:
-            logo_dds = _logo.image_to_dds(
-                Path(args.brand_logo).read_bytes()
-            )
-        except (_logo.LogoError, OSError) as exc:
-            raise SystemExit(f"error: --brand-logo: {exc}")
-    else:
-        path = None
-        if args.brand_logo_dir:
-            for ext in (".png", ".webp", ".svg", ".jpg", ".jpeg"):
-                cand = Path(args.brand_logo_dir) / f"{args.brand}{ext}"
-                if cand.exists():
-                    path = cand
-                    break
-        else:
-            path = _brands.logo_path(args.brand)
-        if path is not None:
-            if _logo.imagemagick() is None:
-                # check_dependencies() already explained this and offered an
-                # install. Declining must not then abort the conversion, so
-                # carry on with the mod's own texture or the flat placeholder.
-                print()
-                _ui.warn(
-                    f"no ImageMagick, so {path.name} was not converted; the car "
-                    "keeps the mod's own logo or a flat placeholder"
+        # ---- 3b. brand logo -------------------------------------------------
+        logo_dds = None
+        if args.brand_logo:
+            try:
+                logo_dds = _logo.image_to_dds(
+                    Path(args.brand_logo).read_bytes()
                 )
+            except (_logo.LogoError, OSError) as exc:
+                raise SystemExit(f"error: --brand-logo: {exc}")
+        else:
+            path = None
+            if args.brand_logo_dir:
+                for ext in (".png", ".webp", ".svg", ".jpg", ".jpeg"):
+                    cand = Path(args.brand_logo_dir) / f"{args.brand}{ext}"
+                    if cand.exists():
+                        path = cand
+                        break
             else:
-                try:
-                    logo_dds = _logo.image_to_dds(path.read_bytes())
-                except (_logo.LogoError, OSError) as exc:
-                    raise SystemExit(f"error: {path.name}: {exc}")
+                path = _brands.logo_path(args.brand)
+            if path is not None:
+                if _logo.imagemagick() is None:
+                    # check_dependencies() already explained this and offered an
+                    # install. Declining must not then abort the conversion, so
+                    # carry on with the mod's own texture or the flat placeholder.
+                    print()
+                    _ui.warn(
+                        f"no ImageMagick, so {path.name} was not converted; the car "
+                        "keeps the mod's own logo or a flat placeholder"
+                    )
+                else:
+                    try:
+                        logo_dds = _logo.image_to_dds(path.read_bytes())
+                    except (_logo.LogoError, OSError) as exc:
+                        raise SystemExit(f"error: {path.name}: {exc}")
 
-    # ---- 4. weight -------------------------------------------------------
-    mass = None
-    if args.mass:
-        raw = args.mass.replace(" ", "").replace("_", "")
-        try:
-            if "," in raw:
-                parts = raw.split(",")
-                if len(parts) != 2:
-                    raise ValueError
-                mass = [int(float(x)) for x in parts]
-            else:
-                mass = split_mass(int(float(raw.rstrip("kgt."))), args.vtype, 2)
-        except ValueError:
-            raise SystemExit(
-                f"error: --mass must be TOTAL kg (e.g. 1650) or FRONT,REAR "
-                f"(e.g. 1150,1050), got {args.mass!r}"
-            )
-        if len(mass) != 2 or any(m < 1 for m in mass):
-            raise SystemExit("error: --mass needs two positive weights")
+        # ---- 4. weight -------------------------------------------------------
+        mass = None
+        if args.mass:
+            raw = args.mass.replace(" ", "").replace("_", "")
+            try:
+                if "," in raw:
+                    parts = raw.split(",")
+                    if len(parts) != 2:
+                        raise ValueError
+                    mass = [int(float(x)) for x in parts]
+                else:
+                    mass = split_mass(int(float(raw.rstrip("kgt."))), args.vtype, 2)
+            except ValueError:
+                raise SystemExit(
+                    f"error: --mass must be TOTAL kg (e.g. 1650) or FRONT,REAR "
+                    f"(e.g. 1150,1050), got {args.mass!r}"
+                )
+            if len(mass) != 2 or any(m < 1 for m in mass):
+                raise SystemExit("error: --mass needs two positive weights")
 
-    # Every path must bind `wanted`: --mass skips the guided prompts entirely,
-    # and an unbound name here would only surface at the end of the run.
-    wanted = args.acceleration
-    power = args.power
-    peak_rpm = args.peak_power_rpm
-    price = args.price
-    if guided:
-        # Interactive: only when a terminal is attached, so scripted runs
-        # and CI never block on stdin.
-        _ui.step(4, total, "Set the kerb weight")
-        mass = prompt_weight(args.vtype, None)
+        # Every path must bind `wanted`: --mass skips the guided prompts entirely,
+        # and an unbound name here would only surface at the end of the run.
+        wanted = args.acceleration
+        power = args.power
+        peak_rpm = args.peak_power_rpm
+        price = args.price
+        if guided:
+            # Interactive: only when a terminal is attached, so scripted runs
+            # and CI never block on stdin.
+            _ui.step(4, total, "Set the kerb weight")
+            mass = prompt_weight(args.vtype, None)
+            kerb = sum(mass) if mass else default_total(args.vtype)
+            # Power is asked for first and is the preferred target; 0-60 is the
+            # older proxy, kept for scripts, and only offered when neither a
+            # --power nor a --acceleration was given on the command line.
+            if power is None and wanted is None:
+                _ui.step(5, total, "Set the power")
+                power, peak_rpm = prompt_power(kerb)
+            elif wanted is None:
+                _ui.step(5, total, "Set the acceleration")
+                wanted = prompt_acceleration(kerb)
+            if args.price is None:
+                _ui.step(6, total, "Set the price")
+                price = prompt_price()
+
         kerb = sum(mass) if mass else default_total(args.vtype)
-        # Power is asked for first and is the preferred target; 0-60 is the
-        # older proxy, kept for scripts, and only offered when neither a
-        # --power nor a --acceleration was given on the command line.
-        if power is None and wanted is None:
-            _ui.step(5, total, "Set the power")
-            power, peak_rpm = prompt_power(kerb)
-        elif wanted is None:
-            _ui.step(5, total, "Set the acceleration")
-            wanted = prompt_acceleration(kerb)
-        if args.price is None:
-            _ui.step(6, total, "Set the price")
-            price = prompt_price()
 
-    kerb = sum(mass) if mass else default_total(args.vtype)
+        # A target 0-60 supersedes the fitted Nm/t constant: it is measured from
+        # the user's own two numbers instead of extrapolated from one car. Seeded
+        # from argparse so the no-target path still honours an explicit flag.
+        engine_nm_per_tonne = args.engine_nm_per_tonne
+        target_source = (f"--engine-nm-per-tonne {engine_nm_per_tonne:g}"
+                         if engine_nm_per_tonne is not None else None)
+        if wanted is not None:
+            engine_nm_per_tonne = torque_for_time(kerb, wanted) / (kerb / 1000.0)
+            target_source = f"{wanted:.1f}s 0-60 at {kerb:.0f} kg"
 
-    # A target 0-60 supersedes the fitted Nm/t constant: it is measured from
-    # the user's own two numbers instead of extrapolated from one car. Seeded
-    # from argparse so the no-target path still honours an explicit flag.
-    engine_nm_per_tonne = args.engine_nm_per_tonne
-    target_source = (f"--engine-nm-per-tonne {engine_nm_per_tonne:g}"
-                     if engine_nm_per_tonne is not None else None)
-    if wanted is not None:
-        engine_nm_per_tonne = torque_for_time(kerb, wanted) / (kerb / 1000.0)
-        target_source = f"{wanted:.1f}s 0-60 at {kerb:.0f} kg"
+        # With no explicit target at all, power defaults to the band SCS's own
+        # cars occupy rather than the old 760 Nm/t constant, which produced 1424 hp.
+        if power is None and wanted is None and args.engine_nm_per_tonne is None \
+                and args.engine_torque is None:
+            power = _DEFAULT_HP_PER_TONNE * kerb / 1000.0
+            target_source = (f"{_DEFAULT_HP_PER_TONNE:g} hp/tonne default "
+                             f"({kerb:.0f} kg)")
 
-    # With no explicit target at all, power defaults to the band SCS's own
-    # cars occupy rather than the old 760 Nm/t constant, which produced 1424 hp.
-    if power is None and wanted is None and args.engine_nm_per_tonne is None \
-            and args.engine_torque is None:
-        power = _DEFAULT_HP_PER_TONNE * kerb / 1000.0
-        target_source = (f"{_DEFAULT_HP_PER_TONNE:g} hp/tonne default "
-                         f"({kerb:.0f} kg)")
+        # ---- 6. output -------------------------------------------------------
+        if args.output is not None:
+            out = args.output
+        elif args.input.is_file():
+            # next to the source mod
+            out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
+        else:
+            # Input was a FOLDER. Writing inside it used to mean the next run found
+            # the previous output, treated it as one of the mod's assets and copied
+            # it into the new archive -- a 200 MB .scs nested inside the mod, for
+            # the game to load as an asset. Write beside the folder instead.
+            out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
 
-    # ---- 6. output -------------------------------------------------------
-    if args.output is not None:
-        out = args.output
-    elif args.input.is_file():
-        # next to the source mod
-        out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
-    else:
-        # Input was a FOLDER. Writing inside it used to mean the next run found
-        # the previous output, treated it as one of the mod's assets and copied
-        # it into the new archive -- a 200 MB .scs nested inside the mod, for
-        # the game to load as an asset. Write beside the folder instead.
-        out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
+        if guided:
+            _ui.step(7, total, "Convert")
+            print()
 
-    if guided:
-        _ui.step(7, total, "Convert")
-        print()
-
-    rep = convert(
-        src,
-        out,
-        vtype=args.vtype,
-        brand=args.brand,
-        slug=slug,
-        explicit_slug=args.slug is not None,
-        asset_root=args.asset_root,
-        keep_physics=args.keep_physics,
-        engine_torque=args.engine_torque,
-        engine_nm_per_tonne=engine_nm_per_tonne,
-        target_source=target_source,
-        engine_hp=power,
-        peak_power_rpm=peak_rpm,
-        air_resistance=args.air_resistance,
-        price=price,
-        dry_run=args.dry_run,
-        car_tune=args.car_tune,
-        mass=mass,
-        force_physics=args.force_physics,
-        tags=tags,
-        logo_dds=logo_dds,
-    )
+        rep = convert(
+            src,
+            out,
+            vtype=args.vtype,
+            brand=args.brand,
+            slug=slug,
+            explicit_slug=args.slug is not None,
+            asset_root=args.asset_root,
+            keep_physics=args.keep_physics,
+            engine_torque=args.engine_torque,
+            engine_nm_per_tonne=engine_nm_per_tonne,
+            target_source=target_source,
+            engine_hp=power,
+            peak_power_rpm=peak_rpm,
+            air_resistance=args.air_resistance,
+            price=price,
+            dry_run=args.dry_run,
+            car_tune=args.car_tune,
+            mass=mass,
+            force_physics=args.force_physics,
+            tags=tags,
+            logo_dds=logo_dds,
+        )
+    finally:
+        # Release the archive on EVERY path out, including SystemExit and
+        # an unexpected traceback. Windows cannot delete an open file, so an
+        # unreleased handle poisons the enclosing TemporaryDirectory.
+        src.close()
 
     if mass:
         suffix = " (dry run)" if args.dry_run else ""
