@@ -280,10 +280,14 @@ def test_collapsed_keys_survive_a_real_tune() -> None:
     text = "accessory_truck_chassis : vehicle.test\n{\n" + "\n".join(body) + "\n}\n"
     out = C.tune_chassis(text, "sedan", None, C.Report())
 
-    check("tank_size still present after tuning",
-          get_key(edit_lines(out), "tank_size") == "1200", out)
     check("nominal_voltage still present after tuning",
           get_key(edit_lines(out), "nominal_voltage") == "12", out)
+    # tank_size is deliberately rewritten now (a 1200 L tank is a truck's), so
+    # this asserts it was REPLACED rather than deleted along with its
+    # neighbour -- which is what the collapsed line used to cause.
+    size = get_key(edit_lines(out), "tank_size")
+    check("tank_size was rewritten, not deleted with its neighbour",
+          size is not None and float(size) < 200, f"{size}")
     # The preset is per-axle, so only the shape is asserted: both elements
     # still present, and neither left at the truck's 0.08.
     rt = get_all_indexed(edit_lines(out), "residual_travel")
@@ -444,6 +448,204 @@ def test_decorative_slots_are_never_auto_bound() -> None:
         for d in decoys:
             check(f"{d} def is still in the archive",
                   any(d in n for n in names), str(names[:5]))
+
+
+def _chassis_unit(*body: str) -> str:
+    return ("SiiNunit\n{\naccessory_truck_chassis : vehicle.test\n{\n"
+            + "".join(f"\t{b}\n" for b in body) + "}\n}\n")
+
+
+def test_hex_float_kerb_weight_reads_as_truck_scale() -> None:
+    """SII's `&xxxxxxxx` form must not read as "not a truck".
+
+    A 9.4 t chassis written kerb_weight[0]: &459380cd (4720.1 kg) raised
+    ValueError inside _is_truck_scale, which caught it and returned False. The
+    truck's mass was therefore judged car-sane and preserved whole.
+    """
+    section("hex floats are read as numbers")
+    import sii as _sii
+
+    check("a hex float decodes to its value",
+          abs(_sii.to_float("&459380cd") - 4720.1001) < 0.001,
+          str(_sii.to_float("&459380cd")))
+    check("a plain number still decodes", _sii.to_float("1150") == 1150.0)
+    check("a hex float counts as truck-scale kerb weight",
+          C._is_truck_scale("kerb_weight", ["&459380cd", "&459380cd"]))
+    check("a car's own kerb weight still does not",
+          not C._is_truck_scale("kerb_weight", ["1150", "1050"]))
+    # Unreadable input must still raise rather than be silently treated as 0.
+    try:
+        _sii.to_float("not a number")
+        check("garbage still raises", False, "no error raised")
+    except ValueError:
+        check("garbage still raises", True)
+
+    # And end to end: the hex chassis gets replaced, not preserved.
+    text = _chassis_unit("kerb_weight[0]: &459380cd",
+                         "kerb_weight[1]: &459380cd")
+    out = C.tune_chassis(text, "sedan", None, C.Report())
+    weights = get_all_indexed(edit_lines(out), "kerb_weight")
+    check("the truck mass is replaced by the car's",
+          weights and "&" not in weights[0], str(weights))
+    check("and it totals a plausible car mass",
+          0 < sum(int(float(w)) for w in weights) < 2500, str(weights))
+
+
+def test_explicit_mass_overrides_the_mods_own() -> None:
+    """--mass is an instruction; a car-sane existing value must not win."""
+    section("--mass wins over the mod's own kerb_weight")
+    text = _chassis_unit("kerb_weight[0]: 1150", "kerb_weight[1]: 1050")
+    out = C.tune_chassis(text, "sedan", [1200, 1200], C.Report())
+    check("the requested mass is written",
+          get_all_indexed(edit_lines(out), "kerb_weight") == ["1200", "1200"],
+          out)
+    # Without --mass the mod's car-sane figure is still preserved.
+    kept = C.tune_chassis(text, "sedan", None, C.Report())
+    check("with no --mass the mod's own figure survives",
+          get_all_indexed(edit_lines(kept), "kerb_weight") == ["1150", "1050"],
+          kept)
+
+
+def test_tank_size_is_actually_written() -> None:
+    """tank_size had a preset and a rule, but no loop ever wrote it.
+
+    Every preset carried a car-sized figure and _is_truck_scale had a branch
+    for it, yet neither the indexed nor the scalar key list mentioned it, so a
+    converted car kept its truck's 240-1200 L tank.
+    """
+    section("tank_size is written, not just configured")
+    text = _chassis_unit("kerb_weight[0]: 1150", "kerb_weight[1]: 1050",
+                         "tank_size: 1200")
+    out = C.tune_chassis(text, "sedan", None, C.Report())
+    size = get_key(edit_lines(out), "tank_size")
+    check("a truck tank is replaced with a car's", size is not None
+          and float(size) < 200, str(size))
+
+    car = _chassis_unit("kerb_weight[0]: 1150", "kerb_weight[1]: 1050",
+                        "tank_size: 47")
+    check("a car's own tank is left alone",
+          get_key(edit_lines(C.tune_chassis(car, "sedan", None, C.Report())),
+                  "tank_size") == "47", car)
+
+    check("every preset actually produces a car-sized tank",
+          all(0 < int(float(C.car_physics(t, 2)["tank_size"])) < 200
+              for t in C.VEHICLE_TYPES),
+          str({t: C.car_physics(t, 2).get("tank_size")
+               for t in C.VEHICLE_TYPES}))
+
+
+def test_suspension_class_is_validated() -> None:
+    """All four SCS Road Trip chassis declare `standard`."""
+    section("suspension_class is checked against SCS's own value")
+    check("a coach rating is treated as truck-scale",
+          C._is_truck_scale("suspension_class", "bus"))
+    check("SCS's own value is left alone",
+          not C._is_truck_scale("suspension_class", "standard"))
+
+    text = _chassis_unit("kerb_weight[0]: 1150", "kerb_weight[1]: 1050",
+                         "suspension_class: bus")
+    rep = C.Report()
+    out = C.tune_chassis(text, "sedan", None, rep)
+    check("'bus' is rewritten to 'standard'",
+          get_key(edit_lines(out), "suspension_class") == "standard", out)
+    check("and the rewrite is warned about, not done silently",
+          any("suspension_class" in w for w in rep.warnings), str(rep.warnings))
+
+
+def _engine_unit(*body: str) -> str:
+    # accessory_engine_data is the unit name tune_engine keys on; the truck
+    # spelling is not accepted, and a test that used it silently measured
+    # nothing.
+    return ("SiiNunit\n{\naccessory_engine_data : engine.test\n{\n"
+            + "".join(f"\t{b}\n" for b in body) + "}\n}\n")
+
+
+def test_resistance_torque_is_rescaled_with_the_engine() -> None:
+    """Engine drag is a fraction of torque, so it must follow torque down.
+
+    A mod declaring torque 4900 with resistance_torque 320 (drag at ~12% of
+    peak) kept 320 after conversion to a 476 Nm engine -- 67% drag, which is
+    why lifting off at 50 mph dropped the car to about 30 immediately.
+    """
+    section("resistance_torque follows torque")
+    engine = _engine_unit(
+        "torque: 4900",
+        "resistance_torque: 320",
+        "torque_curve[]: (1000, 0.5)",
+        "torque_curve[]: (2000, 1.0)",
+        "rpm_limit: 4000",
+    )
+    rep = C.Report()
+    out = C.tune_engine(engine, rep, force=True, target_hp=200.0,
+                        tonnes=1.5)
+    lines = edit_lines(out)
+    peak = float(get_key(lines, "torque"))
+    drag = get_key(lines, "resistance_torque")
+
+    check("peak torque came down", peak < 4900, f"{peak}")
+    check("drag came down with it", drag is not None and float(drag) < 320,
+          f"{drag}")
+    check("drag is still the same fraction of peak",
+          abs(float(drag) / peak - 320 / 4900) < 0.02, f"{drag}/{peak}")
+    check("the rescale is reported", any("resistance_torque" in a
+                                         for a in rep.actions), str(rep.actions))
+
+    # -1 is the game's "no drag" and must survive untouched.
+    nodrag = _engine_unit("torque: 4900", "resistance_torque: -1",
+                          "torque_curve[]: (1000, 0.5)",
+                          "torque_curve[]: (2000, 1.0)", "rpm_limit: 4000")
+    kept = C.tune_engine(nodrag, C.Report(), force=True, target_hp=200.0,
+                         tonnes=1.5)
+    check("-1 (no drag) is left exactly as written",
+          get_key(edit_lines(kept), "resistance_torque") == "-1", kept)
+
+    # _rescale_in_place exists precisely so an author's trailing comment
+    # survives a rewrite rather than being discarded with the line.
+    commented = _engine_unit(
+        "torque: 4900 # peak, per the tuner",
+        "resistance_torque: 320 # measured on the dyno",
+        "torque_curve[]: (1000, 0.5)", "torque_curve[]: (2000, 1.0)",
+        "rpm_limit: 4000")
+    out2 = C.tune_engine(commented, C.Report(), force=True, target_hp=200.0,
+                         tonnes=1.5)
+    check("a comment on torque survives the rescale",
+          "# peak, per the tuner" in out2, out2)
+    check("a comment on resistance_torque survives too",
+          "# measured on the dyno" in out2, out2)
+
+
+def test_secondary_torque_is_dropped_for_a_car() -> None:
+    """A truck torque multiplier is not a car mechanism.
+
+    Keeping it proportional handed one converted car 1.7x torque in every gear
+    at or below secondary_torque_gear_ratio, and another 1.5x. No production
+    car has one, and all 181 SCS engines leave it alone.
+    """
+    section("secondary_torque* is dropped on a car")
+    engine = _engine_unit(
+        "torque: 1400",
+        "secondary_torque: 2250",
+        "secondary_torque_gear_ratio: 1",
+        "torque_curve[]: (1000, 0.5)",
+        "torque_curve[]: (2000, 1.0)",
+        "rpm_limit: 4000",
+    )
+    rep = C.Report()
+    out = C.tune_engine(engine, rep, force=True, target_hp=200.0, tonnes=1.5)
+    lines = edit_lines(out)
+
+    check("secondary_torque is gone", get_key(lines, "secondary_torque") is None,
+          out)
+    check("secondary_torque_gear_ratio is gone",
+          get_key(lines, "secondary_torque_gear_ratio") is None, out)
+    check("the drop is reported", any("secondary_torque" in a
+                                      for a in rep.actions), str(rep.actions))
+
+    # The rescale path (Nm/t) must do the same, not just the hp path.
+    scaled = C.tune_engine(engine, C.Report(), force=True, nm_per_tonne=250.0,
+                           tonnes=1.5)
+    check("dropped on the torque-rescale path too",
+          get_key(edit_lines(scaled), "secondary_torque") is None, scaled)
 
 
 def test_output_is_not_written_inside_the_input_folder() -> None:
@@ -767,17 +969,22 @@ def test_tune_engine_rescales_inflated_output() -> None:
     tq = float(C.get_key(out.splitlines(), "torque"))
     check("peak torque lands on the target",
           abs(tq * peak - 760) < 2, f"got {tq * peak:.0f} Nm")
-    check("secondary_torque scaled by the same factor",
-          abs(float(re.search(r"secondary_torque:\s*(\d+)",
-                              out).group(1))
-              / float(re.search(r"secondary_torque:\s*(\d+)",
-                                _ENGINE_INFLATED).group(1)) - tq / 1400) < 0.01)
-    check("author's comment survives the rewrite",
-          "# torque x 1.26 (final drive relation)" in out)
+    # Used to assert secondary_torque was scaled by the same factor. That was
+    # the bug: the key is a truck torque multiplier, and keeping it gave a
+    # converted car 1.26x torque in every low gear. It is dropped now.
+    check("secondary_torque is dropped, not scaled",
+          re.search(r"secondary_torque:", out) is None, out)
+    check("its curve goes with it",
+          re.search(r"secondary_torque_curve", out) is None, out)
+    check("and the drop is reported",
+          any("secondary_torque" in a for a in rep.actions), str(rep.actions))
+    # Anchored on the key, not a substring: "secondary_torque_curve[]" also
+    # contains "torque_curve[]", and this comparison used to depend on that.
     check("torque_curve points preserved apart from the added origin",
-          [l for l in out.splitlines() if "torque_curve[]" in l][1:]
+          [l for l in out.splitlines()
+           if re.match(r"^\s*torque_curve\[\]", l)][1:]
           == [l for l in _ENGINE_INFLATED.splitlines()
-              if "torque_curve[]" in l])
+              if re.match(r"^\s*torque_curve\[\]", l)])
     check("a zero-torque origin is added, as every SCS engine has",
           re.search(r"^\ttorque_curve\[\]: \(0, 0\)$", out, re.M))
     peak = max((float(m.group(2)), int(m.group(1)))
@@ -3710,6 +3917,12 @@ def main() -> int:
     test_decorative_slots_are_never_auto_bound()
     test_output_is_not_written_inside_the_input_folder()
     test_generic_camera_name_is_flagged()
+    test_hex_float_kerb_weight_reads_as_truck_scale()
+    test_explicit_mass_overrides_the_mods_own()
+    test_tank_size_is_actually_written()
+    test_suspension_class_is_validated()
+    test_resistance_torque_is_rescaled_with_the_engine()
+    test_secondary_torque_is_dropped_for_a_car()
     test_vehicle_types()
     test_type_validation()
     test_brand_logo()

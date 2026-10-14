@@ -20,6 +20,7 @@ preserves formatting faithfully; a full parser would lose comments.
 from __future__ import annotations
 
 import re
+import struct
 
 # key: value  |  key[]: value  |  key[N]: value
 KEY_RE = re.compile(r"^\s*([A-Za-z_][\w.]*)\s*(\[[^\]]*\])?\s*:\s*(.*?)\s*$")
@@ -113,6 +114,23 @@ def edit_lines(text: str) -> list[str]:
     arrives with collapsed keys cannot reach set_key/set_indexed unexpanded.
     """
     return expand_multi_key_lines(text.splitlines())
+
+
+def to_float(value: str) -> float:
+    """A SII numeric value as a float, hex-float form included.
+
+    SII allows a value written `&459380cd`: a big-endian IEEE-754 single in
+    eight hex digits, which is how the game itself writes some scalars. Plain
+    float() raises ValueError on those, and every caller here wraps float() in
+    `except ValueError: return False` -- so a hex-float kerb_weight read as
+    "not truck-scale" and a 9.4 t truck's chassis was preserved as if it were a
+    car's. A value that cannot be read at all still raises, because pretending
+    it is a number is how a misread becomes a written-out definition.
+    """
+    v = (value or "").strip()
+    if v.startswith("&") and len(v) == 9:
+        return struct.unpack(">f", bytes.fromhex(v[1:]))[0]
+    return float(v)
 
 
 def strip_quotes(value: str) -> str:

@@ -40,6 +40,7 @@ from sii import (  # noqa: E402
     remove_keys,
     set_key,
     set_tag,
+    to_float,
 )
 import brands as _brands
 import logo as _logo
@@ -1755,24 +1756,34 @@ def _is_truck_scale(key: str, current: str | list[str] | None) -> bool:
     Preserving a mod's tuned physics matters: a mod that already drives well
     should come out of the converter unchanged. But some values are so far
     outside car range that leaving them guarantees it still drives like a truck.
+
+    Every number goes through sii.to_float, not float(): SII's hex-float form
+    (`kerb_weight[0]: &459380cd` = 4720.1 kg) used to raise ValueError here, be
+    swallowed by the except, and return False -- so a 9.4 t truck chassis read
+    as car-sane and was preserved whole.
     """
     try:
         if key == "air_resistance":
-            return current is not None and float(current) >= 1.0
+            return current is not None and to_float(current) >= 1.0
         if key == "cog_height":
-            return current is not None and float(current) > 0.85
+            return current is not None and to_float(current) > 0.85
         if key == "max_steering_angle":
-            return current is not None and float(current) > 45
+            return current is not None and to_float(current) > 45
         if key == "sway_bar_stiffness":
-            return current is not None and float(current) > 2.0
+            return current is not None and to_float(current) > 2.0
         if key == "tank_size":
-            return current is not None and float(current) > 200
+            return current is not None and to_float(current) > 200
         if key == "kerb_weight" and isinstance(current, list):
-            total = sum(float(x) for x in current)
+            total = sum(to_float(x) for x in current)
             return total > 4000
         if key == "nominal_voltage":
             # Trucks run a 24V system; every production car is 12V.
-            return current is not None and float(current) >= 24
+            return current is not None and to_float(current) >= 24
+        if key == "suspension_class":
+            # A token, not a number, so it never reaches to_float. SCS's four
+            # Road Trip chassis all declare "standard"; "bus" is a coach
+            # spring rating and carries a stiffer, taller body than a car.
+            return current is not None and current.strip().lower() != "standard"
         if key == "residual_travel" and isinstance(current, list):
             # Deliberately not threshold-gated any more. Truck mods ship
             # 0.09-0.10 and SCS's own cars use 0.093-0.134, so the ranges
@@ -1821,6 +1832,12 @@ def tune_chassis(
     def wants(key: str, current: str | list[str] | None) -> bool:
         if force or current is None or (overrides and key in overrides):
             return True
+        # An explicit --mass is an instruction, not a default. It used to reach
+        # cfg["kerb_weight"] and then be ignored, because mass is not an
+        # override and a car-sane existing value won -- so asking for 1650 kg on
+        # a mod that shipped its own figure quietly did nothing.
+        if mass is not None and key == "kerb_weight":
+            return True
         return _is_truck_scale(key, current)
 
     # NOTE: powered_axle is never written. The reference converter treats the
@@ -1840,9 +1857,14 @@ def tune_chassis(
         else:
             kept.append(key)
 
+    # tank_size belongs here and did not. Every preset carried a car-sized
+    # figure and _is_truck_scale had a branch for it, but no loop ever wrote
+    # it, so a converted car kept its truck's 240-1200 L tank. The reporter
+    # was told fuel is deliberately left alone; the code says otherwise, and
+    # a 1200 L tank on a road car is a leftover either way.
     for key in ("air_resistance", "cog_height", "sway_bar_stiffness",
                 "max_steering_angle", "suspension_class", "nominal_voltage",
-                "air_tank_pressure"):
+                "air_tank_pressure", "tank_size"):
         if key not in cfg:
             continue
         current = get_key(lines, key)
@@ -1851,6 +1873,13 @@ def tune_chassis(
             lines = set_key(lines, key, cfg[key])
             if before is not None and before != cfg[key]:
                 replaced.append(f"{key} ({before} -> {cfg[key]})")
+                if key == "suspension_class":
+                    rep.warn(
+                        f"suspension_class '{before}' is a coach rating, not a "
+                        "car's: all four SCS Road Trip chassis declare "
+                        f"'{cfg[key]}'. Rewritten -- pass --force-physics off "
+                        "and check the result if your mod tuned around it"
+                    )
         else:
             kept.append(key)
 
@@ -1949,17 +1978,36 @@ def _primary_curve_peak(text: str) -> float | None:
     return max(peaks) if peaks else None
 
 
+def _set_scalar_in_place(
+    lines: list[str], key: str, value: str,
+) -> tuple[list[str], bool]:
+    """Set a scalar's number, preserving whatever follows it on the line.
+
+    Not set_key: these lines carry author comments such as
+    `torque: 1400 # peak, per the tuner`, and both get_key (which returns the
+    comment with the value) and set_key (which rewrites the whole line)
+    mishandle that -- the first makes the value unparseable, the second
+    silently discards the comment explaining the key.
+    """
+    out = list(lines)
+    last = None
+    for i, line in enumerate(out):
+        if re.match(rf"^\s*{re.escape(key)}\s*:", line):
+            last = i
+    if last is None:
+        return out, False
+    m = re.match(
+        rf"^(\s*{re.escape(key)}\s*:\s*)([+-]?\d+(?:\.\d+)?)(.*)$", out[last])
+    if not m:
+        return out, False
+    out[last] = f"{m.group(1)}{value}{m.group(3)}"
+    return out, True
+
+
 def _rescale_in_place(
     lines: list[str], key: str, factor: float,
 ) -> tuple[list[str], int | None]:
-    """Multiply a scalar's number by `factor`, preserving the rest of its line.
-
-    Not set_key: these lines carry author comments such as
-    `secondary_torque: 2250 # torque x 1.26 (final drive relation)`, and both
-    get_key (which returns the comment with the value) and set_key (which
-    rewrites the whole line) mishandle that -- the first makes the value
-    unparseable, the second silently discards the comment explaining the key.
-    """
+    """Multiply a scalar's number by `factor`, preserving the rest of its line."""
     out = list(lines)
     last = None
     for i, line in enumerate(out):
@@ -2063,15 +2111,37 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
     kept[end:end] = [f"\ttorque_curve[]: ({r}, {f})" for r, f in curve]
 
     # `torque` is peak newton-metres and the curve is a 0..1 shape over it --
-    # SCS's own convention.
-    kept = set_key(kept, "torque", str(peak_torque))
+    # SCS's own convention. Set in place so the author's trailing comment --
+    # `torque: 1400 # peak, per the tuner` -- survives; set_key rewrites the
+    # whole line and takes the explanation of the key with it.
+    kept, _ = _set_scalar_in_place(kept, "torque", str(peak_torque))
 
-    # secondary_torque followed the scalar before; keep it proportional to the
-    # change in peak so the ratio the mod author chose survives.
+    # resistance_torque is engine drag: the torque the engine gives up just
+    # turning itself. It is a fraction of torque, not a fixed number, so it has
+    # to follow torque down. A mod declaring torque 4900 with drag 320 kept 320
+    # after conversion to a 476 Nm engine -- 67% drag, which is why lifting off
+    # at 50 mph dropped it to 30 almost at once. -1 means "none" and is left
+    # exactly as written.
     old_peak = _declared_peak_nm(text)
     if old_peak > 0:
-        kept, _ = _rescale_in_place(kept, "secondary_torque",
-                                    peak_torque / old_peak)
+        # -1 is the game's "no drag" and must survive as written; scaling it
+        # would turn it into 1 Nm of drag, i.e. the opposite of what it means.
+        drag_before = get_key(kept, "resistance_torque")
+        if drag_before is not None and drag_before.strip() != "-1":
+            kept, _ = _rescale_in_place(kept, "resistance_torque",
+                                        peak_torque / old_peak)
+            rep.action(
+                f"resistance_torque rescaled with the engine, so engine drag "
+                f"stays the same fraction of torque ({drag_before} -> "
+                f"{get_key(kept, 'resistance_torque')})"
+            )
+
+    # secondary_torque* is a truck mechanism: torque multiplied by a ratio in
+    # the lower gears. No production car has it, and keeping it proportional
+    # handed one converted car 1.7x torque in every gear at or below the ratio.
+    # Dropping it is the honest conversion -- the alternative is a car that
+    # pulls like the truck it was.
+    kept = _drop_truck_engine_keys(kept, rep)
 
     rep.action(
         f"engine rebuilt to {hp:.0f} hp peaking at {peak} rpm: "
@@ -2079,6 +2149,33 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
         + (f" ({target_source})" if target_source else "")
     )
     return "\n".join(kept) + "\n"
+
+
+def _drop_truck_engine_keys(lines: list[str], rep: Report) -> list[str]:
+    """Remove the truck-only torque multiplier from an engine unit.
+
+    secondary_torque / secondary_torque_gear_ratio / secondary_torque_curve
+    multiply torque in the lower gears. Every one of SCS's 181 engine units
+    leaves them alone, and no production car has one: keeping them
+    proportional handed a converted Pilot 1.7x torque in every gear at or
+    below the ratio, and a Prado 1.5x.
+    """
+    out = list(lines)
+    dropped = {k for k in ("secondary_torque", "secondary_torque_gear_ratio")
+               if get_key(out, k) is not None}
+    for curve in ("secondary_torque_curve", "secondary_torque_curve2"):
+        if count_indexed(out, curve):
+            dropped.add(curve)
+    if not dropped:
+        return out
+    out = remove_keys(out, dropped)
+    out = [ln for ln in out
+           if not re.match(r"^\s*secondary_torque_curve2?\[\]:", ln)]
+    rep.action(
+        "dropped truck-only " + ", ".join(sorted(dropped))
+        + "; a production car has no second torque multiplier"
+    )
+    return out
 
 
 def tune_engine(text: str, rep: Report, force: bool = False,
@@ -2160,13 +2257,22 @@ def tune_engine(text: str, rep: Report, force: bool = False,
 
     factor = target / actual_nm
     lines, new_torque = _rescale_in_place(lines, "torque", factor)
-    lines, new_secondary = _rescale_in_place(lines, "secondary_torque", factor)
+    # Drag follows torque for the same reason, and -1 means "none".
+    drag_before = get_key(lines, "resistance_torque")
+    if drag_before is not None and drag_before.strip() != "-1":
+        lines, _ = _rescale_in_place(lines, "resistance_torque", factor)
+        rep.action(
+            f"resistance_torque rescaled with the engine ({drag_before} -> "
+            f"{get_key(lines, 'resistance_torque')}), so drag stays the same "
+            "fraction of torque"
+        )
 
     joined = "\n".join(lines)
     joined, added = _ensure_torque_origin(joined)
     if added:
         rep.action("added the (0, 0) torque origin every SCS engine declares")
     lines = joined.split("\n")
+    lines = _drop_truck_engine_keys(lines, rep)
 
     if nm_per_tonne is not None:
         source = target_source or f"{nm_per_tonne:g} Nm/t default ({tonnes:.2f} t)"
@@ -2176,8 +2282,6 @@ def tune_engine(text: str, rep: Report, force: bool = False,
         source = f"stated {stated} Nm"
     rep.action(
         f"engine rescaled {declared_nm:.0f} -> {new_torque} Nm"
-        + (f", secondary_torque -> {new_secondary}"
-           if new_secondary is not None else "")
         + f" ({source}; was {actual_nm:.0f} Nm peak -- {factor:.2f}x)"
     )
     return "\n".join(lines) + "\n"
