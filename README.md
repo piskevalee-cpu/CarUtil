@@ -150,6 +150,7 @@ You can always type a name instead of using the arrows (e.g. `sedan`,
 | `--brand-logo` | Logo image (PNG/WebP/SVG) for this car. Overrides the bundled `logos/` and the mod's own. |
 | `--brand-logo-dir` | Directory to look for `<brand>.png` in, instead of the bundled `logos/`. |
 | `--brand` | Brand name, used for the dealer folder and `info[]`. |
+| `--mod-dir` | Where this machine keeps its ATS user data, if the automatic search cannot find it. Repeatable. Only affects the folder printed at the end. |
 | `--slug` | Vehicle identifier. Defaults to the input filename stem. |
 | `--asset-root` | Explicit model root. Default: `/vehicle/car/<slug>`. |
 | `--mass` | Kerb weight: `TOTAL` kg (`--mass 1650`) or `FRONT,REAR` (`--mass 1150,1050`). Skips the prompt. |
@@ -233,6 +234,28 @@ normalised (`off-road`→`offroad`, `crossover`→`suv`, `wagon`→`sedan`,
 ```
 python3 convert_to_car.py mod.scs --type suv --extra-tags pickup,sedan --brand honda
 ```
+
+### Where the mod goes
+
+At the end of a conversion the tool prints your ATS mod folder. It finds that by
+constructing the paths a Windows ATS install can occupy rather than searching for
+one: `~/Documents`, a Proton prefix (`<appid>/pfx/drive_c/users/<user>/Documents`),
+a Wine prefix, and the Flatpak, Snap and Lutris layouts. Symlinks are resolved by
+the filesystem, so a linked prefix or Steam library is found without being walked.
+
+Two things it deliberately does **not** do. It does not walk the prefix tree —
+a Proton prefix holds over a thousand symlinks into the runtime, so following them
+costs minutes. And it does not assume letter case: ext4 is case-sensitive by
+default, so a probe that matches on NTFS can miss on a stock Linux Mint install.
+
+If your layout is still not found, name it:
+
+```bash
+python3 convert_to_car.py mod.scs --mod-dir "$HOME/Documents/American Truck Simulator"
+```
+
+Repeatable, and it takes the data directory itself, a directory containing one,
+or a prefix root.
 
 ### Brand logos
 

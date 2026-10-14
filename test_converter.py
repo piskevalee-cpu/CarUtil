@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -1682,6 +1683,144 @@ def test_mod_folder_detection() -> None:
 
 
 @guard
+def test_find_mod_folders_layouts() -> None:
+    """Every launcher layout, on a synthetic $HOME, must be found.
+
+    A Linux Mint user reported the finder coming up empty. The old code only
+    knew four prefixes and used Path.glob("**/..."), which does not descend
+    into symlinked directories -- so a symlinked prefix or Steam library was
+    invisible while base.exists() still said yes. Each layout below is a real
+    one from a report or a shipped launcher.
+    """
+    section("mod folder finder covers every launcher layout")
+    import pathlib as _pl
+
+    data = "American Truck Simulator"
+
+    def build_home(root: _pl.Path) -> dict[str, _pl.Path]:
+        def mk(rel: str, marker: str = "config.cfg") -> _pl.Path:
+            p = root / rel
+            p.mkdir(parents=True, exist_ok=True)
+            if marker == "profiles":
+                (p / marker).mkdir(exist_ok=True)
+            else:
+                (p / marker).write_text("x")
+            return p
+
+        want: dict[str, _pl.Path] = {}
+        proton = "steamapps/compatdata/4130880446/pfx/drive_c/users/steamu"
+        for name, base in (
+            ("proton_local", ".local/share/Steam"),
+            ("proton_dotsteam", ".steam"),
+            ("proton_root", ".steam/root"),
+            ("flatpak", ".var/app/com.valvesoftware.Steam/data/Steam"),
+            ("snap", "snap/steam/common/.local/share/Steam"),
+        ):
+            want[name] = mk(f"{base}/{proton}/Documents/{data}")
+        want["wine"] = mk(f".wine/drive_c/users/steamu/Documents/{data}")
+        want["my_documents"] = mk(
+            f".wine/drive_c/users/steamu/My Documents/{data}")
+        want["lutris"] = mk(
+            f"Games/lutris/drive_c/users/steamu/Documents/{data}")
+        want["home_documents"] = mk(f"Documents/{data}")
+        # A prefix with no pfx/ level, which older Proton layouts used.
+        want["no_pfx_dir"] = mk(
+            ".local/share/Steam/steamapps/compatdata/9/drive_c/users/s"
+            f"/Documents/{data}")
+        # profiles/ instead of config.cfg: a data dir the user has never
+        # written a config into still counts.
+        want["profiles_only"] = mk(
+            f"Games/lutris/drive_c/users/p/Documents/{data}", marker="profiles")
+        # Case sensitivity: ext4 is case-sensitive by default, so the game's
+        # own capitalisation cannot be assumed to be what is on disk.
+        want["lowercase_dir"] = mk(
+            f"Games/lutris/drive_c/users/lc/Documents/"
+            "american truck simulator")
+
+        # The two symlink shapes that the old glob could not see.
+        pfx_root = root / "elsewhere/pfx"
+        pfx_data = mk(f"elsewhere/pfx/drive_c/users/steamu/Documents/{data}")
+        link = root / ".steam/root/steamapps/compatdata/999"
+        link.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(pfx_root, link / "pfx")
+            want["symlinked_prefix"] = pfx_data
+        except (OSError, NotImplementedError):
+            skip("symlinked prefix", "symlinks unavailable here")
+
+        steam = root / "SteamInstall/steamapps"
+        linked = mk(f"SteamInstall/steamapps/compatdata/111/pfx/drive_c"
+                    f"/users/s/Documents/{data}")
+        (root / ".steam" / "steam").mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(steam, root / ".steam" / "steam" / "steamapps")
+            want["symlinked_steamapps"] = linked
+        except (OSError, NotImplementedError):
+            skip("symlinked steam library", "symlinks unavailable here")
+        return want
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "home"
+        want = build_home(root)
+        real_home = Path.home
+        Path.home = staticmethod(lambda: root)  # type: ignore[assignment]
+        try:
+            found = C.find_mod_folders()
+        finally:
+            Path.home = real_home  # type: ignore[assignment]
+
+        resolved = {p.resolve() for p in found}
+        for name, expected in sorted(want.items()):
+            check(f"{name}: found", expected.resolve() in resolved,
+                  str(sorted(str(p) for p in found))[:200])
+
+        # It must be fast. An earlier attempt used os.walk(followlinks=True)
+        # and took over ten minutes, because a Proton prefix holds 1358
+        # symlinks into the Proton runtime tree. Constructing the known paths
+        # costs a handful of directory listings instead.
+        Path.home = staticmethod(lambda: root)  # type: ignore[assignment]
+        try:
+            started = time.time()
+            C.find_mod_folders()
+            elapsed = time.time() - started
+        finally:
+            Path.home = real_home  # type: ignore[assignment]
+        check("the search is not a tree walk", elapsed < 2.0,
+              f"{elapsed:.1f}s")
+
+        # --mod-dir must be honoured even when the directory does not look
+        # like an ATS data dir: the user has told us where it is.
+        elsewhere = root / "somewhere" / "else"
+        (elsewhere / "profiles").mkdir(parents=True)
+        Path.home = staticmethod(lambda: root)  # type: ignore[assignment]
+        try:
+            named = {p.resolve() for p in C.find_mod_folders([elsewhere])}
+            by_name: set = set()
+            blank: set = set()
+        finally:
+            Path.home = real_home  # type: ignore[assignment]
+        check("--mod-dir accepts the data dir itself",
+              elsewhere.resolve() in named)
+
+        # A directory holding an "American Truck Simulator" child is honoured
+        # whatever the child's capitalisation.
+        (root / "somewhere" / "named").mkdir(parents=True, exist_ok=True)
+        C_child = root / "somewhere" / "named" / "american truck simulator"
+        (C_child / "profiles").mkdir(parents=True)
+        (root / "nothing" / "here").mkdir(parents=True, exist_ok=True)
+        Path.home = staticmethod(lambda: root)  # type: ignore[assignment]
+        try:
+            by_name = {p.resolve() for p in
+                       C.find_mod_folders([root / "somewhere" / "named"])}
+        finally:
+            Path.home = real_home  # type: ignore[assignment]
+        check("--mod-dir finds a named child whatever its case",
+              C_child.resolve() in by_name, str(sorted(map(str, by_name))))
+
+        check("a --mod-dir with nothing in it adds nothing",
+              (root / "nothing" / "here").resolve() not in blank)
+
+
 def test_install_help_prints_real_path() -> None:
     section("install help")
     import io
@@ -3203,6 +3342,9 @@ def main() -> int:
     test_unsatisfied_require_is_reported()
     test_windows_compatibility()
     test_dependency_check()
+    # Before the fixture gate: this one builds its own synthetic $HOME, so it
+    # must run on a fresh clone where no real mods are present.
+    test_find_mod_folders_layouts()
     if not FIXTURES.is_dir():
         return _report()
     test_reference_roundtrip()

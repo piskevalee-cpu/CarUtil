@@ -2732,45 +2732,162 @@ def _synth_tobj(path: str) -> bytes:
     )
 
 
-def find_mod_folders() -> list[Path]:
+_ATS_DIR = "American Truck Simulator"
+
+# Prefixes that can hold a Windows ATS install on Linux. Kept as a list rather
+# than a set because the order decides which one is offered first when several
+# exist, and ~/Documents is the most likely to be the one in use.
+def _prefix_candidates(home: Path) -> list[Path]:
+    return [
+        home / ".local" / "share" / "Steam" / "steamapps" / "compatdata",
+        home / ".steam" / "steamapps" / "compatdata",
+        home / ".steam" / "root" / "steamapps" / "compatdata",
+        home / ".steam" / "steam" / "steamapps" / "compatdata",
+        # Flatpak and Snap both hide the real install under a sandbox root,
+        # and Lutris keeps whole prefixes in ~/Games. These were all missing
+        # until a Linux Mint user reported the finder coming up empty.
+        home / ".var" / "app" / "com.valvesoftware.Steam"
+             / "data" / "Steam" / "steamapps" / "compatdata",
+        home / ".var" / "app" / "com.valvesoftware.Steam"
+             / ".steam" / "steamapps" / "compatdata",
+        home / "snap" / "steam" / "common" / ".local" / "share" / "Steam"
+             / "steamapps" / "compatdata",
+        home / ".wine" / "drive_c" / "users",
+        home / "Games" / "lutris" / "drive_c" / "users",
+    ]
+
+
+def _looks_like_ats_data(p: Path) -> bool:
+    """True if `p` is an ATS user-data directory rather than a stray match.
+
+    The contents are the real test: a run with no arguments still writes
+    config.cfg, and profiles/ appears the first time a save is made, so almost
+    any install we care about has at least one.
+
+    Both probes are case-insensitive. ext4 is case-sensitive by default, so an
+    exact-case probe finds the directory on NTFS and on a case-insensitive btrfs
+    but misses it on a stock Linux Mint install -- which is the report that
+    prompted this.
+    """
+    try:
+        entries = {e.name.lower(): e for e in p.iterdir()}
+    except (OSError, ValueError):
+        return False
+    profiles = entries.get("profiles")
+    if profiles is not None and profiles.is_dir():
+        return True
+    cfg = entries.get("config.cfg")
+    return cfg is not None and cfg.is_file()
+
+
+def _child(parent: Path, name: str) -> Path | None:
+    """`parent / name`, matched without regard to case, or None."""
+    try:
+        for entry in parent.iterdir():
+            if entry.name.lower() == name.lower():
+                return entry
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _dirs(parent: Path) -> list[Path]:
+    try:
+        return [e for e in parent.iterdir() if e.is_dir()]
+    except (OSError, ValueError):
+        return []
+
+
+# Where a Windows ATS install keeps its user data, relative to drive_c/users/<u>.
+_DOC_DIRS = ("Documents", "My Documents")
+
+
+def _ats_paths_under(base: Path) -> list[Path]:
+    """Every path where `base` could hold an ATS data directory.
+
+    The shapes are constructed, not searched for. An earlier version globbed
+    '**/American Truck Simulator' and an attempted fix walked the tree with
+    os.walk(followlinks=True); both are wrong here. A Proton prefix holds 1358
+    symlinks on a stock install -- mostly into the Proton runtime tree -- so
+    following them costs minutes, and glob not following them is exactly why
+    symlinked prefixes were invisible in the first place. Building the four
+    known layouts costs a few directory listings, and Path resolves symlinks
+    on its own so a linked prefix is found without traversing it.
+    """
+    out: list[Path] = []
+
+    def offer_from(user: Path) -> None:
+        """The data dir under one Windows user profile, whatever its case."""
+        for doc in _DOC_DIRS:
+            docs = _child(user, doc)
+            if docs is None:
+                continue
+            hit = _child(docs, _ATS_DIR)
+            if hit is not None and _looks_like_ats_data(hit):
+                out.append(hit)
+
+    # Wine/Lutris: base is .../drive_c/users, so <user>/Documents/<ATS>.
+    for user in _dirs(base):
+        offer_from(user)
+
+    # Proton: base is .../steamapps/compatdata, so <appid>/pfx/drive_c/users/...
+    for appid in _dirs(base):
+        for prefix in (appid / "pfx", appid):
+            drive_c = _child(prefix, "drive_c")
+            users = _child(drive_c, "users") if drive_c else None
+            if users is None:
+                continue
+            for user in _dirs(users):
+                offer_from(user)
+
+    return out
+
+
+def find_mod_folders(extra: list[Path] | None = None) -> list[Path]:
     """Locate ATS user-data folders, including inside Proton/Wine prefixes.
 
     A Windows ATS install keeps its data in Documents. Under Proton that path
     lives inside the prefix's fake C: drive, so "Documents\\..." is useless to
     a Linux user -- find the real one instead of telling them to guess.
+
+    `extra` holds directories named with --mod-dir. They are checked first and
+    accepted even if they do not look like an ATS data directory, because the
+    user has told us where it is and second-guessing them would be worse than
+    printing a path that turns out to be right.
     """
     found: list[Path] = []
     home = Path.home()
 
-    candidates = [
-        home / "Documents" / "American Truck Simulator",
-        home / ".wine" / "drive_c" / "users",
-        home / ".local" / "share" / "Steam" / "steamapps" / "compatdata",
-        home / ".steam" / "steamapps" / "compatdata",
-        home / ".steam" / "steam" / "steamapps" / "compatdata",
-    ]
-
-    def consider(p: Path) -> None:
-        # A real ATS data dir has profiles/ or config.cfg.
-        if (p / "profiles").is_dir() or (p / "config.cfg").is_file():
+    def add(p: Path) -> None:
+        try:
             real = p.resolve()
-            if real not in found:
-                found.append(real)
+        except OSError:
+            return
+        if real not in found:
+            found.append(real)
 
-    for base in candidates:
-        if not base.exists():
+    for raw in extra or []:
+        # Accept the data dir itself, or anywhere under it, so both
+        # --mod-dir ~/.../American Truck Simulator and --mod-dir ~/... work.
+        if _looks_like_ats_data(raw):
+            add(raw)
             continue
-        if base.name == "American Truck Simulator":
-            consider(base)
+        named = _child(raw, _ATS_DIR)
+        if named is not None:
+            add(named)
+        for hit in _ats_paths_under(raw):
+            add(hit)
+
+    docs = _child(home, "Documents")
+    direct = _child(docs, _ATS_DIR) if docs is not None else None
+    if direct is not None and _looks_like_ats_data(direct):
+        add(direct)
+
+    for base in _prefix_candidates(home):
+        if not base.is_dir():
             continue
-        # walk one or two levels down (users/<name>/..., compatdata/<id>/...)
-        for depth in (1, 2):
-            for parent in base.glob("/".join(["*"] * depth)):
-                if not parent.is_dir():
-                    continue
-                for sub in parent.glob("**/American Truck Simulator"):
-                    if sub.is_dir():
-                        consider(sub)
+        for hit in _ats_paths_under(base):
+            add(hit)
 
     return found
 
@@ -2829,8 +2946,15 @@ def _write_scs(files: dict[str, str], out_path: Path,
             z.writestr(entry(name, data, False), data)
 
 
-def print_install_help(out: Path) -> None:
-    """Print the output path and where to copy it, with a real mod folder if found."""
+def print_install_help(out: Path, mod_dirs: list[Path] | None = None) -> None:
+    """Print the output path and where to copy it, with a real mod folder if found.
+
+    `mod_dirs` is threaded in from main() so that --mod-dir is honoured here
+    without the finder being consulted a second time and disagreeing with
+    itself.
+    """
+    if mod_dirs is None:
+        mod_dirs = find_mod_folders()
     print()
     print(_ui.paint("  " + _ui.rule("=", 62), "green"))
     print()
@@ -2842,7 +2966,7 @@ def print_install_help(out: Path) -> None:
     print("  " + _ui.paint("To install it:", "bold"))
     print("    " + _ui.paint("1.", "magenta") + " Close American Truck Simulator")
 
-    mod_dirs = [d / "mod" for d in find_mod_folders()]
+    mod_dirs = [d / "mod" for d in mod_dirs]
     if mod_dirs:
         print("    " + _ui.paint("2.", "magenta")
               + " Copy that .scs into your ATS mod folder:")
@@ -2855,10 +2979,11 @@ def print_install_help(out: Path) -> None:
         print("       Windows:  Documents\\American Truck Simulator\\mod")
         print("       Proton:   ~/.steam/steamapps/compatdata/<appid>/pfx/drive_c/")
         print("                 users/<user>/Documents/American Truck Simulator/mod")
-        print("       " + _ui.paint("(I could not find one on this machine -- search for",
+        print("       " + _ui.paint("(I could not find one on this machine. If it is",
                                         "dim"))
-        print("        " + _ui.paint("'American Truck Simulator' under compatdata/ if unsure)",
-                                        "dim"))
+        print("        " + _ui.paint("elsewhere, re-run with", "dim") + " "
+              + _ui.paint("--mod-dir /path/to/American Truck Simulator", "cyan"))
+        print("        " + _ui.paint("and I will print exactly that folder)", "dim"))
     print("    " + _ui.paint("3.", "magenta")
           + " Start the game, then Mod Manager -> enable -> Save & Play")
     print()
@@ -3018,6 +3143,16 @@ def main(argv: list[str] | None = None) -> int:
         help="password for a protected mod archive",
     )
     ap.add_argument("--dry-run", action="store_true", help="report only, write nothing")
+    ap.add_argument(
+        "--mod-dir",
+        action="append",
+        type=Path,
+        metavar="DIR",
+        help="where this machine keeps its ATS user data, e.g. "
+             "'/home/you/Documents/American Truck Simulator'. Repeatable. "
+             "Only affects the folder printed at the end; if the search "
+             "cannot find yours, this names it outright",
+    )
     ap.add_argument(
         "-o", "--output", type=Path,
         help="output .scs (default: rt_<slug>.scs next to the input)",
@@ -3257,7 +3392,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # ---- final: where the mod is ----------------------------------------
-    print_install_help(out)
+    print_install_help(out, find_mod_folders(args.mod_dir))
     return 0
 
 

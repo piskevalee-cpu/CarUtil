@@ -215,6 +215,27 @@ vanished entirely rather than dimming. `require[]` is validated against the
 bound accessories and unsatisfied entries are reported as gaps at conversion
 time, precisely so this class of fault is visible before the game is launched.
 
+**Never make `find_mod_folders()` a tree walk.** It resolves the mod folder by
+*constructing* the known paths (`<appid>/pfx/drive_c/users/<user>/Documents/…`)
+rather than searching. An `os.walk(followlinks=True)` attempt took **over ten
+minutes**: a Proton prefix holds ~1358 symlinks, mostly into the Proton runtime
+tree. And `Path.glob("**/…")` — the original — is the opposite failure: it does
+not descend into symlinked directories at all, so a linked prefix or Steam
+library was invisible while `base.exists()` still reported `True`. The finder
+silently found nothing while reporting no error. `pathlib` resolves symlinks on
+its own, so constructing paths finds them without traversing anything.
+
+Every path component is matched case-insensitively. ext4 is case-sensitive by
+default, so an exact-case probe finds the directory on NTFS and on a
+case-insensitive btrfs but misses it on a stock Linux Mint install.
+
+`test_find_mod_folders_layouts` builds a synthetic `$HOME` with 14 real layouts —
+Proton/Wine/Flatpak/Snap/Lutris, `My Documents`, a prefix with no `pfx/`,
+`profiles/` instead of `config.cfg`, a lowercase directory, and both symlink
+shapes — and asserts each is found. It also asserts the search completes in under
+two seconds, which is what stops anyone reintroducing a walk. It runs **before**
+the fixture gate, since it needs no real mods.
+
 **The test fixtures are third-party assets and must never be committed.** Real
 car mods live in `../testing-covnverter/` — the typo is in the real directory
 name — and are not in the repo. `*.scs` is gitignored, so a mod dropped in the
