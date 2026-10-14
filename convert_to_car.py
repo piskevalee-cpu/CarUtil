@@ -183,6 +183,12 @@ class ModSource:
             if self.locked and plain_read:
                 self._try_local_headers()
         self.readable = [n for n in self.names if n not in self.locked]
+        # A previous run's output lands beside the input by default, and with a
+        # FOLDER input it used to land INSIDE it. Everything in `readable` is
+        # carried over into the new archive, so the second conversion nested a
+        # 200 MB .scs inside the mod and handed it to the game as an asset.
+        self.readable = [n for n in self.readable
+                         if not n.lower().endswith(".scs")]
 
     def _try_local_headers(self) -> None:
         """Recover entries whose central-directory encryption flag is a lie.
@@ -670,16 +676,58 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
         "cameras": {},
     }
 
-    # Slot names are the short ones the reference converter emits
-    # (.transm, .headl, .paint) rather than the raw directory names.
+    # Slot names, both directions: directory <-> the short name the dealer
+    # binding carries (.transm, .headl, .paint).
     SLOT = {
         "transmission": "transm", "head_light": "headl", "paint_job": "paint",
     }
+    SLOT_FROM_SHORT = {v: k for k, v in SLOT.items()}
+
+    # Optional shop items that are decoration, not equipment. Binding one makes
+    # it part of the spawned car, and its model lives in an interior_decors
+    # namespace ATS does not have: the game died with
+    # "Can not open '/vehicle/truck/upgrade/interior_decors/...pmd'". They are
+    # still carried through in the archive; they are just never auto-bound.
+    DECORATIVE = (
+        "toy", "toybig", "toyseat", "toystand", "toybox", "toyset",
+        "set_dashbrd", "interior_decor", "interior_decors", "decoration",
+        "dashboard_toy", "ornament",
+    )
+
+    def _is_decorative(name: str) -> bool:
+        low = name.lower()
+        return any(low == d or low.startswith(d) for d in DECORATIVE)
 
     def add_accessory(name: str, kind: str, path: str, slot: str | None = None) -> None:
         key = slot or name
         parts["accessories"][key] = (kind, path)
         parts["order"].append(key)
+
+    # The mod's own dealer unit is the only statement of which file is the
+    # car's real part for each slot. Sorted discovery is a guess, and it guessed
+    # wrong on a real mod: it bound chassis/xdl.sii (the -30 mm sport spring)
+    # and interior/amb_blue.sii where the author's dealer config named xdrive
+    # and standard. Read that first, and only fall back to guessing where the
+    # mod says nothing.
+    dealer: dict[str, str] = {}
+    dealer_re = re.compile(
+        r"vehicle_\w*accessory\s*:\s*\.(\w+)\s*\{[^}]*?data_path\s*:\s*\"([^\"]+)\"",
+        re.S,
+    )
+    for n in src.readable:
+        if not (n.startswith("def/vehicle/truck_dealer/") and n.endswith(".sii")):
+            continue
+        try:
+            text = src.read_def(n)
+        except SystemExit:
+            continue
+        for slot, path in dealer_re.findall(text):
+            dealer.setdefault(SLOT_FROM_SHORT.get(slot, slot), path.lstrip("/"))
+
+    def _declared(name: str) -> str | None:
+        """The file the author's dealer config names for this slot, if any."""
+        want = dealer.get(name)
+        return want if want and src.exists(want) else None
 
     # 1. the root data unit is itself bound first, matching the reference
     if src.exists(f"{vdir}data.sii"):
@@ -688,12 +736,16 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     # 2. core parts, in reference order
     core = ["chassis", "cabin", "interior", "engine", "transmission", "head_light"]
     for name in core:
-        candidates = [
-            n for n in src.readable
-            if n.startswith(f"{vdir}{name}/") and n.endswith(".sii")
-        ]
-        if candidates:
-            first = sorted(candidates)[0]
+        declared = _declared(name)
+        if declared:
+            first = declared
+        else:
+            candidates = [
+                n for n in src.readable
+                if n.startswith(f"{vdir}{name}/") and n.endswith(".sii")
+            ]
+            first = sorted(candidates)[0] if candidates else None
+        if first:
             add_accessory(name, "vehicle", f"/{first}", SLOT.get(name))
             parts["fallbacks"].append(f"{name}|{Path(first).name}")
         else:
@@ -765,6 +817,18 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
         if key and key not in addons:
             addons[key] = n
     for key, n in addons.items():
+        # Decoration stays in the archive but out of the car. A mod that
+        # carries ETS2's interior toys in toybig/, toyseat/, toystand/ and
+        # set_dashbrd/ crashed the game the moment the car spawned, because
+        # binding one makes it mandatory and ATS has no models for it. The
+        # author listing it in their own dealer unit is how a mod opts in.
+        if _is_decorative(key) and key not in dealer:
+            rep.gap(
+                f"not bound: decorative slot '{key}' is an optional shop item "
+                "whose models ATS does not ship; it is still in the archive, "
+                "but binding it would make the car load them at spawn"
+            )
+            continue
         if key not in parts["accessories"]:
             add_accessory(key, "addon", f"/{n}")
 
@@ -789,6 +853,24 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
                     f"vehicle requires '{req}' but no such accessory is bound; "
                     "it will be missing in game"
                 )
+
+    # A unit name the BASE GAME also owns loses its whole storage file: the
+    # loader answers "The unit name 'camera.behind.car' is already taken",
+    # the mod's camera never loads, and the vehicle's data.sii is left pointing
+    # at nothing. Road Trip owns the generic camera.*.car names, so an older
+    # mod that defines one is a landmine that only fires in game. It is the
+    # mod's fault, but a converter targeting Road Trip is well placed to say so
+    # before the game is launched rather than after.
+    generic_re = re.compile(
+        r"^\s*[A-Za-z_][\w.]*\s*:\s*(camera\.\w+\.car)\s*$", re.M)
+    for n in src.readable_defs():
+        for unit_name in set(generic_re.findall(src.read_def(n))):
+            rep.warn(
+                f"{n} defines '{unit_name}', which the base game also owns. "
+                "The mod's copy will be rejected as a duplicate, leaving the "
+                "vehicle with a dangling pointer; rename it in the mod's own "
+                "defs (and every data.sii that refers to it)"
+            )
     return parts, rep
 
 
@@ -2320,6 +2402,10 @@ def convert(
     # discover parts against a rewritten view of the source
     parts, part_rep = discover_parts(src, vehicle_dir, src_slug, new_root)
     rep.gaps.extend(part_rep.gaps)
+    # Warnings too. Merging only the gaps silently discarded everything
+    # discover_parts had to say -- including the base-game unit-name collision
+    # that ends in a load-time crash.
+    rep.warnings.extend(part_rep.warnings)
 
     files: dict[str, str] = {}
     assets: dict[str, bytes] = {}
@@ -3380,8 +3466,11 @@ def main(argv: list[str] | None = None) -> int:
         # next to the source mod
         out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
     else:
-        # input was a folder: write inside it
-        out = args.input / f"{RT_PREFIX}_{slug}.scs"
+        # Input was a FOLDER. Writing inside it used to mean the next run found
+        # the previous output, treated it as one of the mod's assets and copied
+        # it into the new archive -- a 200 MB .scs nested inside the mod, for
+        # the game to load as an asset. Write beside the folder instead.
+        out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
 
     if guided:
         _ui.step(7, total, "Convert")

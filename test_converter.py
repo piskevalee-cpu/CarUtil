@@ -13,6 +13,7 @@ Two levels:
 from __future__ import annotations
 
 import functools
+import io
 import math
 import hashlib
 import os
@@ -355,6 +356,149 @@ def test_fallback_appends_every_slot_when_the_mod_declares_none() -> None:
               <= {f.split("|", 1)[0] for f in fb}, str(fb))
         check("no default was lost to a replace-instead-of-append",
               len(fb) >= 5, str(fb))
+
+
+def _dealer_unit(slot: str, path: str) -> str:
+    return ("SiiNunit\n{\ntruck_dealer : vehicle.truck\n{\n"
+            f"\tvehicle_accessory : .{slot}\n\t{{\n"
+            f'\t\tdata_path: "{path}"\n\t}}\n}}\n}}\n')
+
+
+def _desktop(archive: Path) -> str:
+    """The generated car_desktop binding -- the list of what is actually bound.
+
+    Filtering on .sii matters: the archive also carries a `def/vehicle/
+    car_desktop/` DIRECTORY entry, and matching that alone reads back as empty,
+    which turns every "is it bound?" assertion into a silent false pass.
+    """
+    import zipfile as _z
+    with _z.ZipFile(archive) as z:
+        names = [n for n in z.namelist()
+                 if "car_desktop" in n and n.endswith(".sii")]
+        return z.read(names[0]).decode()
+
+
+def test_defaults_come_from_the_mods_dealer_config() -> None:
+    """The author's dealer unit names the car's real part; believe it.
+
+    Reported on a real mod: discovery bound chassis/xdl.sii and
+    interior/amb_blue.sii purely because they sort first, where the mod's own
+    dealer config named xdrive.sii and standard.sii.
+    """
+    section("default parts follow the mod's dealer config")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "mod"
+        vdir = "/def/vehicle/truck/testcar"
+        dealer = Path(root) / "def" / "vehicle" / "truck_dealer" / "tester"
+        dealer.mkdir(parents=True)
+        (dealer / "tester_0.sii").write_text(
+            _dealer_unit("chassis", f"{vdir}/chassis/xdrive.sii")
+            + _dealer_unit("interior", f"{vdir}/interior/standard.sii"))
+        mod = synthetic_mod(root)
+        out = Path(td) / "o.scs"
+        text = _data_sii(mod, out)
+
+        fb = get_all_indexed(edit_lines(text), "fallback")
+        check("the dealer's chassis is the default, not the alphabetical one",
+              "chassis|xdrive.sii" in fb, str(fb))
+        check("the alphabetically-first chassis is not used",
+              "chassis|xdl.sii" not in fb, str(fb))
+        check("the dealer's interior wins too",
+              "interior|standard.sii" in fb, str(fb))
+
+        bound = _desktop(out)
+        check("the bound chassis is the dealer's file",
+              "chassis/xdrive.sii" in bound, bound[:400])
+        check("the alphabetically-first chassis is not bound either",
+              "chassis/xdl.sii" not in bound, bound[:400])
+
+
+def test_decorative_slots_are_never_auto_bound() -> None:
+    """A decorative addon must not become part of the spawned car.
+
+    Reported on a real mod carrying ETS2 interior toys in toybig/, toyseat/,
+    toystand/ and set_dashbrd/. Binding one makes it mandatory, and ATS has no
+    models for it: the game died with "Can not open
+    '/vehicle/truck/upgrade/interior_decors/...pmd'".
+    """
+    section("decorative slots are left out of the car")
+    decoys = ("toybig", "toyseat", "toystand", "set_dashbrd", "interior_decors")
+    with tempfile.TemporaryDirectory() as td:
+        extra = {
+            f"accessory/{d}/x.sii":
+                f'SiiNunit\n{{\naccessory_truck_addon : {d}\n{{\n'
+                f'\tui_name: "{d}"\n}}\n}}\n'
+            for d in decoys
+        }
+        mod = synthetic_mod(Path(td) / "mod", extra_defs=extra)
+        out = Path(td) / "o.scs"
+        _data_sii(mod, out)
+
+        bound = _desktop(out)
+        for d in decoys:
+            check(f"{d} is not bound", d not in bound, bound[:400])
+        # Still shipped, just not fitted: a mod that wants one binds it itself.
+        import zipfile as _z
+        with _z.ZipFile(out) as z:
+            names = z.namelist()
+        for d in decoys:
+            check(f"{d} def is still in the archive",
+                  any(d in n for n in names), str(names[:5]))
+
+
+def test_output_is_not_written_inside_the_input_folder() -> None:
+    """A second run must not nest the previous output inside the mod."""
+    section("default output does not land inside the input folder")
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod")
+        C.main([str(mod), "--type", "sedan", "--brand", "test", "--no-prompt"])
+        # The default slug comes from the input's own name, which for a folder
+        # is the folder's.
+        produced = Path(td) / "rt_mod.scs"
+        check("output is written beside the input folder", produced.exists(),
+              str(list(Path(td).iterdir())))
+        check("nothing was written inside the input folder",
+              not list(mod.glob("*.scs")), str(list(mod.iterdir())))
+
+        # And the real damage: a re-run must not carry the old archive in.
+        mod2 = synthetic_mod(Path(td) / "mod2")
+        (mod2 / "rt_old.scs").write_bytes(b"PK\x03\x04 not really an archive")
+        out2 = Path(td) / "second.scs"
+        C.main([str(mod2), "--type", "sedan", "--brand", "test",
+                "--no-prompt", "-o", str(out2)])
+        with zipfile.ZipFile(out2) as z:
+            names = z.namelist()
+        check("a stray .scs inside the input is not carried over",
+              not any(n.endswith(".scs") for n in names),
+              str([n for n in names if n.endswith(".scs")]))
+
+
+def test_generic_camera_name_is_flagged() -> None:
+    """A mod defining camera.behind.car collides with the base game."""
+    section("base-game unit-name collisions are reported")
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod", extra_defs={
+            "accessory/cam/camera.sii":
+                "SiiNunit\n{\ncamera_def : camera.behind.car\n{\n"
+                "\tui_name: behind\n}\n}\n",
+        })
+        out = Path(td) / "o.scs"
+        buf = io.StringIO()
+        real, sys.stdout = sys.stdout, buf
+        try:
+            C.main([str(mod), "--type", "sedan", "--brand", "test",
+                    "--no-prompt", "-o", str(out)])
+        finally:
+            sys.stdout = real
+        text = buf.getvalue()
+        check("the collision is named in the summary",
+              "camera.behind.car" in text, text[-400:])
+        # Under "warnings", not "gaps": it is the mod's defect, not a part the
+        # user still has to add by hand.
+        wi = text.find("warnings")
+        gi = text.find("not present in source")
+        check("reported as a warning, not a gap",
+              wi != -1 and "camera.behind.car" in text[wi:gi], text[-400:])
 
 
 # ------------------------------------------------------------- type selection
@@ -3562,6 +3706,10 @@ def main() -> int:
     test_collapsed_keys_survive_a_real_tune()
     test_fallback_merges_with_the_mods_own()
     test_fallback_appends_every_slot_when_the_mod_declares_none()
+    test_defaults_come_from_the_mods_dealer_config()
+    test_decorative_slots_are_never_auto_bound()
+    test_output_is_not_written_inside_the_input_folder()
+    test_generic_camera_name_is_flagged()
     test_vehicle_types()
     test_type_validation()
     test_brand_logo()
