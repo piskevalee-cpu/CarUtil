@@ -476,6 +476,17 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
 - `ui.py` output must stay clean when piped: no ANSI when stdout is not a tty,
   and `NO_COLOR` must beat `FORCE_COLOR`.
 
+## Talking to GitHub
+
+**Never comment on, close, reopen, label or edit an issue without the user's
+explicit consent for that specific action.** Draft the reply, show it, and wait.
+This is not a "be careful" rule — a posted comment is public, permanent and
+attributed to the maintainer's account, and a wrong technical claim in it is
+the maintainer's reputation to defend. Reading issues with `gh issue view` is
+fine and expected; writing to them is not, without being asked.
+
+Same applies to opening a PR: prepare the title and body, then ask.
+
 ## Before committing
 
 ```bash

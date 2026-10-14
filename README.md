@@ -151,7 +151,7 @@ You can always type a name instead of using the arrows (e.g. `sedan`,
 | `--brand-logo-dir` | Directory to look for `<brand>.png` in, instead of the bundled `logos/`. |
 | `--brand` | Brand name, used for the dealer folder and `info[]`. |
 | `--mod-dir` | Where this machine keeps its ATS user data, if the automatic search cannot find it. Repeatable. Only affects the folder printed at the end. |
-| `--slug` | Vehicle identifier. Defaults to the input filename stem. |
+| `--slug` | Vehicle identifier. Defaults to the vehicle's own unit name — see below. |
 | `--asset-root` | Explicit model root. Default: `/vehicle/car/<slug>`. |
 | `--mass` | Kerb weight: `TOTAL` kg (`--mass 1650`) or `FRONT,REAR` (`--mass 1150,1050`). Skips the prompt. |
 | `--no-prompt` | Never prompt, even on a terminal. |
@@ -317,6 +317,10 @@ goes through ImageMagick rather than a PNG decoder.
 The tool prints three groups at the end: **changes**, **parts bound**, and
 **gaps** — parts the source mod does not contain and that you must add by hand.
 
+It can also print **warnings**, which are things that converted but are worth
+knowing before you launch the game: a unit name the base game already owns, a
+decorative slot left unbound, or assets your input is missing.
+
 ## Tests
 
 ```bash
@@ -369,6 +373,19 @@ suspension_class: standard nominal_voltage: 12.0  air_tank_pressure: 0.0
 A mod without these falls back to engine defaults and still drives like a truck.
 The Porsche had **none** of them.
 
+**Two engine keys are removed or corrected rather than scaled:**
+
+- `secondary_torque` / `secondary_torque_gear_ratio` are a **truck** mechanism
+  — extra torque in the lower gears. No production car has one and all 181 of
+  SCS's engine units leave it alone. Truck mods declaring it were getting 1.5x
+  to 1.7x torque in every gear at or below the ratio. It is dropped.
+- `resistance_torque` is engine drag, and it is a **fraction of `torque`**, not
+  a fixed number — so it is rescaled by whatever factor `torque` is. Left
+  alone it becomes the dominant force: a mod declaring `torque: 4900` with
+  `resistance_torque: 320` kept 320 against a 476 Nm car engine, which is 67%
+  drag and why lifting off at 50 mph dropped it to about 30. `-1` means "no
+  drag" and is left exactly as written.
+
 ### Setting the weight
 
 Run the tool on a terminal and it asks:
@@ -410,13 +427,25 @@ Existing values are **preserved** unless they are provably truck-scale:
 | `kerb_weight` | total > 4000 kg |
 | `nominal_voltage` | >= 24 (trucks are 24V, cars 12V) |
 | `cog_height` | > 0.85 |
-| `residual_travel` | any element < 0.12 (stiff truck value) |
+| `residual_travel` | always — see below |
+| `suspension_class` | anything but `standard` (`bus` is a coach rating) |
 | `tank_size` | > 200 |
 | `sway_bar_stiffness` | > 2.0 |
 | `max_steering_angle` | > 45 |
 
+`residual_travel` is the body-roll key and gets **no threshold**. Truck mods
+ship 0.09–0.10 and SCS's own cars use 0.093–0.134 — the ranges overlap, so no
+cut-off separates them and an old "below 0.12 is a truck" rule flagged SCS's
+own Mustang as one. A key whose truck and car values overlap has to be written
+outright.
+
+Numbers are read through a decoder that also handles SII's hex-float form
+(`kerb_weight[0]: &459380cd` is 4720.1 kg). Without it a hex-float value raised,
+was caught, and was read as car-sane — leaving a 9.4 t truck's chassis intact.
+
 Converting the Parati leaves its chassis **byte-identical**. Use
-`--force-physics` to overwrite everything regardless.
+`--force-physics` to overwrite everything regardless. An explicit `--mass`
+always wins over whatever the mod shipped.
 
 Truck-only trailer/cab keys (`fifth_wheel_*`, `trailer_joint_*`,
 `spreader_joint_*`, `cabin_*`) are removed — a car has no way to attach them.
@@ -534,14 +563,37 @@ definitions, it is unpacked automatically and the inner mod is converted:
   - MyMod.zip contained a mod archive; read MyMod.scs inside it
 ```
 
-## Pre-selecting parts (fallback[])
+**Incomplete extractions.** Some mods ship without directory listings for part
+of their tree, so a plain extraction comes up hundreds of files short — the
+engine's sound bank, most of the textures and models. Every definition still
+parses, so nothing downstream notices and you get a 12 MB archive out of a
+124 MB mod that spawns mute and untextured. The converter compares the model,
+texture and sound paths the mod's own definitions point at against what is
+actually present, and says so:
 
-`fallback[]` in `data.sii` is what tells the game which part to fit when the
-car is spawned. Without it the shop shows its first choice and the car arrives
-half-configured.
+```
+  ! 774 of 874 assets this mod's defs point at are not in the input (89%):
+    /model/.../engine.bank, ... That is what an incomplete extraction looks
+    like -- re-extract with a deep mode (7-Zip's --deep, or 'extract all' in a
+    tool that reads directory listings), otherwise the car will spawn without
+    its textures and sounds
+```
 
-The converter emits one per bound part, using the syntax the Parati uses —
-`<part>|<file relative to it>`:
+Only paths under a root the mod itself declares are counted. A definition
+pointing at `/vehicle/truck/...` or `/material/...` is pointing at the base
+game, which is not in your input and not counted against you.
+
+## Which parts get bound, and which the car arrives with
+
+Two separate questions, and the answers used to be the same thing.
+
+**Which file is this part?** The mod's own `truck_dealer` unit decides. Each
+`vehicle_accessory : .slot { data_path: ... }` entry names the file the author
+intended for that slot, so that is what gets bound. Only slots the dealer unit
+says nothing about fall back to directory discovery.
+
+**What does the car arrive wearing?** `fallback[]` in `data.sii`, using the
+syntax the Parati uses — `<part>|<file relative to it>`:
 
 ```
 fallback[]: "chassis|4matic.sii"
@@ -557,6 +609,30 @@ fallback[]: "p_disc|w223.sii"
 Most resolve inside the vehicle def folder
 (`def/vehicle/truck/<slug>/<part>/<file>`); `p_tire` and `p_disc` live at
 `def/vehicle/<part>/<file>`. Tests assert every fallback target exists.
+
+**A slot the mod already defaults is left alone.** If the author's `data.sii`
+already carries a `fallback[]` for a part, that entry is kept and nothing is
+added for it — it is the only statement of what the car should ship with. Only
+slots the mod left open are filled in, and the summary says how many of each.
+
+Neither decision is made by sorting a directory. That used to be the whole
+method, and on a mod shipping several chassis files it bound `xdl.sii` — the
+-30 mm sport spring — where the author's dealer config named `xdrive.sii`.
+
+### Decorative slots are left out on purpose
+
+Some mods carry ETS2's interior toys in `accessory/toybig/`, `toyseat/`,
+`toystand/` and `set_dashbrd/`. These are optional shop items, not equipment.
+Binding one makes it part of the spawned car, and ATS ships no models for that
+namespace, so the game dies on load with:
+
+```
+Can not open '/vehicle/truck/upgrade/interior_decors/...pmd'
+```
+
+They stay in the archive — nothing is deleted — and are reported as skipped. If
+you want one fitted, add it to the mod's own `truck_dealer` unit and the
+converter will bind it.
 
 ## Wheels
 
@@ -590,6 +666,11 @@ def/vehicle/truck_company/<slug>.sii      vehicle : .company.truck
 
 The three `car_*` files are byte-identical. `<slug>` comes from the mod's own
 vehicle unit name (`vehicle.w223_s500` -> `w223_s500`), not the filename.
+
+When the last segment is a bare number it is not naming the vehicle —
+`vehicle.gle.450` -> `450`, `vehicle.prado.20` -> `20` — so the whole path is
+used instead (`gle_450`, `prado_20`). Those would otherwise be registration
+files two different mods both wanted. Pass `--slug` to choose it yourself.
 
 The mod's own `truck_dealer` entry is **left exactly as shipped**.
 
