@@ -4119,7 +4119,16 @@ def test_modsource_releases_its_handle() -> None:
 
         # A closed handle must fail loudly, not fall through to a text read.
         zsrc = C.ModSource(inner)
+        open_before = zsrc.zf.fp is not None
         zsrc.close()
+        check("the source really held an open handle to begin with",
+              open_before, "nothing was open, so close() proves nothing here")
+        # This is the Windows precondition, and it is checkable on Linux: a
+        # ZipFile releases its file object on close, and Windows will not
+        # delete a path whose handle is still open. `fp is None` is that
+        # release, observed rather than assumed.
+        check("close() released the underlying file handle",
+              zsrc.zf.fp is None, str(zsrc.zf.fp))
         try:
             zsrc.read("def/vehicle/truck/testcar/data.sii")
             check("a closed source refuses further reads", False,

@@ -577,11 +577,11 @@ definitions, it is unpacked automatically and the inner mod is converted:
   - MyMod.zip contained a mod archive; read MyMod.scs inside it
 ```
 
-**Mods split across two archives.** Some ship as a plain-ZIP `.scs` holding
-the definitions, plus a second `.scs` in SCS's own **HashFS** container
-(`SCS#` — the format the game itself uses) holding everything else. The
-converter reads plain ZIPs and folders; it does not read HashFS. Pointed at
-such a folder it says so, and names which half it can read:
+**Only single-archive mods are supported.** The input must be **one** `.scs`
+file, or a folder holding the mod's files. Mods shipped as **two** archives —
+a `... Def.scs` with the definitions plus a separate `....scs` with the assets —
+are **not supported**, and cannot be made supported by pointing the tool at
+either file or at the folder:
 
 ```
 error: this mod's files are split across two archives, and only one of them
@@ -591,12 +591,16 @@ can be read.
     2023 BMW 135i M Def.scs  (27 KB, plain ZIP)  <- readable
 ```
 
-This used to report `no def/vehicle/truck/<slug>/ found`, which was false —
-the mod does have one. The definitions sit in the readable archive, but the
-geometry, textures, sounds and usually the root `data.sii` sit in the HashFS
-one, so converting the folder alone cannot produce a working car. Extract the
-HashFS archive with a tool that understands SCS containers and point the
-converter at the extracted folder.
+The assets half uses SCS's own **HashFS** container (`SCS#`, the format the game
+itself uses). The converter reads plain ZIP archives and folders; it does not
+read HashFS. So the definitions are reachable but the geometry, textures,
+sounds and usually the root `data.sii` are not, and converting one half alone
+cannot produce a working car. This used to report `no def/vehicle/truck/<slug>/
+found`, which was false — the mod does have one.
+
+To use a split mod, extract the HashFS archive with a tool that understands SCS
+containers and point the converter at the extracted folder, or find a
+single-archive or pre-extracted release of the same mod.
 
 **Incomplete extractions.** Some mods ship without directory listings for part
 of their tree, so a plain extraction comes up hundreds of files short — the
