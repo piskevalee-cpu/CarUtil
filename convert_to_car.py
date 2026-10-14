@@ -1776,8 +1776,6 @@ def _is_truck_scale(key: str, current: str | list[str] | None) -> bool:
             return current is not None and to_float(current) > 45
         if key == "sway_bar_stiffness":
             return current is not None and to_float(current) > 2.0
-        if key == "tank_size":
-            return current is not None and to_float(current) > 200
         if key == "kerb_weight" and isinstance(current, list):
             total = sum(to_float(x) for x in current)
             return total > 4000
@@ -1922,14 +1920,17 @@ def tune_chassis(
         else:
             kept.append(key)
 
-    # tank_size belongs here and did not. Every preset carried a car-sized
-    # figure and _is_truck_scale had a branch for it, but no loop ever wrote
-    # it, so a converted car kept its truck's 240-1200 L tank. The reporter
-    # was told fuel is deliberately left alone; the code says otherwise, and
-    # a 1200 L tank on a road car is a leftover either way.
+    # tank_size is deliberately NOT here. It was added once on the argument
+    # that a 1200 L tank is a truck leftover, then removed: fuel is economy,
+    # and the mod's consumption rate is not touched by anything here, so a
+    # small tank with a truck's consumption is strictly worse range than the
+    # tank the mod shipped with. Half-fixing fuel economy -- capacity only,
+    # consumption untouched -- makes the complaint worse rather than better.
+    # Calibrating both against SCS's own cars needs dlc_rt_ford.scs; see
+    # FINDINGS.md 18.
     for key in ("air_resistance", "cog_height", "sway_bar_stiffness",
                 "max_steering_angle", "suspension_class", "nominal_voltage",
-                "air_tank_pressure", "tank_size"):
+                "air_tank_pressure"):
         if key not in cfg:
             continue
         current = get_key(lines, key)

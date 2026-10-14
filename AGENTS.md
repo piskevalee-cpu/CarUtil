@@ -422,6 +422,13 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   converted car kept its 240–1200 L truck tank for the life of the project.
   When you add a preset key, add it to one of the two loops in `tune_chassis`
   and add a test that reads it back out of a converted chassis.
+- **…and a half-fix is worse than no fix.** `tank_size` was then wired in, and
+  that made fuel range *worse*: a mod's 291 L tank became 79 L while its fuel
+  consumption — which nothing here touches — stayed at the truck's rate.
+  Capacity and consumption have to move together, and calibrating both means
+  measuring `dlc_rt_ford.scs`, which is not on every machine. Until it is,
+  fuel is left alone. A threshold branch with no writer is dead code that
+  reads like a working rule, so remove the branch rather than leave it dormant.
 - **`resistance_torque` is a fraction of `torque`, not a fixed number.** It has
   to be rescaled by the same factor whenever torque is, or a 476 Nm engine
   inherits a 9.4 t truck's 320 Nm of drag — 67% of peak, which is why lifting

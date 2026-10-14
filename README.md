@@ -429,7 +429,6 @@ Existing values are **preserved** unless they are provably truck-scale:
 | `cog_height` | > 0.85 |
 | `residual_travel` | always — see below |
 | `suspension_class` | anything but `standard` (`bus` is a coach rating) |
-| `tank_size` | > 200 |
 | `sway_bar_stiffness` | > 2.0 |
 | `max_steering_angle` | > 45 |
 
@@ -684,8 +683,24 @@ The mod's own `truck_dealer` entry is **left exactly as shipped**.
 | `brake_rotor_diameter` | tyre diameter comes from the `.pmd`, not any `.sii`; inventing a rotor size risks a brake/wheel mismatch |
 | `powered_axle` | the mod's own drivetrain declaration is authoritative |
 | `detail_model` | not synthesised from `model` |
-| `tank_size` | fuel capacity is economy, not driving physics |
+| `tank_size` | fuel is economy, not driving physics — see below |
 | axle/rim model paths | would import foreign assets |
+
+### Fuel is deliberately left alone
+
+`tank_size` is **not** rewritten, even when the mod carries a truck's 1200 L
+tank, and `--force-physics` does not reach it either.
+
+This was briefly wrong in the other direction: `tank_size` *was* written, with
+car-sized presets per vehicle type. That made range worse, not better. A real
+mod's 291 L tank became 79 L while its fuel consumption — which nothing in this
+tool touches — stayed at the truck's rate, and a smaller tank at a truck's
+consumption is a strictly shorter range than the tank the mod shipped with.
+
+Half-fixing fuel economy is worse than not fixing it. Calibrating capacity
+*and* consumption together against SCS's own Road Trip cars needs
+`dlc_rt_ford.scs` from an ATS install; until that is measured, the mod's own
+figures are left alone rather than guessed at.
 
 ## What it does not do
 

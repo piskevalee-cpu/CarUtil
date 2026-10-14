@@ -283,12 +283,13 @@ def test_collapsed_keys_survive_a_real_tune() -> None:
 
     check("nominal_voltage still present after tuning",
           get_key(edit_lines(out), "nominal_voltage") == "12", out)
-    # tank_size is deliberately rewritten now (a 1200 L tank is a truck's), so
-    # this asserts it was REPLACED rather than deleted along with its
-    # neighbour -- which is what the collapsed line used to cause.
+    # tank_size is deliberately never touched (see
+    # test_tank_size_is_left_alone), so asserting it comes through verbatim
+    # proves something stronger than survival: the collapsed line is not being
+    # damaged at all, and the untouched keys really are untouched.
     size = get_key(edit_lines(out), "tank_size")
-    check("tank_size was rewritten, not deleted with its neighbour",
-          size is not None and float(size) < 200, f"{size}")
+    check("tank_size survives the collapsed line verbatim",
+          size == "1200", f"{size}")
     # The preset is per-axle, so only the shape is asserted: both elements
     # still present, and neither left at the truck's 0.08.
     rt = get_all_indexed(edit_lines(out), "residual_travel")
@@ -515,32 +516,34 @@ def test_explicit_mass_overrides_the_mods_own() -> None:
           kept)
 
 
-def test_tank_size_is_actually_written() -> None:
-    """tank_size had a preset and a rule, but no loop ever wrote it.
+def test_tank_size_is_left_alone() -> None:
+    """Fuel capacity is economy, and this converter does not do economy.
 
-    Every preset carried a car-sized figure and _is_truck_scale had a branch
-    for it, yet neither the indexed nor the scalar key list mentioned it, so a
-    converted car kept its truck's 240-1200 L tank.
+    It was briefly written here -- every preset carried a car-sized figure and
+    _is_truck_scale had a >200 threshold for it -- and that made range WORSE.
+    A real mod's 291 L tank became 79 L while its fuel consumption, which
+    nothing here touches, stayed at the truck's rate. A smaller tank at a
+    truck's consumption is a strictly shorter range than the tank the mod
+    shipped with, so the half-fix made the complaint worse.
     """
-    section("tank_size is written, not just configured")
+    section("tank_size is the mod's own business")
     text = _chassis_unit("kerb_weight[0]: 1150", "kerb_weight[1]: 1050",
                          "tank_size: 1200")
     out = C.tune_chassis(text, "sedan", None, C.Report())
-    size = get_key(edit_lines(out), "tank_size")
-    check("a truck tank is replaced with a car's", size is not None
-          and float(size) < 200, str(size))
+    check("a truck-sized tank is preserved, not shrunk",
+          get_key(edit_lines(out), "tank_size") == "1200", out)
 
-    car = _chassis_unit("kerb_weight[0]: 1150", "kerb_weight[1]: 1050",
-                        "tank_size: 47")
-    check("a car's own tank is left alone",
-          get_key(edit_lines(C.tune_chassis(car, "sedan", None, C.Report())),
-                  "tank_size") == "47", car)
+    # --force-physics must not reach it either: fuel is not driving physics.
+    forced = C.tune_chassis(text, "sedan", None, C.Report(), force=True)
+    check("--force-physics leaves it alone too",
+          get_key(edit_lines(forced), "tank_size") == "1200", forced)
 
-    check("every preset actually produces a car-sized tank",
-          all(0 < int(float(C.car_physics(t, 2)["tank_size"])) < 200
-              for t in C.VEHICLE_TYPES),
-          str({t: C.car_physics(t, 2).get("tank_size")
-               for t in C.VEHICLE_TYPES}))
+    # No half-configured key left lying around. A preset figure with no writer
+    # is exactly the trap AGENTS.md documents, and it is why the threshold
+    # branch in _is_truck_scale was removed rather than left dormant.
+    check("the tank_size threshold is gone from _is_truck_scale",
+          not C._is_truck_scale("tank_size", "1200"),
+          "the dormant branch came back")
 
 
 def test_suspension_class_is_validated() -> None:
@@ -4053,7 +4056,7 @@ def main() -> int:
     test_generic_camera_name_is_flagged()
     test_hex_float_kerb_weight_reads_as_truck_scale()
     test_explicit_mass_overrides_the_mods_own()
-    test_tank_size_is_actually_written()
+    test_tank_size_is_left_alone()
     test_suspension_class_is_validated()
     test_resistance_torque_is_rescaled_with_the_engine()
     test_secondary_torque_is_dropped_for_a_car()
