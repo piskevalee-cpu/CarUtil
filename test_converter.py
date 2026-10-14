@@ -1914,6 +1914,9 @@ def test_no_args_off_terminal_fails_clearly() -> None:
 @guard
 def test_missing_required_off_terminal() -> None:
     section("missing --type / --brand off terminal")
+    # Subprocess, so @guard does not apply -- see test_dry_run_writes_nothing.
+    if not need(PORCHE, "missing --type / --brand"):
+        return
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "o.scs"
         r = subprocess.run(
@@ -1948,6 +1951,11 @@ def test_rt_prefix_default_output() -> None:
 @guard
 def test_dry_run_writes_nothing() -> None:
     section("dry run")
+    # @guard cannot help here: this shells out, so a missing fixture comes back
+    # as a non-zero exit and the stdout assertions below fail for a reason that
+    # has nothing to do with --dry-run. Ask for the fixture explicitly.
+    if not need(PORCHE, "dry run"):
+        return
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "dry.scs"
         r = subprocess.run(
@@ -2283,8 +2291,15 @@ def _check_conversion(mod: Path, vtype: str, brand: str, mass: str,
     for kind in ("car_dealer", "car_desktop", "car_company", "truck_dealer"):
         check(f"{mod.name[:28]}: {kind} written",
               any(kind in n for n in names))
-    check(f"{mod.name[:28]}: physics.sii kept",
-          any(n.endswith("physics.sii") for n in names))
+    # Dropped, not kept. The mod's def/vehicle/physics.sii is stock TRUCK
+    # physics in a NON-namespaced file, so it overrides the base game's
+    # calibrated brake and tyre physics for every vehicle in the game. This
+    # assertion said "kept" and had done so since before the drop was the
+    # default -- it never ran, because it needs a fixture. --keep-physics is
+    # covered separately.
+    check(f"{mod.name[:28]}: the global truck physics.sii is dropped",
+          not any(n.endswith("physics.sii") for n in names),
+          str([n for n in names if n.endswith("physics.sii")]))
     # a TOTAL is split across axles, so compare against the split values
     if "," not in mass:
         expect = C.split_mass(int(mass), vtype, 2)
@@ -2689,9 +2704,32 @@ def test_wheels_bound_as_shipped() -> None:
             check(f"{label}: all {len(src_wheels)} source wheel defs kept",
                   src_wheels <= set(names),
                   str(sorted(src_wheels - set(names))[:3]))
-            for n in src_wheels:
-                check(f"{label}: {n.split('/')[-1]} byte-identical",
+            # Tyres are NOT byte-identical, and must not be: they are
+            # accessory_wheel_data units, so tune_wheel adds the car grip keys
+            # (roll_resistance, grip_factor) that all 18 of SCS's own car
+            # wheels declare. Every other wheel part is untouched and has to
+            # come through byte for byte. Asserting byte-identity for the tyres
+            # too failed here forever -- it is the test that was wrong, not the
+            # converter.
+            #
+            # Names carry the axle as well as the file: a mod has four wheel
+            # defs all called w223.sii (f/r tire and disc), so the bare
+            # filename repeats and you cannot tell which one failed.
+            def _wheel(n: str) -> str:
+                return "/".join(n.split("/")[-2:])
+
+            def _is_tyre(n: str) -> bool:
+                return n.split("/")[-2] in ("f_tire", "r_tire")
+
+            for n in sorted(src_wheels):
+                if _is_tyre(n):
+                    continue
+                check(f"{label}: {_wheel(n)} byte-identical",
                       src.read_bytes(n) == z.read(n))
+            for n in sorted(n for n in src_wheels if _is_tyre(n)):
+                txt = z.read(n).decode("utf-8", "replace")
+                check(f"{label}: {_wheel(n)} gained car tyre grip",
+                      all(k in txt for k in C._CAR_TYRE), txt[-200:])
 
             dealer = [n for n in names
                       if "car_desktop" in n and n.endswith(".sii")]
