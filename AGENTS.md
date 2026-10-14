@@ -12,14 +12,18 @@ used only to convert brand logo images.
 
 | File | Role |
 |---|---|
-| `convert_to_car.py` | The converter and CLI. Everything of substance lives here (~3200 lines). |
+| `convert_to_car.py` | The converter and CLI. Everything of substance lives here (~3600 lines). |
 | `sii.py` | Parsing/editing helpers for SCS's `.sii` data format. |
-| `brands.py` | The 22-brand list and the mapping to each logo file. |
+| `brands.py` | 23 brands (22 named plus the `other` catch-all) and the mapping to each logo file. |
 | `logo.py` | Image → 256×64 DDS conversion. Uses ImageMagick. |
 | `ui.py` | Banner, colour, arrow-key menus. Pure presentation. |
-| `test_converter.py` | The suite (~3100 lines). Run it before every commit. |
+| `test_converter.py` | The suite (~3600 lines). Run it before every commit. |
 | `FINDINGS.md` | Research log, §1–§32. **Early sections were wrong; see Corrections.** |
-| `logos/` | 23 brand images. **11 of them are not PNGs** — 7 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
+| `logos/` | 23 brand images. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
+
+`ALIASES` in `brands.py` can name a brand `BRANDS` does not contain: `vw` maps
+to `volkswagen`, which has no row, so `--brand vw` resolves to the `other`
+vendor with no logo. Check both lists when adding a brand.
 
 ## Commands
 
@@ -40,9 +44,9 @@ python3 -c "import test_converter as t; t.test_stored_entry_is_not_inflated()"
 
 **The suite must exit 0 before you commit.** Do not trust a hardcoded check
 count: most checks are emitted from loops over the 23 brands, so the number
-moves with the brand list and with whether `CARUTIL_FIXTURES` is set. `README.md`
-claims 515; the real number is whatever the run prints. Read the exit code.
-A fresh clone reports skips, not failures, when the fixtures are absent — that
+moves with the brand list and with whether `CARUTIL_FIXTURES` is set. The
+README deliberately does not quote a number either — read the exit code. A
+fresh clone reports skips, not failures, when the fixtures are absent — that
 is expected, not a regression.
 
 **`python3` and `python` may be different interpreters** (on the Windows dev
@@ -74,8 +78,9 @@ before you touch it.
   `test_every_brand_gets_its_own_vendor`. No logo → `dealer_folder()` returns
   `other` → the shared vendor → the exact logo collision that per-brand vendors
   exist to prevent. The same test also requires the vendor stem to survive
-  `build_brand_logo`'s sanitising. Note the three places a count is written out
-  by hand: this test's `>= 16` floor, the `logos/` row in `AGENTS.md`, and the
+  `build_brand_logo`'s sanitising. Note the places a count is written out by
+  hand: the `>= 16` floor (in **two** tests, `test_brand_selection` and
+  `test_every_brand_gets_its_own_vendor`), the `logos/` row above, and the
   "All N brands" line in `README.md`. They are deliberately not asserted
   against each other, so adding a brand means updating them all.
 - Editing `_MASS` or `TYPE_HELP` fails `test_readme_category_table_matches_code`,
@@ -184,6 +189,49 @@ back to the default. Without that, a mandatory field would be unescapable.
 Scripted mode, `--no-prompt` and CI are unaffected: the prompts only run on a
 TTY.
 
+**`--mass` skips steps 4, 5 and 6 entirely.** It is parsed *before* the
+`if guided:` prompt block, so a run with `--mass` goes straight from step 3
+(brand) to step 7 (convert) and the counter visibly skips. That is intentional,
+not a bug.
+
+## Editing defs: every helper is line-oriented
+
+This is the failure mode that produced a 0-gallon tank, and it will produce
+another one. **Some mods put several keys on one line**, and the regexes here
+cannot tell a value from the key after it:
+
+```
+residual_travel[0]: 0.08   nominal_voltage: 12   tank_size: 1200
+```
+
+Read as *one* key whose value happens to contain the others. `set_key` then
+replaces the whole line and takes `nominal_voltage` and `tank_size` with it.
+
+**Always reach lines through `sii.edit_lines(text)`, never `text.splitlines()`
+or `text.split("\n")`.** `edit_lines` is `expand_multi_key_lines` and it is the
+single entry point every editing and reading helper is wired to. It returns a
+line carrying a single pair — or an `@include`, a comment, or anything the
+scanner cannot read confidently — untouched, so a def you never edit keeps the
+mod's own bytes. A new editing function that splits lines itself reintroduces
+the bug silently.
+
+Two more consequences of the same line-orientation:
+
+- **`KEY_RE`'s name group is `[A-Za-z_][\w.]*`, which has no brackets.** So
+  `set_key(lines, "fallback[]", ...)` can never match — it appends every call.
+  Repeated keys take the bracket separately (`set_key(..., indexed="[]")`) or
+  `append_key`, which always adds. Choosing `set_key` for a list silently
+  collapses it to its last entry.
+- **A matched line's trailing comment matters.** `_rescale_in_place` and
+  `_set_scalar_in_place` exist so `torque: 1400 # per the tuner` survives;
+  `set_key` discards the comment with the line. Numeric scalars an author
+  annotated should go through the in-place setters.
+
+SII also writes some scalars in **hex-float form** — `kerb_weight[0]:
+&459380cd` is 4720.1 kg. Use `sii.to_float()`, which decodes it; plain
+`float()` raises, and any caller wrapping that in `except ValueError` will
+judge the value harmless and preserve a truck's worth of mass.
+
 ## Non-obvious constraints
 
 **A converted car cannot have a realistic engine *and* SCS's drag.** SCS ships
@@ -254,7 +302,17 @@ tests cover the shapes; `--mod-dir` covers anything they miss.
 **The test fixtures are third-party assets and must never be committed.** Real
 car mods live in `../testing-covnverter/` — the typo is in the real directory
 name — and are not in the repo. `*.scs` is gitignored, so a mod dropped in the
-working directory is safe, but do not widen that.
+working directory is safe, but do not widen that. Everything the fixtures are
+needed for should *also* be expressible against `synthetic_mod()` in
+`test_converter.py`, which builds a minimal but complete mod folder on disk —
+prefer that, so the behaviour is covered without the assets.
+
+**When you pick a file out of a generated archive, filter on `.sii`.** An
+archive carries a `def/vehicle/car_desktop/` **directory entry** alongside the
+`.sii` file, and `[n for n in namelist() if "car_desktop" in n][0]` returns the
+directory. Reading that back gives `b""`, so every "is this bound?" assertion
+becomes a silent **false pass**. `_desktop()` in the suite does the filtering
+for you.
 
 **`/tmp` is tmpfs on the Linux box — it is RAM, not disk.** Each conversion
 writes a 100–200 MB archive. A dozen test runs filled `/tmp` to 4 GB and took
@@ -268,16 +326,13 @@ byte-for-byte proves nothing about in-game behaviour.
 
 **The base game's `def.scs` / `base.scs` are readable — stop guessing.** They are
 HashFS **v2**, not encryption. It used to be recorded here as opaque, and that
-falsehood cost several "UNVERIFIED, needs an in-game test" conclusions. A 49-byte
-packed header (`SCS#`, u16 version, u16 salt, `CITY`, two table counts and
-lengths, two u64 table offsets), then two **zlib** tables: entries are 16 bytes
-(u64 CityHash of the path, u32 metadata index, u16 metadata count, u16 flags);
-the metadata table is a typed stream where `128`/`129` are plain file/directory
-records holding a 3-byte LE compressed size, a size, and an **offset block of
-16**. Data is raw deflate behind a **2-byte prefix**. Roughly thirty lines of
-Python reads an entire DLC. `dlc_rt_ford.scs` in a local ATS install holds SCS's
-own Road Trip car physics and is the reference for any drivetrain question.
-See `FINDINGS.md` §18.
+falsehood cost several "UNVERIFIED, needs an in-game test" conclusions. Two
+zlib tables of 16-byte entries indexed by CityHash of the path, a typed metadata
+stream of file/directory records, and raw deflate behind a 2-byte prefix;
+roughly thirty lines of Python reads an entire DLC. `dlc_rt_ford.scs` in a local
+ATS install holds SCS's own Road Trip car physics and is the reference for any
+drivetrain question — read it rather than inferring. The exact layout is in
+`FINDINGS.md` §18.
 
 ## Corrections to prior conclusions
 
@@ -299,15 +354,14 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
 - **Only `muscle`, `sport` and `veteran` are restricted.** 95 of the 149 jobs
   list only `offroad, pickup, sedan, suv`, so those three are excluded from the
   heavy-cargo work.
-- **Never express a physics target as an absolute number.** `--engine-torque
-  1125` was fitted on a `--type classic` car whose preset mass was 1550 kg when
-  the real vehicle was 2069 kg, so it was 34% out before it was ever driven.
-  Target per tonne of the mass *read back from the written chassis* instead
-  (`--engine-nm-per-tonne`). A hand-tuned absolute figure is a guess wearing a
-  decimal point.
-- **A single Nm/t constant cannot fit two cars.** 760 Nm/t made the W223 correct
-  and the Pilot uncontrollable. Ask for the target 0-60 (`--acceleration`, or
-  step 5 of the walkthrough) and derive torque from mass *and* time.
+- **Torque targets must be derived, never assumed.** `--engine-torque 1125`
+  was fitted on a `--type classic` car whose preset mass was 1550 kg when the
+  real vehicle was 2069 kg, so it was 34% out before it was ever driven — and
+  a single Nm/t constant then made the W223 correct and the Pilot
+  uncontrollable. Ask for the target 0-60 (`--acceleration`, or step 5 of the
+  walkthrough) and derive torque from the mass *read back from the written
+  chassis* instead. A hand-tuned absolute figure is a guess wearing a decimal
+  point.
 - **An engine needs its horsepower, not its torque.** Scaling the `torque`
   scalar cannot bound top speed: the mods' curves are flat and never taper, so
   power keeps climbing to the rev limiter. `tune_engine` rebuilds the curve on
@@ -353,6 +407,37 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   `car_dealer/<folder>/`. Hardcoding a single `"mod"` vendor made every converted
   car share one logo file, so the last mod loaded owned it.
   `dealer_folder(brand)` names it per brand. See `FINDINGS.md` §27.
+- **The mod's own dealer unit is the source of truth for what a part is.**
+  `discover_parts()` used to bind `sorted(candidates)[0]` per slot, which is a
+  guess: on a mod with several chassis files it bound the -30 mm sport spring
+  where the author's `truck_dealer` unit named the standard one. The dealer
+  config is read first now; sorted discovery only fills slots it does not
+  mention. **Never auto-bind a decorative slot** (`toy*`, `toystand`,
+  `set_dashbrd`, `interior_decor*`): binding one makes it part of the spawned
+  car, and ATS has no models for that namespace, so the game dies with
+  `Can not open '/vehicle/truck/upgrade/interior_decors/...pmd'`. They stay in
+  the archive; a mod that wants one lists it in its own dealer unit.
+- **A configured key is not a written key.** `tank_size` had a value in every
+  preset *and* a branch in `_is_truck_scale`, and no loop ever wrote it — a
+  converted car kept its 240–1200 L truck tank for the life of the project.
+  When you add a preset key, add it to one of the two loops in `tune_chassis`
+  and add a test that reads it back out of a converted chassis.
+- **`resistance_torque` is a fraction of `torque`, not a fixed number.** It has
+  to be rescaled by the same factor whenever torque is, or a 476 Nm engine
+  inherits a 9.4 t truck's 320 Nm of drag — 67% of peak, which is why lifting
+  off at 50 mph dropped the car to 30. `-1` means "no drag" and must survive
+  as written.
+- **`secondary_torque*` is a truck mechanism and is dropped on conversion.**
+  All 181 SCS engine units leave it alone and no production car has one;
+  keeping it proportional handed a converted Pilot 1.7x torque in every gear
+  at or below `secondary_torque_gear_ratio`. Do not "preserve the author's
+  ratio" — that was the bug.
+- **The last dot-separated token is not always a vehicle name.** The
+  registration slug was `unit.split(".")[-1]`, which turned `vehicle.gle.450`
+  into `450` and `vehicle.prado.20` into `20` — files two mods would both
+  want. A purely numeric token now falls back to the whole path. Named
+  vehicles keep the slugs they always had (`w223_s500`, `parati1994`), and
+  other files reference those names, so do not "simplify" that rule.
 - **Game file layout is not textbook.** The logo DDS reads its pixel-format block
   at **offset 76**, not 32; `dwCaps` is `0x00401008`. The `.tobj` stores its
   length as u32 at offset 40, has **four padding bytes at 44–47**, and the string
