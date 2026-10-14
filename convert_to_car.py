@@ -1796,6 +1796,66 @@ def _is_truck_scale(key: str, current: str | list[str] | None) -> bool:
     return False
 
 
+# Everything a def can point at that the mod itself has to ship: models,
+# textures and sounds. Base-game paths (/vehicle/truck/..., /material/...) are
+# deliberately absent from the input and are not counted against it.
+_ASSET_REF_RE = re.compile(
+    r'"(/[A-Za-z0-9_./-]+?\.(?:pmd|pmc|tobj|pma|ods|dds|ogg|wav|bank))"')
+
+
+def check_asset_integrity(src: ModSource, roots: list[str], rep: Report) -> None:
+    """Warn when the input is missing assets its own defs point at.
+
+    Some mods ship without directory listings for part of their tree, so a
+    plain extraction comes up hundreds of files short -- the engine's sound
+    bank, most of the textures and models. Nothing in the conversion notices:
+    the defs are all present and parse, so a 12 MB archive is produced from a
+    124 MB mod and the car spawns mute and untextured.
+
+    Only paths under a root the mod itself declares are checked. A def
+    pointing at /vehicle/truck/... or /material/... is pointing at the base
+    game, and counting those would report a healthy mod as broken.
+    """
+    if not roots:
+        return
+    referenced: set[str] = set()
+    for name in src.readable:
+        if not name.endswith((".sii", ".sui")):
+            continue
+        try:
+            text = src.read_def(name)
+        except SystemExit:
+            continue
+        for m in _ASSET_REF_RE.finditer(text):
+            p = m.group(1)
+            if any(p.startswith(r + "/") for r in roots):
+                referenced.add(p)
+
+    if not referenced:
+        return
+    have = set(src.readable)
+    missing = sorted(p for p in referenced if p.lstrip("/") not in have)
+    if not missing:
+        return
+
+    share = len(missing) / len(referenced)
+    detail = ", ".join(missing[:3]) + (", ..." if len(missing) > 3 else "")
+    if share >= 0.25:
+        rep.warn(
+            f"{len(missing)} of {len(referenced)} assets this mod's defs point "
+            f"at are not in the input ({share:.0%}): {detail}. That is what an "
+            "incomplete extraction looks like -- re-extract with a deep mode "
+            "(7-Zip's --deep, or 'extract all' in a tool that reads "
+            "directory listings), otherwise the car will spawn without its "
+            "textures and sounds"
+        )
+    else:
+        rep.gap(
+            f"{len(missing)} of {len(referenced)} referenced assets are not in "
+            f"the input: {detail}"
+        )
+
+
 def tune_chassis(
     text: str,
     vtype: str,
@@ -2477,7 +2537,22 @@ def convert(
                 r"^\s*accessory_truck_data\s*:\s*([\w.]+)\s*$",
                 src.read(data_file), re.M)
             if m:
-                slug = m.group(1).split(".")[-1]
+                unit = m.group(1)
+                last = unit.split(".")[-1]
+                # The last dot-separated token is the reference's rule, and it
+                # is right while that token names the vehicle. It collapses
+                # when it does not: vehicle.gle.450 became "450" and
+                # vehicle.prado.20 became "20", giving registration files named
+                # 20.sii that two different mods would both want.
+                #
+                # A purely numeric token is never a vehicle name, so fall back
+                # to the whole path with dots turned into underscores. Named
+                # vehicles are untouched: w223_s500 stays w223_s500 and the
+                # Parati's parati1994 stays parati1994.
+                slug = (re.sub(r"[^a-z0-9]+", "_", last.lower())
+                        if not last.isdigit()
+                        else re.sub(r"[^a-z0-9]+", "_",
+                                    unit.lower().split(".", 1)[-1]))
 
     # Asset path rewriting is OPT-IN.
     #
@@ -2492,6 +2567,7 @@ def convert(
     # /model/flare, and blindly forcing /vehicle/car/<slug> pointed the chassis
     # at files that do not exist -> purple square, then a crash on load.
     roots = asset_roots(src)
+    check_asset_integrity(src, roots, rep)
     mapping: dict[str, str] = {}
     if asset_root:
         new_root = asset_root if asset_root.startswith("/") else "/" + asset_root

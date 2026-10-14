@@ -117,6 +117,7 @@ def section(title: str) -> None:
 
 def synthetic_mod(root: Path, slug: str = "testcar", *,
                   data_body: list[str] | None = None,
+                  unit_name: str | None = None,
                   extra_defs: dict[str, str] | None = None) -> Path:
     """Build a minimal but complete mod folder on disk.
 
@@ -180,7 +181,7 @@ def synthetic_mod(root: Path, slug: str = "testcar", *,
         'model : "/vehicle/truck/%s/car.pmd"' % slug,
     ]
     (vdir / "data.sii").write_text(
-        unit("accessory_truck_data", f"vehicle.{slug}", body))
+        unit("accessory_truck_data", unit_name or f"vehicle.{slug}", body))
     return root
 
 
@@ -646,6 +647,93 @@ def test_secondary_torque_is_dropped_for_a_car() -> None:
                            tonnes=1.5)
     check("dropped on the torque-rescale path too",
           get_key(edit_lines(scaled), "secondary_torque") is None, scaled)
+
+
+def test_missing_assets_are_reported() -> None:
+    """A mod whose defs point at files it does not ship must say so.
+
+    Some mods ship without directory listings for part of their tree, so a
+    plain extraction comes up hundreds of files short -- the engine's sound
+    bank, most textures and models. Every def still parses, so a 12 MB archive
+    was produced from a 124 MB mod and the car spawned mute and untextured.
+    """
+    section("incomplete extractions are called out")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "mod"
+        refs = "\n".join(
+            f'\tmodel: "/model/thing/part{i}.pmd"' for i in range(4))
+        synthetic_mod(root, extra_defs={
+            "accessory/a/one.sii": f"SiiNunit\n{{\ncamera_def : c1\n{{\n{refs}\n}}\n}}\n",
+            "asset/thing/note.txt": "x",      # makes /model/thing a root
+        })
+        src = C.ModSource(root)
+        roots = C.asset_roots(src)
+        check("the mod's own asset root is found", "/model/thing" in roots,
+              str(roots))
+
+        rep = C.Report()
+        C.check_asset_integrity(src, roots, rep)
+        check("a wholly absent asset set is a warning, not a silent success",
+              len(rep.warnings) == 1, str(rep.warnings + rep.gaps))
+        check("the warning says how much is missing",
+              "4 of 4" in rep.warnings[0], rep.warnings[0])
+        check("and it names the files",
+              "/model/thing/part0.pmd" in rep.warnings[0], rep.warnings[0])
+
+        # A complete mod stays silent, and base-game paths are never counted.
+        full = Path(td) / "full"
+        synthetic_mod(full)
+        for i in range(4):
+            p = full / "model" / "thing" / f"part{i}.pmd"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"pmd")
+        rep2 = C.Report()
+        C.check_asset_integrity(C.ModSource(full), C.asset_roots(C.ModSource(full)),
+                                rep2)
+        check("a complete mod reports nothing",
+              not rep2.warnings and not rep2.gaps, str(rep2.warnings + rep2.gaps))
+
+
+def test_slug_never_collapses_to_a_bare_number() -> None:
+    """`vehicle.gle.450` became `450`, and two mods would want the same name.
+
+    The reference's rule -- last dot-separated token -- is right while that
+    token names the vehicle. It collapses when it is a bare number, which is
+    how registration files ended up called 20.sii.
+    """
+    section("slug keeps enough of the unit name to stay unique")
+    import zipfile as _z
+
+    cases = [
+        ("vehicle.gle.450", "gle_450"),
+        ("vehicle.prado.20", "prado_20"),
+        ("vehicle.w223_s500", "w223_s500"),          # unchanged
+        ("vehicle.volkswagen.parati1994", "parati1994"),  # unchanged
+    ]
+    for unit_name, want in cases:
+        with tempfile.TemporaryDirectory() as td:
+            mod = synthetic_mod(Path(td) / "mod", unit_name=unit_name)
+            out = Path(td) / "o.scs"
+            C.main([str(mod), "--type", "sedan", "--brand", "test",
+                    "--no-prompt", "-o", str(out)])
+            with _z.ZipFile(out) as z:
+                desktop = [n for n in z.namelist()
+                           if "car_desktop" in n and n.endswith(".sii")]
+            check(f"{unit_name} -> {want}",
+                  desktop and Path(desktop[0]).stem == want,
+                  str(desktop))
+
+    # An explicit --slug is still the user speaking for themselves.
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod", unit_name="vehicle.gle.450")
+        out = Path(td) / "o.scs"
+        C.main([str(mod), "--type", "sedan", "--brand", "test", "--no-prompt",
+                "--slug", "mine", "-o", str(out)])
+        with _z.ZipFile(out) as z:
+            desktop = [n for n in z.namelist()
+                       if "car_desktop" in n and n.endswith(".sii")]
+        check("--slug overrides the derived one",
+              desktop and Path(desktop[0]).stem == "mine", str(desktop))
 
 
 def test_output_is_not_written_inside_the_input_folder() -> None:
@@ -3923,6 +4011,8 @@ def main() -> int:
     test_suspension_class_is_validated()
     test_resistance_torque_is_rescaled_with_the_engine()
     test_secondary_torque_is_dropped_for_a_car()
+    test_missing_assets_are_reported()
+    test_slug_never_collapses_to_a_bare_number()
     test_vehicle_types()
     test_type_validation()
     test_brand_logo()
