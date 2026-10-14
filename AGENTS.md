@@ -251,9 +251,14 @@ will look like a bug in the curve shape. Only drag separates the two phases.
 
 **Car price is not a key in ATS.** The dealer sums the `price:` of every
 accessory its `data_path` lists; SCS's own four Road Trip dealer units declare
-no price at all. Anything that re-prices a car must touch the listed
-components, and must leave the mod's wider upgrade menu alone or it will inflate
-everything the player can still buy afterwards. See `FINDINGS.md` §30.
+no price at all. `--price` therefore scales the mod's **whole** price table by
+one factor, not just the listed components — scaling only those left the
+upgrade menu at truck-scale prices, so a `$1,000` car had a `$40,000` AWD
+chassis available. The author's *relative* pricing is what survives, which is
+the part worth keeping; the absolute figure was a guess for a truck. The
+hazard is scaling **up**, not down, because every remaining purchase then gets
+more expensive at once — so warn when the target exceeds the mod's own total.
+See `FINDINGS.md` §30.
 
 **Addons bind by directory, never by filename.** First `.sii` per
 `accessory/<dir>` wins. An earlier version matched `shape<N>.sii` and

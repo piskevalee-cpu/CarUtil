@@ -191,14 +191,29 @@ accessory named by a `data_path` in the dealer unit — SCS's own `f150_23`,
 `bronco_24`, `mustang_67` and `victoria_06` dealer files declare no price at all.
 The `accessories[]` list *is* the price breakdown.
 
-`--price 45000` rescales exactly those listed components so the dealer totals
-the figure you asked for, keeping their proportions. The mod's wider upgrade
-menu — the rest of the paint library, spare interiors, optional parts — is
-deliberately left alone, so re-pricing the base car never inflates what you can
-still buy afterwards.
+`--price 45000` rescales the mod's **entire price table** by a single factor,
+so the dealer totals the figure you asked for and every other part stays
+proportionate to the car.
 
-Without the flag the mod's own prices are kept untouched and the resulting total
-is printed in the report.
+That last part matters more than it sounds. Scaling only the base car's
+components leaves the upgrade menu at the mod's original prices, and those are
+**truck-scale**. On one real mod, `--price 1000` took the car from $113,304 to
+$1,000 while `chassis/awd.sii` — an all-wheel-drive chassis, sold as an
+optional extra — stayed at $40,000. The car ended up 40× cheaper than one of
+its own parts.
+
+Scaling everything by one factor preserves the author's **relative** pricing,
+which is the part worth keeping: an AWD chassis that cost 35% of the truck's
+price still costs 35% of the car's, and `$40,000` on a $113,304 truck becomes
+`$353` on a $1,000 car. The exact figure was the author's guess for a truck;
+the proportion is the information.
+
+Scaling **up** is the direction that costs the player: every remaining
+purchase gets more expensive at once. The converter says so when the target is
+above the mod's own total.
+
+Without the flag, the mod's own prices are kept untouched and the resulting
+total is only reported.
 
 ### Vehicle types and cargo
 

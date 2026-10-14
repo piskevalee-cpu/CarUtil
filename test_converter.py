@@ -1679,11 +1679,78 @@ def test_dealer_price() -> None:
     check("target total hit exactly, rounding included", after == 90000)
     check("proportions kept",
           "price: 70000" in defs["def/vehicle/truck/y/chassis.sii"])
-    check("upgrade menu NOT rescaled",
-          "price: 3000" in defs["def/vehicle/truck/y/paint_job/color2.sii"])
+    # The upgrade menu now moves with everything else. It used to be left
+    # alone, which is what produced the reported symptom: --price 1000 took a
+    # real mod's car from $113,304 to $1,000 while chassis/awd.sii stayed at
+    # $40,000, so the car was 40x cheaper than one of its own parts.
+    check("the upgrade menu is rescaled by the same factor",
+          "price: 6000" in defs["def/vehicle/truck/y/paint_job/color2.sii"],
+          defs["def/vehicle/truck/y/paint_job/color2.sii"])
+    check("and the rescale is reported",
+          any("upgrade-menu" in a for a in rep.actions), str(rep.actions))
+    # Scaling UP is the direction FINDINGS 30 warns about: everything else the
+    # player buys afterwards gets more expensive at once. Say so.
+    check("scaling up warns that the menu inflates with it",
+          any("multiplies every upgrade-menu price" in w
+              for w in rep.warnings), str(rep.warnings))
     check("non-price keys survive",
           "kerb_weight[]: 1" in defs["def/vehicle/truck/y/chassis.sii"]
           and "torque: 400" in defs["def/vehicle/truck/y/engine.sii"])
+
+
+def test_price_keeps_the_menu_proportionate() -> None:
+    """The reported case: a $1,000 car must not have a $40,000 AWD chassis.
+
+    Every part moves by one factor, so the author's RELATIVE pricing -- an AWD
+    chassis at 35% of the vehicle's price -- is what survives. That is the
+    thing worth preserving; an absolute figure is the author's guess, not a
+    fact about a car.
+    """
+    section("--price keeps accessory prices proportionate to the car")
+    parts = {
+        "chassis/rwd.sii": 35000,
+        "chassis/awd.sii": 40000,
+        "cabin/std.sii": 35000,
+        "engine/v8.sii": 15000,
+        "transmission/auto.sii": 10000,
+        "head_light/std.sii": 5000,
+        "interior/beige.sii": 20000,
+        "paint_job/white.sii": 4000,
+        "mirror/l.sii": 500,
+        "mirror/r.sii": 500,
+    }
+    files = {
+        "def/vehicle/car_dealer/x/y.sii": "".join(
+            f'data_path: "/def/vehicle/truck/y/{n}"\n' for n in parts),
+        **{f"def/vehicle/truck/y/{n}": f"price: {v}\n"
+           for n, v in parts.items()},
+    }
+    dealer = "def/vehicle/car_dealer/x/y.sii"
+    base = C.dealer_price(files, dealer)[0]
+
+    C.apply_dealer_price(files, dealer, 1000, C.Report())
+
+    def price(name: str) -> int:
+        m = re.search(r"price:\s*(\d+)",
+                      files[f"def/vehicle/truck/y/{name}"])
+        return int(m.group(1))
+
+    check("the AWD chassis no longer costs more than the car",
+          price("chassis/awd.sii") < 1000,
+          f"${price('chassis/awd.sii'):,}")
+    check("its share of the vehicle price is what the author set",
+          abs(price("chassis/awd.sii") / 1000 - 40000 / base) < 0.01,
+          f"{price('chassis/awd.sii')}/1000 vs {40000}/{base}")
+    # No part may exceed the car it belongs to.
+    worst = max(price(n) for n in parts)
+    check("no accessory costs more than the whole car",
+          worst <= 1000, f"${worst:,}")
+    check("the relative order is unchanged",
+          sorted(parts, key=lambda n: -parts[n])
+          == sorted(parts, key=lambda n: -price(n)), "ordering changed")
+    check("nothing collapses to a rounding artefact",
+          all(price(n) >= 1 for n in parts),
+          str({n: price(n) for n in parts}))
 
 
 def _answer(answers: list[str] | None = None):
@@ -4089,6 +4156,7 @@ def main() -> int:
     test_prompt_power_never_blocks()
     test_air_resistance_override()
     test_dealer_price()
+    test_price_keeps_the_menu_proportionate()
     test_prompts_demand_a_value()
     test_prompt_price_never_blocks()
     test_addons_bound_by_directory_not_filename()

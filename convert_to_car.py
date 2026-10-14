@@ -1680,10 +1680,19 @@ def apply_dealer_price(
 ) -> int:
     """Report the dealer total, and re-scale it when `target` is given.
 
-    Only the accessories the dealer LISTS are rescaled. The mod's paint
-    library, spare interiors and the rest of the upgrade menu keep their own
-    prices, so re-pricing the base car never inflates what the player can
-    still buy afterwards.
+    The whole mod's price table moves by ONE factor, not just the accessories
+    the generated dealer binding lists. Scaling only the listed components left
+    the upgrade menu at the mod's original prices, and those are truck-scale:
+    on a real mod, `--price 1000` took the car from $113,304 to $1,000 while
+    `chassis/awd.sii` stayed at $40,000. The car ended up 40x cheaper than one
+    of its own parts, which is the complaint that prompted this.
+
+    Scaling everything together keeps the AUTHOR'S relative pricing, which is
+    the thing actually worth preserving -- an AWD chassis that cost 35% of the
+    truck's price still costs 35% of the car's.
+
+    Rounding drift is put on the largest LISTED line, so the dealer total is
+    exactly what was asked for.
     """
     total, rows = dealer_price(files, dealer_name)
     if target is None:
@@ -1694,20 +1703,53 @@ def apply_dealer_price(
         rep.warn("--price ignored: no listed accessory declares a price to scale")
         return total
     factor = target / total
-    scaled = {n: max(1, int(round(p * factor))) for n, p in priced}
-    # Rounding leaves the total a few dollars off. Put the whole drift on the
-    # largest line so the dealer charges exactly what was asked for.
-    drift = target - sum(scaled.values())
-    if drift:
-        scaled[max(scaled, key=lambda n: scaled[n])] += drift
-    for name, _ in priced:
+    listed = {n for n, _ in priced}
+
+    every: dict[str, int] = {}
+    for name, text in files.items():
+        cur = get_key(edit_lines(text), "price") if text else None
+        if cur is None:
+            continue
+        try:
+            val = int(float(cur))
+        except ValueError:
+            continue
+        if val > 0:
+            every[name] = val
+
+    scaled = {n: max(1, int(round(p * factor))) for n, p in every.items()}
+    drift = target - sum(scaled[n] for n in listed if n in scaled)
+    if drift and listed:
+        biggest = max((n for n in listed if n in scaled),
+                      key=lambda n: scaled[n], default=None)
+        if biggest is not None:
+            scaled[biggest] += drift
+
+    for name, val in scaled.items():
         files[name] = "\n".join(
-            set_key(files[name].splitlines(), "price", str(scaled[name]))
+            set_key(edit_lines(files[name]), "price", str(val))
         ) + "\n"
+
+    menu = sorted(((n, p, scaled[n]) for n, p in every.items()
+                   if n not in listed), key=lambda r: -r[1])
     rep.action(
         f"car dealer price: ${total:,} -> ${target:,}, spread across "
-        f"{len(scaled)} listed accessories (upgrade menu untouched)"
+        f"{len(listed)} listed accessories"
     )
+    if menu:
+        rep.action(
+            f"rescaled {len(menu)} upgrade-menu part(s) by the same "
+            f"{factor:.4g}x so they stay proportionate to the car "
+            f"(${menu[0][1]:,} -> ${menu[0][2]:,} on the dearest)"
+        )
+        # Scaling UP is the direction FINDINGS 30 warns about: the player's
+        # remaining purchases all get more expensive at once. Say so.
+        if factor > 1.0:
+            rep.warn(
+                f"this multiplies every upgrade-menu price by {factor:.3g}, so "
+                "anything else the player buys afterwards costs proportionally "
+                "more too. Lower the target, or re-price without --price"
+            )
     return target
 
 
