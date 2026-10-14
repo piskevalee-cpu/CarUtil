@@ -29,6 +29,92 @@ INCLUDE_RE = re.compile(r'^\s*@include\s+"([^"]+)"\s*$')
 ANY_DIRECTIVE_RE = re.compile(r"^\s*@[A-Za-z_]")
 
 
+# A `key:` or `key[]:` token, used to find where the next pair starts on a line
+# that may have collapsed several of them together.
+_KEY_TOKEN_RE = re.compile(r"[A-Za-z_][\w.]*(\s*\[[^\]]*\])?\s*:")
+
+
+def _key_token_offsets(line: str) -> list[int]:
+    """Offsets of every key token in `line`, skipping quoted text and comments.
+
+    Scanned by hand rather than by regex because a value may legitimately
+    contain a colon (`info[]: "V: 8"`) and a trailing comment may contain
+    anything at all; only a token outside quotes and before the comment is a
+    real key.
+    """
+    offsets: list[int] = []
+    i, n = 0, len(line)
+    while i < n:
+        ch = line[i]
+        if ch == '"':
+            i += 1
+            while i < n:
+                if line[i] == "\\":
+                    i += 2
+                    continue
+                if line[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if (ch == "/" and line[i:i + 2] == "//") or ch == "#":
+            break                       # a comment; nothing after it is a key
+        if (ch.isalpha() or ch == "_") and (i == 0 or line[i - 1].isspace()):
+            m = _KEY_TOKEN_RE.match(line, i)
+            if m:
+                offsets.append(i)
+                i = m.end()
+                continue
+        i += 1
+    return offsets
+
+
+def expand_multi_key_lines(lines: list[str]) -> list[str]:
+    """Put every `key: value` pair on a line of its own.
+
+    Some mods collapse several keys onto one line:
+
+        residual_travel[]: 0.08   nominal_voltage: 12   tank_size: 1200
+
+    Every helper in this module is line-oriented, so a collapsed line reads as
+    ONE key whose value happens to contain the other keys. set_key then
+    replaces the whole line with `residual_travel[]: 0.093` and silently takes
+    `nominal_voltage` and `tank_size` with it -- which is how a converted car
+    ended up with a 0-gallon tank and no battery, reported in game.
+
+    Normalising before editing fixes the entire class at once: get_key,
+    get_all_indexed, count_indexed and set_key are all already correct once
+    each pair owns a line. A line carrying a single pair, or one this scanner
+    cannot parse confidently, is returned untouched -- so a def we never edit
+    keeps the mod's own bytes.
+    """
+    out: list[str] = []
+    for line in lines:
+        offsets = _key_token_offsets(line)
+        indent = line[: len(line) - len(line.lstrip())]
+        # Only split when the first token IS the start of the line. Anything
+        # else (an @include, a stray brace, text we did not understand) is
+        # left exactly as the author wrote it.
+        if len(offsets) < 2 or offsets[0] != len(indent):
+            out.append(line)
+            continue
+        for n, start in enumerate(offsets):
+            end = offsets[n + 1] if n + 1 < len(offsets) else len(line)
+            piece = line[start:end].rstrip()
+            if piece:
+                out.append((indent or "\t") + piece)
+    return out
+
+
+def edit_lines(text: str) -> list[str]:
+    """Split a definition's text into editable lines, one key pair per line.
+
+    The single entry point every editing function should use, so a def that
+    arrives with collapsed keys cannot reach set_key/set_indexed unexpanded.
+    """
+    return expand_multi_key_lines(text.splitlines())
+
+
 def strip_quotes(value: str) -> str:
     """Return the unquoted payload of a SII scalar."""
     v = value.strip()
@@ -74,23 +160,55 @@ def get_all_indexed(lines: list[str], key: str) -> list[str]:
     return out
 
 
-def set_key(lines: list[str], key: str, value: str) -> list[str]:
+def set_key(lines: list[str], key: str, value: str,
+            *, indexed: str | None = None) -> list[str]:
     """Replace the final `key:` line, or append one if absent.
 
     Comments and ordering of untouched lines are preserved.
+
+    `indexed` supplies the bracket separately (`"[]"` or `"[0]"`). A caller
+    cannot just write `set_key(lines, "fallback[]", ...)` to target a repeated
+    key: KEY_RE's name group is `[A-Za-z_][\\w.]*`, which excludes `[` and `]`,
+    so that call matched nothing and silently appended on every invocation --
+    turning the mod's own fallback[] list into a second, conflicting one.
     """
     out = list(lines)
+    want = None
+    if indexed is not None:
+        want = indexed if indexed.startswith("[") else f"[{indexed}]"
     last = None
     for i, line in enumerate(out):
         m = KEY_RE.match(line)
-        if m and m.group(1) == key and m.group(2) is None:
-            last = i
-    new_line = f"\t{key}: {value}"
+        if not m or m.group(1) != key:
+            continue
+        if want is None:
+            if m.group(2) is not None:
+                continue
+        elif m.group(2) != want:
+            continue
+        last = i
+    new_line = f"\t{key}{want or ''}: {value}"
     if last is None:
         # insert just inside the unit block
         out.insert(unit_body_end(out), new_line)
     else:
         out[last] = new_line
+    return out
+
+
+def append_key(lines: list[str], key: str, value: str,
+               *, indexed: str | None = None) -> list[str]:
+    """Add a `key: value` line, always adding.
+
+    set_key replaces the LAST matching line, which is what a scalar wants and
+    the opposite of what a repeated key needs: writing five fallback[] entries
+    in a loop through set_key leaves one, because each call rewrites the entry
+    the previous call made. Anything whose value is genuinely a list needs this.
+    """
+    out = list(lines)
+    want = "" if indexed is None else (
+        indexed if indexed.startswith("[") else f"[{indexed}]")
+    out.insert(unit_body_end(out), f"\t{key}{want}: {value}")
     return out
 
 

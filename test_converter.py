@@ -30,7 +30,14 @@ sys.path.insert(0, str(HERE))
 
 import convert_to_car as C  # noqa: E402
 import sii  # noqa: E402
-from sii import get_all_indexed, get_key, set_key, set_tag  # noqa: E402
+from sii import (  # noqa: E402
+    get_all_indexed,
+    get_key,
+    set_indexed,
+    set_key,
+    set_tag,
+    edit_lines,
+)
 
 # Real mod files are needed by the conversion tests, but they are third-party
 # assets and are not distributed with this repository. Point FIXTURES at a
@@ -107,6 +114,75 @@ def section(title: str) -> None:
     print(f"\n=== {title} ===")
 
 
+def synthetic_mod(root: Path, slug: str = "testcar", *,
+                  data_body: list[str] | None = None,
+                  extra_defs: dict[str, str] | None = None) -> Path:
+    """Build a minimal but complete mod folder on disk.
+
+    The real fixtures are third-party assets and are not in the repo, so every
+    check that can be expressed against a mod we author ourselves has to be.
+    A folder (not a zip) keeps it readable, and ModSource treats the two the
+    same, so a fixture-free conversion test is enough to pin this behaviour.
+    """
+    vdir = root / "def" / "vehicle" / "truck" / slug
+    (vdir / "chassis").mkdir(parents=True, exist_ok=True)
+    (vdir / "engine").mkdir(parents=True, exist_ok=True)
+    (vdir / "interior").mkdir(parents=True, exist_ok=True)
+    (vdir / "transmission").mkdir(parents=True, exist_ok=True)
+    (vdir / "head_light").mkdir(parents=True, exist_ok=True)
+    (vdir / "paint_job").mkdir(parents=True, exist_ok=True)
+    (vdir / "f_tire").mkdir(parents=True, exist_ok=True)
+    (vdir / "f_disc").mkdir(parents=True, exist_ok=True)
+    (vdir / "r_tire").mkdir(parents=True, exist_ok=True)
+    (vdir / "r_disc").mkdir(parents=True, exist_ok=True)
+
+    def unit(kind: str, ident: str, body: list[str]) -> str:
+        return ("SiiNunit\n{\n" + f"{kind} : {ident}\n{{\n"
+                + "".join(f"\t{b}\n" for b in body) + "}\n}\n")
+
+    chassis = ["model : /vehicle/truck/%s/chassis.pmd" % slug,
+               "kerb_weight[0]: 1150", "kerb_weight[1]: 1050",
+               "residual_travel[0]: 0.09", "residual_travel[1]: 0.09",
+               "air_resistance: 0.4"]
+    (vdir / "chassis" / "xdl.sii").write_text(
+        unit("accessory_truck_chassis", f"chassis.{slug}.xdl", chassis))
+    (vdir / "chassis" / "xdrive.sii").write_text(
+        unit("accessory_truck_chassis", f"chassis.{slug}.xdrive", chassis))
+    (vdir / "engine" / "v8.sii").write_text(unit(
+        "accessory_truck_engine", f"engine.{slug}.v8",
+        ["torque: 1400", "torque_curve[0]: 0.43", "torque_curve[1]: 1.0",
+         "engine_name: V8"]))
+    (vdir / "interior" / "standard.sii").write_text(unit(
+        "accessory_truck_interior", f"interior.{slug}.standard", ["ui_name: std"]))
+    (vdir / "interior" / "amb_blue.sii").write_text(unit(
+        "accessory_truck_interior", f"interior.{slug}.amb_blue", ["ui_name: amb"]))
+    (vdir / "transmission" / "auto.sii").write_text(unit(
+        "accessory_truck_transmission", f"transmission.{slug}.auto",
+        ["gear_count: 10"]))
+    (vdir / "head_light" / "std.sii").write_text(unit(
+        "accessory_truck_head_light", f"head_light.{slug}.std", ["ui_name: hl"]))
+    (vdir / "paint_job" / "red.sii").write_text(unit(
+        "accessory_truck_paint_job", f"paint_job.{slug}.red",
+        ["ui_name: red", "stock: true"]))
+
+    for axle in ("f_tire", "f_disc", "r_tire", "r_disc"):
+        (vdir / axle / "std.sii").write_text(unit(
+            f"accessory_truck_{axle}", f"{axle}.{slug}.std", ["ui_name: w"]))
+
+    for rel, text in (extra_defs or {}).items():
+        p = vdir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+
+    body = data_body if data_body is not None else [
+        'ui_name: "Test Car"',
+        'model : "/vehicle/truck/%s/car.pmd"' % slug,
+    ]
+    (vdir / "data.sii").write_text(
+        unit("accessory_truck_data", f"vehicle.{slug}", body))
+    return root
+
+
 # ---------------------------------------------------------------- sii helpers
 @guard
 def test_sii_helpers() -> None:
@@ -132,6 +208,153 @@ def test_sii_helpers() -> None:
     check("set_tag multi", get_all_indexed(tagged3, "tags") == ["suv", "pickup"])
     tagged4 = set_tag(tagged3, "sedan")
     check("set_tag multi replaced by single", get_all_indexed(tagged4, "tags") == ["sedan"])
+
+
+def test_multikey_lines_expand() -> None:
+    """A def with several keys on one line must be split, not silently cut.
+
+    Reported on a real mod: a chassis line carrying residual_travel twice plus
+    nominal_voltage and tank_size lost the last two the moment the converter
+    rewrote the first. The car shipped with a 0-gallon tank. Every helper here
+    is line-oriented, so the split has to happen before editing, not inside
+    set_key.
+    """
+    section("collapsed key lines are normalised before editing")
+    import sii as _sii
+
+    collapsed = ("\tresidual_travel[]: 0.08\t\tresidual_travel[]: 0.08"
+                 "  \tnominal_voltage: 12\ttank_size: 1200")
+    out = _sii.expand_multi_key_lines([collapsed])
+
+    check("every pair gets its own line", len(out) == 4, str(out))
+    check("tank_size survives the split",
+          get_key(out, "tank_size") == "1200", str(out))
+    check("nominal_voltage survives the split",
+          get_key(out, "nominal_voltage") == "12", str(out))
+    check("both residual_travel elements survive",
+          get_all_indexed(out, "residual_travel") == ["0.08", "0.08"], str(out))
+
+    # The destructive case end to end: rewrite the indexed key, and the
+    # unrelated keys must still be there afterwards.
+    rewritten = set_indexed(out, "residual_travel", ["0.093", "0.093"])
+    check("set_indexed no longer eats a neighbour",
+          get_key(rewritten, "tank_size") == "1200", str(rewritten))
+    check("nominal_voltage still there after set_indexed",
+          get_key(rewritten, "nominal_voltage") == "12", str(rewritten))
+
+    # A colon inside a quoted value is part of the value, not a new key.
+    tricky = '\tinfo[]: "V: 8"  // and a comment: here'
+    check("a quoted colon does not split the line",
+          _sii.expand_multi_key_lines([tricky]) == [tricky])
+
+    single = "\tkerb_weight[0]: 9400"
+    check("a lone pair is returned byte for byte",
+          _sii.expand_multi_key_lines([single]) == [single])
+
+    # Comments and directives must not be touched at all.
+    for untouched in ('@include "other.sui"', "// residual_travel[]: 0.08",
+                      "", "\t}"):
+        check(f"left alone: {untouched!r}",
+              _sii.expand_multi_key_lines([untouched]) == [untouched])
+
+    # set_key must be able to target a repeated key, which it never could when
+    # the bracket was part of the name: KEY_RE's name group has no brackets, so
+    # set_key(lines, "fallback[]", ...) matched nothing and only ever appended.
+    tagged = ['\tfallback[]: "chassis|a.sii"', '\tfallback[]: "interior|b.sii"']
+    replaced = set_key(tagged, "fallback", '"chassis|z.sii"', indexed="[]")
+    check("set_key replaces the last repeated key, not appends",
+          get_all_indexed(replaced, "fallback") == ["chassis|a.sii",
+                                                   "chassis|z.sii"],
+          str(replaced))
+
+
+def test_collapsed_keys_survive_a_real_tune() -> None:
+    """tune_chassis must not delete anything it did not mean to touch."""
+    section("chassis tuning preserves collapsed neighbours")
+    body = [
+        "\tresidual_travel[0]: 0.08\t\tresidual_travel[1]: 0.08",
+        "\tnominal_voltage: 12\ttank_size: 1200",
+        "\tkerb_weight[0]: 1150\tkerb_weight[1]: 1050",
+    ]
+    text = "accessory_truck_chassis : vehicle.test\n{\n" + "\n".join(body) + "\n}\n"
+    out = C.tune_chassis(text, "sedan", None, C.Report())
+
+    check("tank_size still present after tuning",
+          get_key(edit_lines(out), "tank_size") == "1200", out)
+    check("nominal_voltage still present after tuning",
+          get_key(edit_lines(out), "nominal_voltage") == "12", out)
+    # The preset is per-axle, so only the shape is asserted: both elements
+    # still present, and neither left at the truck's 0.08.
+    rt = get_all_indexed(edit_lines(out), "residual_travel")
+    check("residual_travel kept both axles and was rewritten",
+          len(rt) == 2 and "0.08" not in rt, str(rt))
+
+
+def _data_sii(mod: Path, out: Path, *extra: str) -> str:
+    """Convert a synthetic mod and return its finished data.sii."""
+    import zipfile as _z
+    C.main([str(mod), "--type", "sedan", "--brand", "test", "--no-prompt",
+            *extra, "-o", str(out)])
+    with _z.ZipFile(out) as z:
+        name = next(n for n in z.namelist()
+                    if n.endswith("/data.sii") and "truck" in n)
+        return z.read(name).decode()
+
+
+def test_fallback_merges_with_the_mods_own() -> None:
+    """A slot the mod already defaults must not get a second, rival default.
+
+    Reported on a real mod whose data.sii already carried a complete fallback[]
+    list: the converter appended its own behind it, so each slot ended up with
+    two entries (the author's xdrive.sii, then our xdl.sii) and the car's
+    delivered configuration was decided twice.
+    """
+    section("fallback[] merges instead of duplicating")
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod", data_body=[
+            'ui_name: "Test Car"',
+            # Both on one line, which is how the report showed them.
+            'fallback[]: "chassis|xdrive.sii"\tfallback[]: "interior|standard.sii"',
+            'require[]: chrome\trequire[]: steering_w',
+        ])
+        out = Path(td) / "o.scs"
+        text = _data_sii(mod, out)
+        fb = get_all_indexed(edit_lines(text), "fallback")
+
+        slots = [f.split("|", 1)[0] for f in fb]
+        check("the author's chassis choice is kept",
+              "chassis|xdrive.sii" in fb, str(fb))
+        check("the converter's rival xdl.sii was NOT added",
+              "chassis|xdl.sii" not in fb, str(fb))
+        check("no slot is defaulted twice",
+              len(slots) == len(set(slots)), str(fb))
+        check("slots the mod left open are still filled",
+              {"engine", "transmission", "head_light"} <= set(slots), str(fb))
+
+        # Both require[] entries shared one line. The old pattern stopped at
+        # the first separator and reported only the first, so a genuinely
+        # unbound accessory never reached the gap check.
+        req = get_all_indexed(edit_lines(text), "require")
+        check("every require[] on a collapsed line is seen",
+              req == ["chrome", "steering_w"], str(req))
+
+
+def test_fallback_appends_every_slot_when_the_mod_declares_none() -> None:
+    """The regression guard for the fix's own first attempt.
+
+    Routing the appends through set_key made every call rewrite the previous
+    entry instead, so five discovered defaults collapsed into one.
+    """
+    section("fallback[] appends rather than replaces")
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod")
+        out = Path(td) / "o.scs"
+        fb = get_all_indexed(edit_lines(_data_sii(mod, out)), "fallback")
+        check("every discovered default is present",
+              {"chassis", "interior", "engine", "transmission", "head_light"}
+              <= {f.split("|", 1)[0] for f in fb}, str(fb))
+        check("no default was lost to a replace-instead-of-append",
+              len(fb) >= 5, str(fb))
 
 
 # ------------------------------------------------------------- type selection
@@ -3335,6 +3558,10 @@ def main() -> int:
         print("      Set CARUTIL_FIXTURES=<dir> to run the full suite.")
 
     test_sii_helpers()
+    test_multikey_lines_expand()
+    test_collapsed_keys_survive_a_real_tune()
+    test_fallback_merges_with_the_mods_own()
+    test_fallback_appends_every_slot_when_the_mod_declares_none()
     test_vehicle_types()
     test_type_validation()
     test_brand_logo()

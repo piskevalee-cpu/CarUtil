@@ -31,6 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from sii import (  # noqa: E402
     count_indexed,
+    append_key,
+    edit_lines,
     set_indexed,
     unit_body_end,
     get_all_indexed,
@@ -771,9 +773,13 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     # accessory the vehicle insists on can never be fitted -- which is how the
     # missing headlight stayed invisible until the game was launched.
     if src.exists(f"{vdir}data.sii"):
-        requires = re.findall(
-            r'require\[\]\s*:\s*"?([\w.]+)"?',
-            src.read_def(f"{vdir}data.sii"),
+        # Expanded first: a mod that writes `require[]: chrome require[]:
+        # steering_w` on one line used to yield only "chrome", because the
+        # pattern's value group stops at the first separator. The missing
+        # entry then never reached the gap check, which is the whole point of
+        # running it.
+        requires = get_all_indexed(
+            edit_lines(src.read_def(f"{vdir}data.sii")), "require"
         )
         parts["requires"] = requires
         bound = set(parts["accessories"])
@@ -1716,7 +1722,7 @@ def tune_chassis(
     when it is missing or provably truck-scale (see _is_truck_scale).
     `force` overwrites everything.
     """
-    lines = text.splitlines()
+    lines = edit_lines(text)
     axles = count_indexed(lines, "kerb_weight") or count_indexed(lines, "powered_axle") or 2
 
     cfg = car_physics(vtype, axles, mass, overrides)
@@ -1838,7 +1844,7 @@ def stated_engine_torque(text: str) -> int | None:
     it rounds, and a rounded input would make the rewritten torque wrong by a
     few Nm.
     """
-    for line in text.splitlines():
+    for line in edit_lines(text):
         if "info[]" not in line:
             continue
         m = _NM_RE.search(line)
@@ -1906,7 +1912,7 @@ def _ensure_torque_origin(text: str) -> tuple[str, bool]:
         return text, False
     if int(m.group(1)) == 0:
         return text, False
-    lines = text.splitlines()
+    lines = edit_lines(text)
     # Insert at the first existing curve point, not at the top of the file:
     # prepending to `text` put the key above `SiiNunit`, outside the unit.
     idx = next((i for i, l in enumerate(lines)
@@ -1920,7 +1926,7 @@ def _ensure_torque_origin(text: str) -> tuple[str, bool]:
 
 def _declared_peak_nm(text: str) -> float:
     """Peak newton-metres the engine currently declares (torque x curve max)."""
-    tq = get_key(text.splitlines(), "torque")
+    tq = get_key(edit_lines(text), "torque")
     peak = _primary_curve_peak(text)
     if not tq or not peak:
         return 0.0
@@ -1964,7 +1970,7 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
     if peak_torque < 1:
         return text
 
-    lines = text.splitlines()
+    lines = edit_lines(text)
     kept = [ln for ln in lines
             if not re.match(r"^\s*torque_curve\[\]:", ln)]
     if len(kept) == len(lines):
@@ -2042,7 +2048,7 @@ def tune_engine(text: str, rep: Report, force: bool = False,
             "give it a target)")
         return text
 
-    lines = text.splitlines()
+    lines = edit_lines(text)
     declared = get_key(lines, "torque")
     if declared is None:
         return text
@@ -2143,7 +2149,7 @@ def tune_transmission(text: str, rep: Report, force: bool = False) -> str:
     if "accessory_transmission_data" not in text:
         return text
 
-    lines = text.splitlines()
+    lines = edit_lines(text)
     changed: list[str] = []
     kept: list[str] = []
 
@@ -2192,7 +2198,7 @@ def tune_wheel(text: str, rep: Report, force: bool = False) -> str:
     if "accessory_wheel_data" not in text:
         return text
 
-    lines = text.splitlines()
+    lines = edit_lines(text)
     replaced: list[str] = []
     kept: list[str] = []
 
@@ -2428,15 +2434,39 @@ def convert(
     # configured instead of showing the shop's first choice. Same syntax the
     # Parati uses: "<def/vehicle subdir>|<file relative to it>".
     if data_path in files:
-        lines = files[data_path].split("\n")
+        lines = edit_lines(files[data_path])
+
+        # The mod's OWN fallback[] is the author's choice of what the car
+        # ships with, and it is the only evidence of it we have. Appending our
+        # discovered defaults behind it left two conflicting entries per slot
+        # (the author's chassis|xdrive.sii followed by our chassis|xdl.sii),
+        # so a slot the author had already decided was decided twice. Only fill
+        # slots the mod left open.
+        declared = {
+            fb.split("|", 1)[0].strip()
+            for fb in get_all_indexed(lines, "fallback")
+        }
+        kept = len(get_all_indexed(lines, "fallback"))
+        added = 0
         for fb in parts.get("fallbacks", []):
-            lines = set_key(lines, "fallback[]", f'"{fb}"')
+            slot = fb.split("|", 1)[0].strip()
+            if slot in declared:
+                continue
+            lines = append_key(lines, "fallback", f'"{fb}"', indexed="[]")
+            declared.add(slot)
+            added += 1
+
         # tags[] goes last, after the fallback[] block, as the reference does
         lines = set_tag(lines, all_tags)
         files[data_path] = "\n".join(lines) + "\n"
-        if parts.get("fallbacks"):
+        if added:
             rep.action(
-                f"pre-selected {len(parts['fallbacks'])} default parts via fallback[]"
+                f"pre-selected {added} default part(s) via fallback[]"
+            )
+        if kept:
+            rep.action(
+                f"kept {kept} default part(s) the mod already declared via "
+                "fallback[]; the author's choice wins"
             )
 
     # 3. the registration chain. The reference converter writes five files:
