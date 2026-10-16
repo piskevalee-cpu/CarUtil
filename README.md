@@ -329,8 +329,8 @@ goes through ImageMagick rather than a PNG decoder.
 
 | `--dry-run` | Report what would change; write nothing. |
 
-The tool prints three groups at the end: **changes**, **parts bound**, and
-**gaps** — parts the source mod does not contain and that you must add by hand.
+The tool prints four groups at the end: **changes**, **parts bound**,
+**warnings** and **gaps** — parts the source mod does not contain and that you must add by hand.
 
 It can also print **warnings**, which are things that converted but are worth
 knowing before you launch the game: a unit name the base game already owns, a
@@ -360,8 +360,10 @@ CARUTIL_FIXTURES=/path/to/mods python3 test_converter.py
 
 It expects `Volkswagen_Parati_1994.scs`,
 `Mercedes-Benz W223 S-Class V2.3 1.61.scs`,
-`Honda Pilot YG2 2025 V1.6 1.61.scs`, `porsche-cayenne/`, `release/output/`
-and a password-protected archive.
+`Honda Pilot YG2 2025 V1.6 1.61.scs`, `porsche-cayenne/` and
+`release/output/`. The password-protected archive is not a fixture: it is built
+at test time from the Porsche, and those two checks skip when the `zip` binary
+is missing (Windows has none by default).
 
 ## Physics — making it drive like a car
 
@@ -577,30 +579,27 @@ definitions, it is unpacked automatically and the inner mod is converted:
   - MyMod.zip contained a mod archive; read MyMod.scs inside it
 ```
 
-**Only single-archive mods are supported.** The input must be **one** `.scs`
-file, or a folder holding the mod's files. Mods shipped as **two** archives —
-a `... Def.scs` with the definitions plus a separate `....scs` with the assets —
-are **not supported**, and cannot be made supported by pointing the tool at
-either file or at the folder:
+**Mods split across two archives.** The definitions may ship in a plain-ZIP
+`.scs` and everything else — geometry, textures, sounds, usually the root
+`data.sii` — in SCS's own **HashFS** container (`SCS#`), the format the game
+uses. Both are read, so point the converter at the **folder** holding both:
 
-```
-error: this mod's files are split across two archives, and only one of them
-can be read.
-
-    2023 BMW 135i M_1.61x.scs  (58 MB, HashFS v1)  <- unreadable
-    2023 BMW 135i M Def.scs  (27 KB, plain ZIP)  <- readable
+```bash
+python3 convert_to_car.py "My Mod Folder" --type suv --brand audi
 ```
 
-The assets half uses SCS's own **HashFS** container (`SCS#`, the format the game
-itself uses). The converter reads plain ZIP archives and folders; it does not
-read HashFS. So the definitions are reachable but the geometry, textures,
-sounds and usually the root `data.sii` are not, and converting one half alone
-cannot produce a working car. This used to report `no def/vehicle/truck/<slug>/
-found`, which was false — the mod does have one.
+Some mods are *incomplete*, though, and that is not something a converter can
+fix. A directory listing in a HashFS archive names the files in a directory,
+and a DRM packer's "strip from directory structures" option removes those
+listings. In one real mod that left 893 of 1408 entries — 159.7 MB of a 160 MB
+archive — referenced by nothing. The files are present, but an entry is
+addressed by the hash of its path, so a path that no listing mentions cannot
+be recovered. If the conversion warns that most of the mod's assets are
+missing, that is the cause: re-download the mod in an unpacked form.
 
-To use a split mod, extract the HashFS archive with a tool that understands SCS
-containers and point the converter at the extracted folder, or find a
-single-archive or pre-extracted release of the same mod.
+Files can also be *damaged* the same way, and a *listed* file is not
+guaranteed to exist — a packer can leave a name behind with no entry for it.
+Both are reported rather than silently skipped.
 
 **Incomplete extractions.** Some mods ship without directory listings for part
 of their tree, so a plain extraction comes up hundreds of files short — the
@@ -720,7 +719,7 @@ The mod's own `truck_dealer` entry is **left exactly as shipped**.
 
 | token | why |
 |---|---|
-| `brake_rotor_diameter` | tyre diameter comes from the `.pmd`, not any `.sii`; inventing a rotor size risks a brake/wheel mismatch |
+| `brake_rotor_diameter` | written per axle, because all four of SCS's Road Trip chassis declare it and none of the 39 truck chassis do; leaving it out puts the car on the global truck default, which is what over-brakes (FINDINGS §20) |
 | `powered_axle` | the mod's own drivetrain declaration is authoritative |
 | `detail_model` | not synthesised from `model` |
 | `tank_size` | fuel is economy, not driving physics — see below |

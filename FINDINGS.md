@@ -1695,3 +1695,76 @@ A fallback that only fires on an exception is not a fallback; it is a guess.
 When the archive disagrees with itself, one of the two fields is noise, and the
 only way to know which is to measure across the real mods rather than reason
 about which one "should" be authoritative.
+
+## 33. HashFS v1 is readable, and split mods are no longer unsupported
+
+§1 and the note in `AGENTS.md` both said the container half of a split mod could
+not be read because path lookup needs CityHash64, which is not in the standard
+library. That is now `hashfs.py`, and the reason it took so long is worth
+recording: the format is easy and its documentation is nowhere.
+
+Measured on a real 160 MB container (`Audi ABT RS7 C8 2023.scs`, repacked with
+the third-party "SXC Packer"), cross-checked against TruckLib.HashFs.
+
+### Layout
+
+| Offset | Contents |
+|---|---|
+| 0 | `SCS#`, u16 version (1), u16 salt (0 here), `CITY`, u32 entry count, **u64** entry-table offset |
+| table | `count` records of 32 bytes |
+| payload | the blobs, each a raw zlib stream when the compressed flag is set |
+| tail | the packer banner ("BUILT WITH SXC PACKER"), 69 bytes here |
+
+A record is `[u64 hash][u64 offset][u32 flags][u32 crc][u32 size][u32
+compressed_size]`, bit 0 of `flags` marking a directory listing and bit 1
+compressed. The entry table is sorted by hash.
+
+**The table offset is a u64, not a u32.** Reading it as a u32 lands 8 bytes
+early, which shifts every record by half a field: the offsets still look sane,
+still decompress, and still tile the payload exactly -- and the hash column
+comes out as the *next* entry's hash. Every wrong conclusion about this
+container came from that one field width. It also makes `hash_path("")` look
+like a hit for whichever record happens to sit there.
+
+### The hash is not Google's CityHash64
+
+`hash_path` strips a leading slash, prepends a non-zero salt as *decimal text*,
+and hashes UTF-8 with the **cityhash-c** variant (Alexander Nusov's port),
+which differs from Google's in the short and medium paths and adds a fourth
+constant `k3 = 0xc949d7c7509e6557`. A faithful port of the Google original
+agrees on the empty string -- `k2`, which is what the root directory hashes to
+-- and matches nothing else in any real archive. Verified against upstream's own
+test vector: `hash_path("/kasefondue.txt") == 0x77f9c4f5eca06d54`.
+
+### Traversal needs directory listings, and a packer can remove them
+
+An entry is addressed by hash, so the table cannot be listed -- traversal works
+only because directories are stored as entries whose own path is the directory,
+containing one name per line with `*` marking a subdirectory. The RS7's 1408
+entries yield 515 files that way; the other **893 entries, 159.7 MB of the
+160 MB, are referenced by no listing at all.**
+
+That is SXC Packer's documented "hide/strip folders and files from HashFS
+directory structures", and it is unrecoverable from the container: recovering a
+path means guessing it, hashing, and getting a hit. Probing every asset the
+mod's own definitions reference recovers 79 files (including the wheel models),
+but the geometry and most textures are named nowhere reachable -- `rs7/car.pmd`
+resolves to a 3.6 KB stub, not the 20 MB body. **A mod packed that way cannot be
+converted by any tool**; the information needed to name its assets was destroyed
+at pack time. Say so, rather than producing a car with no body.
+
+### Damaged entries
+
+18 entries in the RS7 fail their CRC -- truncated deflate streams, the same
+deliberate mangling as an encrypted payload. None is reachable through a
+listing, so they cost nothing; `hashfs.read()` raises `HashFsDamaged` rather
+than returning the garbage, because the caller is about to write it back out as
+a definition. That is §32's bug in a second container.
+
+### A directory listing can name a file that is not there
+
+269 listed paths in the RS7 have no entry behind them. Treating a listing as
+proof of existence makes `exists()` lie, and the converter then tries to inject
+`tags[]` into a `data.sii` with no bytes. `paths()` reports `ok` / `damaged` /
+`missing` for exactly this reason, and only `ok` paths are merged into the mod's
+name list.

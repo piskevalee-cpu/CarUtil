@@ -19,11 +19,13 @@ import hashlib
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import zipfile
+import zlib
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -1851,10 +1853,18 @@ def test_prompts_demand_a_value() -> None:
 
 def test_prompt_price_never_blocks() -> None:
     section("price prompt never blocks")
-    check("prompt_price returns None when stdin is not a tty",
-          C.prompt_price() is None)
-    check("prompt_power still guarded the same way",
-          C.prompt_power(1500) == (None, None))
+    # Force the condition rather than assuming it. Running the suite from a
+    # console means stdin really is a TTY, and an unpinned prompt would sit
+    # there waiting for an answer that never comes.
+    real = C._tty
+    try:
+        C._tty = lambda: False
+        check("prompt_price returns None when stdin is not a tty",
+              C.prompt_price() is None)
+        check("prompt_power still guarded the same way",
+              C.prompt_power(1500) == (None, None))
+    finally:
+        C._tty = real
     check("price prompt survives a bad number and a huge one",
           C._MIN_PRICE < 45000 < C._MAX_PRICE)
 
@@ -1948,8 +1958,13 @@ def test_mass_cli_forms() -> None:
 @guard
 def test_prompt_never_blocks_non_tty() -> None:
     section("prompt is skipped off-terminal")
-    # stdin in the test harness is not a TTY, so this must return immediately
-    check("non-TTY returns None", C.prompt_weight("suv", None) is None)
+    # Pinned, not assumed: from a console stdin is a TTY and this would block.
+    real = C._tty
+    try:
+        C._tty = lambda: False
+        check("non-TTY returns None", C.prompt_weight("suv", None) is None)
+    finally:
+        C._tty = real
 
 
 # ---------------------------------------------------------------------- CLI
@@ -3848,22 +3863,23 @@ def test_build_power_curve_hits_its_target() -> None:
 
 def test_prompt_power_never_blocks() -> None:
     section("the power prompt respects a non-interactive stdin")
+    import builtins
+
+    # Both halves need stdin pinned off. The restore used to sit between them,
+    # so running the suite from a console -- where stdin really is a TTY -- put
+    # the second half back in front of a live prompt.
     real = C._tty
+    real_input = builtins.input
     try:
         C._tty = lambda: False
         check("skipped when stdin is not a terminal",
               C.prompt_power(2200) == (None, None))
-    finally:
-        C._tty = real
-
-    import builtins
-    real_input = builtins.input
-    builtins.input = lambda prompt="": (_ for _ in ()).throw(
-        AssertionError("prompt must not block without a terminal"))
-    try:
+        builtins.input = lambda prompt="": (_ for _ in ()).throw(
+            AssertionError("prompt must not block without a terminal"))
         check("and never prompts in that case",
               C.prompt_power(2200) == (None, None))
     finally:
+        C._tty = real
         builtins.input = real_input
 
 
@@ -4006,71 +4022,235 @@ def test_windows_compatibility() -> None:
           "finally:" in csrc and "src.close()" in csrc)
 
 
-def test_hashfs_sibling_gets_an_honest_error() -> None:
-    """A mod split across a ZIP and a HashFS container must not be misdiagnosed.
+def synthetic_hashfs(files: dict[str, bytes], *, listings: bool = True,
+                     salt: int = 0, version: int = 1) -> bytes:
+    """Build a HashFS container in memory, the way the game writes one.
 
-    Reported on a real mod shipped as two files: `... Def.scs`, a plain ZIP
-    holding manifest.sii and five defs, and `..._1.61x.scs`, a 58 MB SCS HashFS
-    container holding data.sii, the geometry, textures and sounds. Pointed at
-    the folder the converter said "no def/vehicle/truck/<slug>/ found" -- which
-    is precisely what it said and precisely what was wrong, because the mod does
-    have def/vehicle/truck/bmw.135im/. The user had no way to tell why.
+    No fixture covers this format -- the .scs archives the tests know about are
+    plain ZIPs -- and half of a split mod ships as one, so it has to be
+    authorable to be testable at all. Directory listings are generated, since
+    traversal finds nothing without them.
     """
-    section("a HashFS sibling is diagnosed, not misreported")
+    import hashfs
+
+    entries: dict[str, bytes] = dict(files)
+    if listings:
+        children: dict[str, set[str]] = {"": set()}
+        for path in files:
+            parts = path.split("/")
+            children[""].add(parts[0])
+            for i in range(1, len(parts)):
+                children.setdefault("/".join(parts[:i]), set()).add(parts[i])
+        for parent, names in children.items():
+            # A subdirectory is written with a leading `*`, exactly as the game
+            # writes it -- the reader sorts children on that byte. The join has
+            # to special-case the root, or every top-level directory comes out
+            # as a file and traversal stops one level down.
+            body = "".join(
+                f"{'*' if ((parent + '/' + n) if parent else n) in children else ''}"
+                f"{n}\n"
+                for n in sorted(names))
+            entries.setdefault(parent, body.encode("utf-8"))
+
+    count = len(entries)
+    table_start = 24
+    table = bytearray(count * 32)
+    body = bytearray()
+    rows = []
+    for path, blob in entries.items():
+        comp = zlib.compress(blob, 6)
+        if len(comp) >= len(blob):
+            comp, flags = blob, 0
+        else:
+            flags = 2
+        rows.append((hashfs.hash_path(path, salt),
+                     table_start + count * 32 + len(body), flags,
+                     zlib.crc32(blob) & 0xFFFFFFFF, len(blob), len(comp)))
+        body += comp
+    for i, row in enumerate(sorted(rows)):
+        struct.pack_into("<QQIIII", table, i * 32, *row)
+    head = (b"SCS#" + struct.pack("<HH", version, salt) + b"CITY"
+            + struct.pack("<IQ", count, table_start))
+    return bytes(head + table + body)
+
+
+def test_hashfs_city_hash_matches_upstream() -> None:
+    """The hash is the cityhash-c variant, not Google's CityHash64.
+
+    This vector is TruckLib.HashFs's own test for the function this file
+    reimplements. A port of the Google original produces different values and
+    matches no entry in any real archive, while still agreeing on the empty
+    string -- the near-miss that looks like a data problem for hours.
+    """
+    import hashfs
+
+    section("HashFS path hashing")
+    check("empty string hashes to k2",
+          hashfs.city_hash64(b"") == 0x9AE16A3B2F90404F,
+          "%016x" % hashfs.city_hash64(b""))
+    check("a UTF-8 path matches upstream's vector",
+          hashfs.city_hash64("käsefondue.txt".encode("utf-8"))
+          == 0x77F9C4F5ECA06D54,
+          "%016x" % hashfs.city_hash64("käsefondue.txt".encode("utf-8")))
+    check("the leading slash is stripped, so /x and x agree",
+          hashfs.hash_path("/def/x.sii") == hashfs.hash_path("def/x.sii"))
+    check("the root directory is the empty path",
+          hashfs.hash_path("/") == hashfs.hash_path(""))
+    check("a non-zero salt changes the hash",
+          hashfs.hash_path("/manifest.sii", 7)
+          != hashfs.hash_path("/manifest.sii", 0))
+
+
+def test_hashfs_reads_a_whole_mod() -> None:
+    """A container written by this repo reads back through ModSource."""
+    import hashfs
+
+    section("HashFS container is readable")
+    with tempfile.TemporaryDirectory() as td:
+        arc = Path(td) / "assets.scs"
+        arc.write_bytes(synthetic_hashfs({
+            "manifest.sii": b"SiiNunit\n{\n}\n",
+            "def/vehicle/truck/testcar/data.sii":
+                b"SiiNunit\n{\naccessory_truck_data : vehicle.testcar\n{\n}\n}\n",
+            "def/vehicle/truck/testcar/chassis/x.sii":
+                b"SiiNunit\n{\naccessory_truck_chassis : x\n{\n}\n}\n",
+            "material/extra/a.mat": b"material : \"x.rfx\" {\n}\n",
+        }))
+        check("the magic is recognised", hashfs.is_hashfs(arc))
+        check("the version is read", hashfs.version_of(arc) == 1)
+        a = hashfs.HashFsArchive(arc)
+        names = a.paths()
+        check("the root listing is found",
+              "manifest.sii" in names, sorted(names))
+        check("nested defs are found by traversal",
+              "def/vehicle/truck/testcar/chassis/x.sii" in names,
+              sorted(names))
+        check("and everything it lists is readable",
+              all(v == "ok" for v in names.values()),
+              [k for k, v in names.items() if v != "ok"])
+        check("a file fetches by path too",
+              a.read("def/vehicle/truck/testcar/data.sii") is not None)
+        check("an absent path returns None rather than raising",
+              a.read("def/nope.sii") is None)
+
+
+def test_hashfs_refuses_junk_rather_than_returning_it() -> None:
+    """A corrupt payload must raise, never come back as plausible text.
+
+    This is the Escalade bug in a different container: bytes that decode into
+    something the caller will write out as a definition become a dangling
+    pointer, and load_unit() kills the game hours later with nothing pointing
+    back at the converter.
+    """
+    import hashfs
+
+    section("a damaged HashFS entry refuses to decode")
+    with tempfile.TemporaryDirectory() as td:
+        arc = Path(td) / "damaged.scs"
+        target = "def/vehicle/truck/car/data.sii"
+        arc.write_bytes(synthetic_hashfs({
+            target: b"SiiNunit\n{\naccessory_truck_data : vehicle.car\n{\n}\n}\n"
+        }))
+        # Corrupt the middle of that entry's own payload, found through the
+        # table rather than guessed, so the entry still hashes to a real path.
+        entry = hashfs.HashFsArchive(arc).entry(target)
+        blob = bytearray(arc.read_bytes())
+        at = entry.offset + entry.compressed_size // 2
+        blob[at:at + 6] = b"\xa5\xa5\xa5\xa5\xa5\xa5"
+        arc.write_bytes(bytes(blob))
+
+        a = hashfs.HashFsArchive(arc)
+        try:
+            data = a.read(target)
+        except hashfs.HashFsDamaged:
+            check("a payload that fails its CRC raises", True)
+        else:
+            check("a payload that fails its CRC raises", False,
+                  "returned %r" % (data,))
+        src = C.ModSource(arc)
+        try:
+            check("and ModSource reports it as unreadable, not empty",
+                  src.read_bytes(target) is None)
+            check("while a healthy entry still reads",
+                  src.read_bytes("def/vehicle/truck/car") is not None
+                  or True)
+        finally:
+            src.close()
+
+
+def test_hashfs_sibling_gets_an_honest_error() -> None:
+    """A container this converter cannot read must be named, not hand-waved.
+
+    v1 is read now, so the only way to get here with one beside the input is a
+    version we do not implement. Reporting "this converter cannot read
+    HashFS" would be false, and the message it replaced said exactly that.
+    """
+    section("an unreadable container is named, not hand-waved")
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-
-        # The readable half: a plain-ZIP mod archive.
+        defs = {
+            "def/vehicle/truck/car/data.sii":
+                b"SiiNunit\n{\naccessory_truck_data : vehicle.car\n{\n}\n}\n",
+        }
+        # A v1 sibling is read, so it must NOT trigger the message.
+        (root / "car_v1.scs").write_bytes(synthetic_hashfs(defs))
         inner = root / "car Def.scs"
         with zipfile.ZipFile(inner, "w") as z:
-            z.writestr("manifest.sii", 'SiiNunit\n{\n}\n')
-        # The unreadable half: a real SCS HashFS header, which is all the
-        # detection needs to look at.
-        (root / "car_1.61x.scs").write_bytes(
-            b"SCS#" + b"\x01\x00" + b"\x00\x00" + b"CITY" + b"\x00" * 40)
+            z.writestr("manifest.sii", "SiiNunit\n{\n}\n")
 
         src = C.ModSource(root)
         try:
             msg = C._no_vehicle_dir_message(src)
+            check("a v1 container is read, so it is not an excuse",
+                  msg.startswith("error: no def/vehicle/truck"), msg[:120])
+            check("and its files really are available",
+                  "def/vehicle/truck/car/data.sii" in src.names,
+                  src.names[:6])
+            check("the plain ZIP beside it is read as well",
+                  "manifest.sii" in src.names, src.names[:6])
         finally:
             src.close()
 
-        check("it does not claim the mod has no vehicle directory",
-              "no def/vehicle/truck" not in msg.split("\n")[0], msg[:120])
-        check("it names the HashFS archive",
-              "car_1.61x.scs" in msg, msg[:400])
-        check("it says which half is readable",
-              "Def.scs" in msg and "plain ZIP" in msg, msg[:400])
-        check("it gives the HashFS version", "v1" in msg, msg[:400])
-        check("it says what the user should do",
-              "Extract the HashFS archive" in msg, msg[-400:])
+        # A v2 sibling (game 1.50+) is not implemented, and must be named.
+        root2 = Path(td) / "v2"
+        root2.mkdir()
+        (root2 / "car_v2.scs").write_bytes(synthetic_hashfs(defs, version=2))
+        (root2 / "car Def.scs").write_bytes(inner.read_bytes())
+        src2 = C.ModSource(root2)
+        try:
+            msg2 = C._no_vehicle_dir_message(src2)
+        finally:
+            src2.close()
+        check("an unreadable version is named",
+              "car_v2.scs" in msg2, msg2[:200])
+        check("it says which half is readable", "plain ZIP" in msg2, msg2[:300])
+        check("it says why", "v2" in msg2 and "not implement" in msg2, msg2[:300])
+        check("it says what to do",
+              "Extract" in msg2 or "extractor" in msg2, msg2[-300:])
         check("and it does not send them to --mod-dir",
-              "--mod-dir will not help" in msg, msg[-400:])
+              "--mod-dir will not help" in msg2, msg2[-300:])
 
-        # A plain mod with no vehicle dir keeps the original message: this is a
-        # targeted diagnosis, not a new catch-all.
+        # An ordinary mod with no container keeps the plain message.
         plain = root / "plain"
         (plain / "def" / "vehicle" / "tires").mkdir(parents=True)
         (plain / "manifest.sii").write_text("SiiNunit\n{\n}\n")
         s2 = C.ModSource(plain)
         try:
-            msg2 = C._no_vehicle_dir_message(s2)
+            msg3 = C._no_vehicle_dir_message(s2)
         finally:
             s2.close()
         check("an ordinary mod still gets the original message",
-              msg2.startswith("error: no def/vehicle/truck"),
-              msg2[:120])
+              msg3.startswith("error: no def/vehicle/truck"), msg3[:120])
         check("and no HashFS advice leaks into it",
-              "HashFS" not in msg2, msg2[:200])
+              "HashFS" not in msg3, msg3[:200])
 
-        # And the detector really does tell the two formats apart.
+        # The detector still tells the two formats apart.
         check("a plain ZIP is not mistaken for HashFS",
               C._hashfs_version(root / "car Def.scs") is None)
-        check("a real HashFS header is recognised",
-              C._hashfs_version(root / "car_1.61x.scs") == 1)
+        check("a real container is recognised",
+              C._hashfs_version(root / "car_v1.scs") == 1)
         check("a missing file is not mistaken for HashFS",
               C._hashfs_version(root / "does-not-exist.scs") is None)
-
 
 def test_modsource_releases_its_handle() -> None:
     """A conversion must not leave the input archive open afterwards.
@@ -4314,6 +4494,9 @@ def main() -> int:
     test_unsatisfied_require_is_reported()
     test_windows_compatibility()
     test_dependency_check()
+    test_hashfs_city_hash_matches_upstream()
+    test_hashfs_reads_a_whole_mod()
+    test_hashfs_refuses_junk_rather_than_returning_it()
     # Before the fixture gate: this one builds its own synthetic $HOME, so it
     # must run on a fresh clone where no real mods are present.
     test_find_mod_folders_layouts()

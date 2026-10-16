@@ -12,13 +12,14 @@ used only to convert brand logo images.
 
 | File | Role |
 |---|---|
-| `convert_to_car.py` | The converter and CLI. Everything of substance lives here (~3600 lines). |
+| `convert_to_car.py` | The converter and CLI. Everything of substance lives here (~4000 lines). |
 | `sii.py` | Parsing/editing helpers for SCS's `.sii` data format. |
+| `hashfs.py` | Reader for SCS's own `SCS#` container (HashFS v1). See below. |
 | `brands.py` | 23 brands (22 named plus the `other` catch-all) and the mapping to each logo file. |
 | `logo.py` | Image → 256×64 DDS conversion. Uses ImageMagick. |
 | `ui.py` | Banner, colour, arrow-key menus. Pure presentation. |
-| `test_converter.py` | The suite (~3600 lines). Run it before every commit. |
-| `FINDINGS.md` | Research log, §1–§32. **Early sections were wrong; see Corrections.** |
+| `test_converter.py` | The suite (~4600 lines). Run it before every commit. |
+| `FINDINGS.md` | Research log, §1–§33. **Early sections were wrong; see Corrections.** |
 | `logos/` | 23 brand images. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
 
 `ALIASES` in `brands.py` can name a brand `BRANDS` does not contain: `vw` maps
@@ -49,6 +50,12 @@ README deliberately does not quote a number either — read the exit code. A
 fresh clone reports skips, not failures, when the fixtures are absent — that
 is expected, not a regression.
 
+**The suite must also be run somewhere with a TTY on stdin.** Three prompt
+tests used to assume the harness's stdin was not a terminal, so from a console
+the first one failed and `test_prompt_price_never_blocks` would have *hung*
+waiting for an answer. They now pin `C._tty` off themselves; keep it that way
+rather than relying on how the suite was invoked.
+
 **`python3` and `python` may be different interpreters** (on the Windows dev
 box, 3.14 and 3.11). Pick one and use it for both the tests and the CLI.
 
@@ -64,7 +71,8 @@ fixture directory is safe but silently reduces coverage — check the skip list.
 shipped modules for literal substrings (`'os.pathsep' in csrc`,
 `'read_text(encoding="utf-8"' in csrc`, `"shell=True" not in text`) and
 `ast`-parses `ui.py` to prove `termios`/`tty` are not imported at module level.
-`test_dependency_check` monkeypatches `shutil.which` and `C._tty`.
+`test_dependency_check` monkeypatches `C._logo.imagemagick`, `shutil.which`,
+`C._tty` and `C._confirm`.
 
 A refactor that is behaviour-preserving can still fail these. Reformatting a
 call, renaming a variable, hoisting an import, or re-quoting a string literal
@@ -176,6 +184,15 @@ UTF-8 internally, so generated files stay LF-only on every platform. Defs that
 The guided walkthrough is **7 steps** (`total = 7` in `main()`): source, type,
 brand, weight, power *or* acceleration, price, convert.
 
+**Flags do not remove the guided prompts.** On a terminal the prompts are
+mandatory: step 4 always asks for the weight and its answer replaces whatever
+`--mass` was parsed to, and step 5 runs unless `--acceleration` was given
+(`--power` alone switches the step-5 prompt from power to acceleration).
+`--price` and `--acceleration` are the only two that suppress their own prompt.
+The "skips steps 4–6" claim in `FINDINGS.md` §31, in `README.md` and in the
+comment above `if guided:` is stale: `d0b8f28` changed `elif guided:` to
+`if guided:` and nothing updated the prose.
+
 **Every prompt demands a real value.** Empty input is an omission, not a
 request for the default: it re-asks with the same message used for a bad value.
 There are deliberately **no bracketed suggestions** in the prompt labels and
@@ -189,10 +206,38 @@ back to the default. Without that, a mandatory field would be unescapable.
 Scripted mode, `--no-prompt` and CI are unaffected: the prompts only run on a
 TTY.
 
-**`--mass` skips steps 4, 5 and 6 entirely.** It is parsed *before* the
-`if guided:` prompt block, so a run with `--mass` goes straight from step 3
-(brand) to step 7 (convert) and the counter visibly skips. That is intentional,
-not a bug.
+## Reading a HashFS container
+
+`hashfs.py` is the reader; the traps below are why it took a day to get right.
+`FINDINGS.md` §33 has the measured layout.
+
+**The entry table's offset in the header is a u64, not a u32.** Reading it as a
+u32 lands 8 bytes early and shifts every record by half a field. The payload
+offsets then still look plausible, still decompress, and still tile the payload
+exactly — so every check passes while the hash column is actually the *next*
+entry's hash. That single field width produced every wrong conclusion about the
+container, including a false positive on `hash_path("")`.
+
+**The hash is not Google's CityHash64.** HashFS uses the **cityhash-c** variant,
+which differs in the short and medium paths and adds a fourth constant
+(`k3 = 0xc949d7c7509e6557`). A faithful port of the Google original agrees on
+the empty string — which is what the root directory hashes to, so it looks like
+a hit — and matches nothing else anywhere. The test pins upstream's own vector,
+`hash_path("/käsefondue.txt") == 0x77f9c4f5eca06d54`, including the UTF-8 path.
+Also note `hash_path` strips a leading slash and prepends a non-zero salt as
+*decimal text*, not as a mixed-in seed.
+
+**A directory listing can name a file that is not there.** A DRM packer leaves
+the name in the listing with no entry behind it. Treating a listing as proof of
+existence makes `exists()` lie, and the converter then tries to inject `tags[]`
+into a `data.sii` with no bytes — which is a traceback, not a diagnosis. Only
+`ok` paths may be merged into `names`.
+
+**A listing entry whose payload is corrupt must raise, not return the garbage.**
+`read()` verifies the recorded size *and* CRC and raises `HashFsDamaged`; it
+never hands back bytes that merely decoded. That is §32's bug in a second
+container, and the same rule applies: whatever comes back is about to be written
+out as a definition.
 
 ## Editing defs: every helper is line-oriented
 
@@ -271,20 +316,28 @@ time, precisely so this class of fault is visible before the game is launched.
 **`ModSource` owns two resources and must release both.** The `ZipFile` handle
 and, when a `.zip` was unwrapped, the temp dir it was unpacked into. Windows
 cannot delete an open file, so an unreleased handle makes every enclosing
-`TemporaryDirectory` raise at teardown — and this suite runs inside 46 of them.
+`TemporaryDirectory` raise at teardown — and this suite runs inside 48 of them.
 `/tmp` is tmpfs, so an unreleased scratch dir is RAM. Use `close()` or `with`;
 `__del__` is a backstop, not the mechanism. **Do not null `self.zf` on close** —
 a closed `ZipFile` raises "archive was already closed", whereas `None` would
 send reads down the folder branch and silently misread the `.scs` as text.
 
-**Some mods ship two archives and the error must not lie about it.** A plain-ZIP
-`.scs` holding the definitions plus a second `.scs` in SCS's HashFS container
-(`SCS#`) holding geometry, textures, sounds and usually `data.sii`. The
-converter reads the first and not the second, so "no `def/vehicle/truck/` found"
-is *false* — the mod has one. `_no_vehicle_dir_message()` names both halves and
-says which is which. There is no HashFS reader yet; the container half is
-solved (entry tables decompress to exactly `count x 16`), but path lookup needs
-CityHash64, which is not in the standard library.
+**A mod may be split across two archives, and both halves are now read.** The
+definitions live in a plain ZIP, everything else in an SCS HashFS container
+(`SCS#`, the format the game uses), and `hashfs.py` reads the container. Point
+the converter at the *folder* holding both: `ModSource` opens the plain ZIP and
+the container beside it and treats them as one mod. `paths()` in `hashfs.py`
+returns `ok` / `damaged` / `missing` per file, and only `ok` paths are merged
+into the mod's name list — see the two traps under "Reading a HashFS
+container", which is where the packer gets clever.
+
+**A container can be packed so that it cannot be converted.** Some packs leave
+893 of their 1408 entries (159.7 MB of a 160 MB archive) referenced by no
+directory listing, which is the packer's "strip from directory structures"
+option. The files are in the archive but their paths are unrecoverable, because
+an entry is addressed by hash and cannot be listed. If a mod converts and the
+body or most textures are missing, that is the reason and no tool can fix it;
+say so rather than shipping a car with no body.
 
 **Never make `find_mod_folders()` a tree walk.** It resolves the mod folder by
 *constructing* the known paths (`<appid>/pfx/drive_c/users/<user>/Documents/…`)
@@ -348,14 +401,10 @@ the base game. Its own summary still carries `UNVERIFIED 1`. Matching it
 byte-for-byte proves nothing about in-game behaviour.
 
 **The base game's `def.scs` / `base.scs` are readable — stop guessing.** They are
-HashFS **v2**, not encryption. It used to be recorded here as opaque, and that
-falsehood cost several "UNVERIFIED, needs an in-game test" conclusions. Two
-zlib tables of 16-byte entries indexed by CityHash of the path, a typed metadata
-stream of file/directory records, and raw deflate behind a 2-byte prefix;
-roughly thirty lines of Python reads an entire DLC. `dlc_rt_ford.scs` in a local
-ATS install holds SCS's own Road Trip car physics and is the reference for any
-drivetrain question — read it rather than inferring. The exact layout is in
-`FINDINGS.md` §18.
+HashFS **v2**, not encryption, and `v1` is in `hashfs.py`. `dlc_rt_ford.scs` in
+a local ATS install holds SCS's own Road Trip car physics and is the reference
+for any drivetrain question — read it rather than inferring. FINDINGS §18 has
+the v2 layout; §33 has v1, measured.
 
 ## Corrections to prior conclusions
 

@@ -43,6 +43,7 @@ from sii import (  # noqa: E402
     to_float,
 )
 import brands as _brands
+import hashfs
 import logo as _logo
 import ui as _ui
 
@@ -123,11 +124,16 @@ class Report:
 
 
 class ModSource:
-    """Reads a mod from either a folder or a plain-ZIP .scs, uniformly.
+    """Reads a mod from a folder, a plain-ZIP .scs, or an SCS HashFS container.
 
     Some community mods ship password-protected ZIP entries (an anti-piracy
     measure). Those cannot be read without the password, so they are tracked
     and skipped rather than crashing the conversion partway through.
+
+    A mod may also be split across two archives: the definitions in a plain
+    ZIP and everything else in a HashFS container, which is the format the game
+    itself reads. Both are opened and treated as one source, because a mod split
+    that way is one mod -- see hashfs.py for the container.
     """
 
     def __init__(self, path: Path, password: str | None = None,
@@ -141,6 +147,10 @@ class ModSource:
         self.plain_read = plain_read
         self.local: dict = {}
         self.fake_encryption = False
+        # HashFS container opened alongside a ZIP/folder, or on its own.
+        self.hashfs = None
+        self.hashfs_note: str | None = None
+        self.hashfs_damaged: list[str] = []
         # Temp dir we unpacked a wrapped archive into, removed by close().
         self._tmpdir: Path | None = None
 
@@ -164,6 +174,9 @@ class ModSource:
                     self.names.append(info.filename)
                 if info.flag_bits & 0x1:
                     self.encrypted.add(info.filename)
+        elif path.is_file() and hashfs.is_hashfs(path):
+            self.zf = None
+            self._open_hashfs(path)
         elif self.path.is_dir():
             self.zf = None
             self.names = [
@@ -171,6 +184,7 @@ class ModSource:
                 for p in self.path.rglob("*")
                 if p.is_file()
             ]
+            self._open_sibling_archives()
         else:
             raise FileNotFoundError(f"no such mod: {self.path}")
 
@@ -192,6 +206,90 @@ class ModSource:
         # 200 MB .scs inside the mod and handed it to the game as an asset.
         self.readable = [n for n in self.readable
                          if not n.lower().endswith(".scs")]
+
+    def _open_hashfs(self, path: Path) -> None:
+        """Open a HashFS container as the whole mod, or as a second half of one.
+
+        A v2 container (game 1.50+) is refused rather than half-read: its
+        tables are laid out differently and its textures are packed into the
+        .tobj entries, so reading it as v1 would produce nonsense.
+        """
+        try:
+            archive = hashfs.HashFsArchive(path)
+        except hashfs.HashFsError as exc:
+            self.hashfs = None
+            self.hashfs_note = str(exc)
+            return
+        self.hashfs = archive
+        # Only paths that really read back. A DRM packer can leave a name in a
+        # directory listing with no entry behind it, and reporting that as
+        # present makes exists() lie -- which is how the converter ended up
+        # trying to inject tags[] into a data.sii that has no bytes.
+        reachable = archive.paths()
+        readable = [n for n, status in reachable.items() if status == "ok"]
+        for name in readable:
+            if name not in self.names:
+                self.names.append(name)
+        # Names the archive lists but cannot produce are worth saying out loud:
+        # they are the files the packer stripped, and they are the reason a mod
+        # can convert "successfully" and still be missing a cabin.
+        missing = sorted(n for n, s in reachable.items() if s == "missing")
+        self.hashfs_damaged = sorted(
+            [n for n, s in reachable.items() if s == "damaged"]
+            + archive.damaged())
+        self.hashfs_note = (
+            f"{len(readable)} files read"
+            + (f"; {len(missing)} listed but absent from the archive"
+               if missing else "")
+            + (f"; {len(self.hashfs_damaged)} damaged"
+               if self.hashfs_damaged else ""))
+
+    def _open_sibling_archives(self) -> None:
+        """Read the .scs files in the folder as part of the mod.
+
+        Split mods are a folder holding two archives: the definitions in a
+        plain ZIP and everything else in a HashFS container. Pointed at that
+        folder, the converter used to see two .scs files it could not read and
+        report that the mod had no vehicle directory. Both halves are opened
+        here, so the folder is treated as the single mod it really is.
+        """
+        try:
+            siblings = sorted(p for p in self.path.iterdir()
+                              if p.is_file() and p.suffix.lower() == ".scs")
+        except OSError:
+            return
+        for sibling in siblings:
+            if hashfs.is_hashfs(sibling):
+                continue
+            if not zipfile.is_zipfile(sibling):
+                continue
+            try:
+                zf = zipfile.ZipFile(sibling)
+            except (zipfile.BadZipFile, OSError):
+                continue
+            self.zf = zf
+            for info in zf.infolist():
+                if info.filename.endswith("/"):
+                    continue
+                if info.filename not in self.names:
+                    self.names.append(info.filename)
+                if info.flag_bits & 0x1:
+                    self.encrypted.add(info.filename)
+            self.wrapper_note = (
+                f"{self.wrapper_note + '; ' if self.wrapper_note else ''}"
+                f"read {sibling.name} from this folder")
+            break
+        for sibling in siblings:
+            if not hashfs.is_hashfs(sibling):
+                continue
+            before = len(self.names)
+            self._open_hashfs(sibling)
+            if self.hashfs is not None:
+                added = len(self.names) - before
+                self.wrapper_note = (
+                    f"{self.wrapper_note + '; ' if self.wrapper_note else ''}"
+                    f"read {sibling.name} ({_human_size(sibling)}, HashFS "
+                    f"v{self.hashfs.version}): {added} files")
 
     def _try_local_headers(self) -> None:
         """Recover entries whose central-directory encryption flag is a lie.
@@ -371,8 +469,28 @@ class ModSource:
         if name in getattr(self, "local", {}):
             return self._read_local(name).decode("utf-8", "replace")
         if self.zf is not None:
-            return self.zf.read(name).decode("utf-8", "replace")
+            try:
+                return self.zf.read(name).decode("utf-8", "replace")
+            except KeyError:
+                # Split mod: the ZIP holds the definitions and the container
+                # holds the rest. Falling through is the whole point.
+                pass
+        if self.hashfs is not None:
+            data = self._read_hashfs(name)
+            if data is not None:
+                return data.decode("utf-8", "replace")
         return (self.path / name).read_text(encoding="utf-8", errors="replace")
+
+    def _read_hashfs(self, name: str) -> bytes | None:
+        """Bytes of `name` from the HashFS half, or None.
+
+        A payload the packer corrupted raises rather than returning junk: the
+        caller is about to write this back out as a definition, and a mangled
+        one becomes a dangling pointer that kills load_unit() in game.
+        """
+        if self.hashfs is None:
+            return None
+        return self.hashfs.read(name)
 
     def read_def(self, name: str) -> str:
         """Read a .sii/.sii definition, refusing to guess at its bytes.
@@ -409,16 +527,23 @@ class ModSource:
             if name in getattr(self, "local", {}):
                 return self._read_local(name)
             if self.zf is not None:
-                return self.zf.read(name)
+                try:
+                    return self.zf.read(name)
+                except KeyError:
+                    pass
+            if self.hashfs is not None:
+                data = self._read_hashfs(name)
+                if data is not None:
+                    return data
             p = self.path / name
             return p.read_bytes() if p.is_file() else None
-        except (KeyError, RuntimeError, OSError):
+        except (KeyError, RuntimeError, OSError, hashfs.HashFsDamaged):
             return None
 
     def read_opt(self, name: str) -> str | None:
         try:
             return self.read(name)
-        except (KeyError, RuntimeError):
+        except (KeyError, RuntimeError, hashfs.HashFsDamaged):
             return None
 
     def exists(self, name: str) -> bool:
@@ -1959,14 +2084,7 @@ def _hashfs_version(path: Path) -> int | None:
     differ in how their tables are laid out; both are recognised so the
     message can be specific.
     """
-    try:
-        with open(path, "rb") as fh:
-            head = fh.read(8)
-    except OSError:
-        return None
-    if len(head) < 8 or head[:4] != HASHFS_MAGIC:
-        return None
-    return struct.unpack_from("<H", head, 4)[0]
+    return hashfs.version_of(path)
 
 
 def _human_size(path: Path) -> str:
@@ -1987,9 +2105,10 @@ def _no_vehicle_dir_message(src: ModSource) -> str:
 
     The plain message is usually a lie. Some mods ship their definitions and
     their assets as two archives, the definitions in a plain ZIP and the assets
-    in an SCS HashFS container, and this tool reads only the former. Pointed at
-    the folder, the old message claimed the mod had no vehicle directory --
-    which is exactly what it says and exactly what is wrong.
+    in an SCS HashFS container; both are read, so the only way to get here with
+    one present is that the container is a version this tool cannot read. The
+    message says which, rather than claiming the mod has no vehicle directory --
+    which is what the old one did, and was exactly what was wrong.
     """
     base = (
         "error: no def/vehicle/truck/<slug>/ found.\n"
@@ -2011,31 +2130,41 @@ def _no_vehicle_dir_message(src: ModSource) -> str:
     if not hashfs:
         return base
 
+    # A v1 container is read as part of the mod, so reaching this point with
+    # one next to the input means it could not be opened -- v2, or a header we
+    # could not parse. Saying "this converter cannot read HashFS" here would be
+    # the same kind of lie the fallback message was.
+    unreadable = [(p, v) for p, v in hashfs if v != 1]
+    if not unreadable:
+        return base
+
     lines = [
-        "error: this mod's files are split across two archives, and only one"
-        " of them can be read.",
+        "error: this mod's files are split across two archives, and the one",
+        "holding the assets cannot be read.",
         "",
-        "This converter reads plain-ZIP .scs archives and folders. It does not",
-        "read SCS's own HashFS container (the `SCS#` format the game uses), so:",
+        "The definitions are in a plain ZIP, which is readable, but the",
+        "geometry, textures, sounds and usually the root data.sii are in an",
+        "SCS HashFS container beside it. This converter reads HashFS v1:",
         "",
     ]
-    for path, ver in hashfs:
+    for path, ver in unreadable:
+        why = ("a version this converter does not implement yet"
+               if ver == 2 else "its header could not be parsed")
         lines.append(f"    {path.name}  ({_human_size(path)}, HashFS v{ver})"
-                     "  <- unreadable")
+                     f"  <- unreadable: {why}")
     for path in siblings:
         if _hashfs_version(path) is None:
             lines.append(f"    {path.name}  ({_human_size(path)}, plain ZIP)"
                          "  <- readable")
     lines += [
         "",
-        "The vehicle definitions are in the readable one, but the geometry,",
-        "textures, sounds and usually the root data.sii are in the HashFS one,",
-        "so converting this folder alone cannot produce a working car.",
+        "Converting the readable half alone would produce a car with no body,",
+        "no textures and no sounds, so this stops here rather than write one.",
         "",
         "What to do:",
-        "  - Extract the HashFS archive with a tool that understands SCS",
-        "    containers, and point the converter at the extracted folder. The",
-        "    resulting folder has both halves and converts normally.",
+        "  - Extract that archive with a tool that understands HashFS v2 (the",
+        "    SCS archive packer from the modding wiki does, and so does the",
+        "    community `extractor`), and point the converter at the result.",
         "  - If the mod's author offers an unpacked or extracted version, use",
         "    that.",
         "  - --mod-dir will not help here; this is about the input, not where",
@@ -3585,8 +3714,10 @@ def main(argv: list[str] | None = None) -> int:
         metavar="DOLLARS",
         help="set what the Car Dealer charges for the finished car. ATS has no "
              "single price key: the dealer sums the price of every accessory "
-             "it lists, so this rescales exactly those components. The rest "
-             "of the mod's upgrade menu keeps its own prices",
+             "it lists, so this moves the mod's WHOLE price table by one factor "
+             "-- the listed parts and the rest of the upgrade menu alike. "
+             "Scaling only the listed ones left a $40,000 chassis on a $1,000 "
+             "car",
     )
     ap.add_argument(
         "--air-resistance",
