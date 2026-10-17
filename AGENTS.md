@@ -544,6 +544,17 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   peak, **never** against the written curve (always clipped, so always true);
   the torque-loss warning is judged against a second, unclipped build.
   `FINDINGS.md` §39.
+- **`rpm_range_power` does not change gear; the band that does is
+  `rpm_range_high_gear`, and only its UPPER bound is the shift point.** The
+  proof is the F-150: power band (5000, 6000), shifts between 1500 and 2200. No
+  overlap, so it is not the driver. The floor of a band is where the box drops
+  back down — moving it changes how it hunts, a different question. Measured
+  shift point ÷ peak torque: Mustang 0.96, Victoria 0.83, Bronco 0.67, F-150
+  0.49, ours 0.55. **That spread across four engines of the same game is a taste
+  question, so `--shift-up-rpm` is a flag and deliberately NOT derived from
+  `--type`** — deriving it would dress a preference up as a measurement. An
+  explicit `--shift-up-rpm` is the one exception to the preservation rule, and it
+  still moves only the upper bound. `FINDINGS.md` §40.
 - **`synthetic_mod` had no usable engine curve.** It wrote
   `torque_curve[0]: 0.43` — indexed, and not in the `(rpm, fraction)` form.
   `_tune_engine_to_hp` filters on `torque_curve\[\]:`, the **empty**-bracket form

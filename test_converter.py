@@ -699,6 +699,70 @@ def test_clipping_the_ceiling_costs_torque_and_says_so() -> None:
           str(rep_air.warnings))
 
 
+def test_the_shift_point_is_the_band_that_governs_upshifts() -> None:
+    """`rpm_range_power` is not what changes gear, and the data proves it.
+
+    For the F-150 the power band is (5000, 6000) while the box shifts between
+    1500 and 2200. A key that decided when to change up would have to overlap
+    the shift band, so it is not that. Measured shift point against peak torque
+    across SCS's own four:
+
+        ch289v8      Mustang   2300 / 2400  =  0.96x
+        v8_46l       Victoria   3400 / 4100  =  0.83x
+        ford_27l_eco Bronco    2000 / 3000  =  0.67x
+        ford_tivctv8 F-150     2200 / 4500  =  0.49x
+
+    So which end of that range you want is taste, not measurement, and the
+    default (0.55x) sits with the pickup. --shift-up-rpm moves the band's
+    upper bound and leaves its floor alone: the floor is where the box drops
+    back down, and moving it too would change how it hunts between gears.
+    """
+    section("the shift point is the band's upper bound, and it is a choice")
+    eng = ("SiiNunit\n{\naccessory_engine_data : e\n{\n\ttorque: 503\n"
+           "\trpm_idle: 750\n\trpm_limit: 6100\n"
+           "\ttorque_curve[]: (1500, 0.51)\n\ttorque_curve[]: (3750, 0.57)\n"
+           "}\n}\n")
+    torque_peak = 3750
+
+    def bands(**kw):
+        C._rpm_ranges = None
+        return edit_lines(C.tune_engine(eng, C.Report(), target_hp=300,
+                                        peak_power_rpm=5000, **kw))
+
+    default = bands()
+    up = int(re.findall(r"\d+", get_key(default, "rpm_range_high_gear"))[1])
+    check("the default is pickup-territory, 0.55x peak torque",
+          abs(up / torque_peak - 0.55) < 0.02, f"{up}/{torque_peak}")
+    for asked, ratio in ((3200, 0.85), (3600, 0.96)):
+        lines = bands(shift_up_rpm=asked)
+        check(f"--shift-up-rpm {asked} shifts at {ratio}x peak torque",
+              get_key(lines, "rpm_range_high_gear") == f"(1450, {asked})",
+              str(get_key(lines, "rpm_range_high_gear")))
+        check("  the band's floor is left where the author put it",
+              get_key(lines, "rpm_range_low_gear").startswith("(1350,"),
+              str(get_key(lines, "rpm_range_low_gear")))
+
+    # An explicit choice is applied even to a mod that declares its bands --
+    # the one exception to preservation, because it was asked for by name.
+    declaring = eng.replace(
+        "\trpm_limit: 6100\n",
+        "\trpm_limit: 6100\n\trpm_range_low_gear: (1250, 1850)\n"
+        "\trpm_range_high_gear: (1350, 1950)\n\trpm_range_power: (1800, 6000)\n")
+    C._rpm_ranges = None
+    overridden = edit_lines(C.tune_engine(declaring, C.Report(), target_hp=300,
+                                          peak_power_rpm=5000, shift_up_rpm=3200))
+    check("a mod that declares its bands still takes an explicit shift point",
+          get_key(overridden, "rpm_range_high_gear") == "(1350, 3200)",
+          str(get_key(overridden, "rpm_range_high_gear")))
+    C._rpm_ranges = None
+    kept = edit_lines(C.tune_engine(declaring, C.Report(), target_hp=300,
+                                    peak_power_rpm=5000))
+    check("and without one it is still preserved",
+          get_key(kept, "rpm_range_high_gear") == "(1350, 1950)"
+          and get_key(kept, "rpm_range_power") == "(1800, 6000)",
+          str([get_key(kept, k) for k in C._RPM_RANGE_ORDER]))
+
+
 def test_rpm_band_input_is_validated() -> None:
     section("a rev band asked for by hand is validated")
     check("two numbers", C._parse_band("1350, 1950") == "(1350, 1950)")
@@ -5181,6 +5245,7 @@ def main() -> int:
     test_rpm_bands_scale_to_where_the_engine_peaks()
     test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak()
     test_clipping_the_ceiling_costs_torque_and_says_so()
+    test_the_shift_point_is_the_band_that_governs_upshifts()
     test_rpm_band_input_is_validated()
     test_the_engine_follows_the_transmission_it_is_paired_with()
     test_defaults_come_from_the_mods_dealer_config()

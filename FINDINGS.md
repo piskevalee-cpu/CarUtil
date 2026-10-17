@@ -2158,3 +2158,51 @@ not see and had silently skipped with "no torque_curve to reshape". Two new
 fixtures of mine had the same defect, which is how it surfaced. It is the
 `KEY_RE` trap in a different place: `[]` in a pattern is a literal pair of
 brackets, not a wildcard.
+
+## 40. The power band is not what changes gear, and the shift point is a choice
+
+"I like the new automatic but I want it to go a little more up with the revs."
+A question followed: wasn't there a power parameter, and when does it activate?
+
+### `rpm_range_power` is not the shift driver, and the data proves it
+
+For SCS's F-150 the power band is **(5000, 6000)** while the box shifts between
+**1500 and 2200**. A key that decided when to change up would have to overlap the
+shift band. It does not overlap on any of the four, and on two it is nowhere near
+them. So `rpm_range_power` is not what tells the gearbox to change gear — most
+likely the HUD's power band, or something the data does not show.
+
+What **is** the shift point is the upper bound of `rpm_range_high_gear`. Measured
+against the engine's own peak torque:
+
+| engine | shift point | ÷ peak torque |
+|---|---|---|
+| `ch289v8` Mustang | 2300 | **0.96** |
+| `v8_46l` Victoria | 3400 | **0.83** |
+| `ford_27l_eco` Bronco | 2000 | 0.67 |
+| `ford_tivctv8` F-150 | 2200 | **0.49** |
+| ours, power peak 5000 | 2050 | **0.55** |
+
+**The default sits with the pickup.** That is the whole of "it runs out of revs".
+And the spread is 0.49 to 0.96 across four engines of the same game, same
+format — so which end you want is a **taste question, not a measurement**. That
+distinction is why it is a flag rather than a preset derived from `--type`:
+deriving it from vehicle class would dress a preference up as a measurement, which
+is the habit §26 and §34 both warn about.
+
+`--shift-up-rpm` moves the band's **upper bound only**. The floor is the rev the
+box drops back down to; moving it too would change how it hunts between gears,
+which is a different question from when it changes up.
+
+Two details that only showed up under test:
+
+- A mod that **declares** its own bands takes an explicit `--shift-up-rpm` — the
+  single exception to preservation, because it was asked for by name — and then
+  only its upper bound moves. Its floors and its `rpm_range_power` are the
+  author's. A first version overwrote all three with the scaled defaults, which
+  would have discarded a declared floor.
+- The override only applies to the engine units, so the three mods that already
+  declare bands are untouched without the flag.
+
+The CTS is now built with `--shift-up-rpm 3200`, which is 0.85x its peak torque —
+between the Victoria and the Mustang.

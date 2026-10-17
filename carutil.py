@@ -2954,8 +2954,23 @@ def _requested_power_peak(text: str, peak_power_rpm: int | None) -> int | None:
                          rpm_limit))
 
 
+def _set_shift_up(bands: dict[str, str], shift_up_rpm: int) -> dict[str, str]:
+    """Move the upshift point, keeping the band's floor where it was.
+
+    Only the upper bound is the shift point; the lower one is where the gearbox
+    will drop back down to. Moving both would change how the box hunts between
+    gears, which is a different question from when it changes up.
+    """
+    out = dict(bands)
+    for key in ("rpm_range_low_gear", "rpm_range_high_gear"):
+        lo = int(re.findall(r"\d+", out[key])[0])
+        out[key] = f"({lo}, {shift_up_rpm})"
+    return out
+
+
 def _ensure_rpm_ranges(text: str, rep: Report,
-                       power_peak_rpm: int | None = None) -> str:
+                       power_peak_rpm: int | None = None,
+                       shift_up_rpm: int | None = None) -> str:
     """Give an engine the rev bands the automatic shifts on, when it has none.
 
     A mod that declares them is left completely alone -- the Escalade, the Pilot
@@ -2966,17 +2981,45 @@ def _ensure_rpm_ranges(text: str, rep: Report,
 
     The bands are scaled to `power_peak_rpm`, so an engine that peaks early is
     not handed an upshift point that belongs to one that peaks late.
+
+    `shift_up_rpm` is a deliberate choice by the user, so it is applied even to a
+    mod that declares bands. That is the one exception to the preservation rule
+    above, and only because it was asked for by name.
     """
     if "accessory_engine_data" not in text:
         return text
     lines = edit_lines(text)
     missing = [k for k in _RPM_RANGE_ORDER if get_key(lines, k) is None]
+
     if not missing:
-        return text
+        # The mod declares its own. Preservation wins unless a shift point was
+        # asked for by name, and then only the upper bound moves: the floor is
+        # the rev the box drops back down to, and rpm_range_power has nothing to
+        # do with changing up at all.
+        if shift_up_rpm is None:
+            return text
+        for key in ("rpm_range_low_gear", "rpm_range_high_gear"):
+            cur = get_key(lines, key)
+            if cur:
+                lo = int(re.findall(r"\d+", cur)[0])
+                lines = set_key(lines, key, f"({lo}, {shift_up_rpm})")
+        rep.action(
+            f"automatic changes up at {shift_up_rpm} rpm, on request: the "
+            f"mod's own bands are kept otherwise, only their upper bound moved"
+        )
+        return "\n".join(lines) + "\n"
 
     peak = power_peak_rpm or _power_peak_rpm(text)
     limit = re.search(r"^\s*rpm_limit:\s*(\d+)", text, re.M)
     bands = _rpm_range_bands(peak, int(limit.group(1)) if limit else None)
+    if shift_up_rpm is not None:
+        bands = _set_shift_up(bands, shift_up_rpm)
+        rep.action(
+            f"automatic changes up at {shift_up_rpm} rpm, on request: the "
+            f"default lands near {bands['rpm_range_high_gear']} and SCS's own "
+            f"cars measure 0.49x to 0.96x of their peak torque, so which end "
+            f"of that range you want is a taste question, not a measurement"
+        )
 
     rep.warn(
         f"engine declares none of {_RPM_RANGE_ORDER[0]}, {_RPM_RANGE_ORDER[1]} "
@@ -3003,7 +3046,8 @@ def tune_engine(text: str, rep: Report, force: bool = False,
                 target_source: str | None = None,
                 target_hp: float | None = None,
                 peak_power_rpm: int | None = None,
-                rev_limit: int | None = None) -> str:
+                rev_limit: int | None = None,
+                shift_up_rpm: int | None = None) -> str:
     """Rescale an engine's output to the figure its own info[] declares.
 
     `torque` is multiplied down and `secondary_torque` by the same factor, so
@@ -3032,9 +3076,9 @@ def tune_engine(text: str, rep: Report, force: bool = False,
     # that is about to be replaced.
     if target_hp is not None:
         text = _ensure_rpm_ranges(text, rep, _requested_power_peak(
-            text, peak_power_rpm))
+            text, peak_power_rpm), shift_up_rpm)
     else:
-        text = _ensure_rpm_ranges(text, rep)
+        text = _ensure_rpm_ranges(text, rep, None, shift_up_rpm)
 
     # An explicit --engine-torque or --acceleration replaces the ratio; both
     # are deliberate overrides, not second opinions.
@@ -3359,6 +3403,7 @@ def convert(
     air_resistance: float | None = None,
     price: int | None = None,
     rev_limit: int | None = None,
+    shift_up_rpm: int | None = None,
 ) -> Report:
     rep = Report()
     overrides = {}
@@ -3524,7 +3569,8 @@ def convert(
                 tonnes=tonnes,
                 target_hp=engine_hp,
                 peak_power_rpm=peak_power_rpm,
-                rev_limit=rev_limit)
+                rev_limit=rev_limit,
+                shift_up_rpm=shift_up_rpm)
         elif car_tune and re.match(
             r"^def/vehicle/[a-z_]*tire/.*\.sii$", name
         ):
@@ -4408,6 +4454,15 @@ def main(argv: list[str] | None = None) -> int:
              "4500-6000 rpm",
     )
     ap.add_argument(
+        "--shift-up-rpm",
+        type=int,
+        metavar="RPM",
+        help="rev at which the automatic changes up, e.g. 3200. Lower is "
+             "softer and better on fuel, higher holds each gear out to the "
+             "peak. SCS's cars measure 0.49x their peak torque (F-150) to "
+             "0.96x (Mustang)",
+    )
+    ap.add_argument(
         "--rev-limit",
         type=int,
         metavar="RPM",
@@ -4720,6 +4775,7 @@ def main(argv: list[str] | None = None) -> int:
             air_resistance=args.air_resistance,
             price=price,
             rev_limit=rev_limit,
+            shift_up_rpm=args.shift_up_rpm,
             dry_run=args.dry_run,
             car_tune=args.car_tune,
             mass=mass,
