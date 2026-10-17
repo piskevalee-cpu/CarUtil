@@ -3466,6 +3466,36 @@ def _install_roots(home: Path) -> list[Path]:
         home / "Games" / "lutris" / "drive_c" / "Program Files" / "Steam"
              / "steamapps" / "common",
     ]
+
+    # A NATIVE Windows install, which none of the above can reach. Every root
+    # so far is relative to a Unix $HOME, so on Windows they all resolve to
+    # C:\Users\<name>\.local\share\Steam\... and never exist -- --path would
+    # report "game files not found" on the one platform where it matters most.
+    #
+    # Read the environment rather than hardcoding C:\, so the same code works
+    # on Windows and under Wine (where PROGRAMFILES points into the prefix).
+    # Note the parentheses in PROGRAMFILES(X86): it is not shell syntax here,
+    # it is the literal name Windows uses, which is why it is quoted.
+    seen: set[Path] = set()
+    out: list[Path] = []
+    # PROGRAMFILES(X86) is the "Program Files (x86)" directory itself, NOT a
+    # Steam root -- Steam sits inside it, and the library one level deeper
+    # still. Appending /Steam/steamapps/common is the whole of it.
+    for raw in [os.environ.get("PROGRAMFILES(X86)"),
+                os.environ.get("PROGRAMFILES"),
+                # Fallbacks for a prefix with no environment set up.
+                r"C:\Program Files (x86)",
+                r"C:\Program Files",
+                # Drive-relative, so this also works from inside a prefix.
+                "Program Files (x86)",
+                "Program Files"]:
+        if not raw:
+            continue
+        p = Path(raw) / "Steam" / "steamapps" / "common"
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    roots += out
     return roots
 
 

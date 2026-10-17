@@ -4379,6 +4379,54 @@ def test_zip_wrapping_a_hashfs_container_is_not_a_crash() -> None:
             src.close()
 
 
+def test_game_install_is_found_on_a_native_windows_layout() -> None:
+    r"""A Windows install is not under $HOME/.steam and never was.
+
+    Every other root in _install_roots is relative to a Unix $HOME, so on
+    Windows each one resolves to C:\Users\<name>\.local\share\Steam\... and
+    none of them exists. --path would report "game files not found" on the one
+    platform where the answer is most wanted. Found by reading the code, not by
+    running it: no Windows machine is available here.
+    """
+    section("game install discovery on a native Windows layout")
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        # Build C:\Program Files (x86)\Steam\steamapps\...\American Truck Simulator
+        pf = home / "Program Files (x86)" / "Steam" / "steamapps" / "common" \
+             / "American Truck Simulator"
+        pf.mkdir(parents=True)
+        (pf / "def.scs").write_bytes(b"SCS#\x02")
+        (pf / "base.scs").write_bytes(b"SCS#\x02")
+
+        env = {"PROGRAMFILES(X86)": str(home / "Program Files (x86)")}
+        real = dict(os.environ)
+        try:
+            os.environ.update(env)
+            found = C.find_game_install(home)
+        finally:
+            os.environ.clear()
+            os.environ.update(real)
+
+        check("a Windows-style install is found", found == pf.resolve(),
+              f"{found}")
+        check("the Unix roots are still probed too",
+              any(str(r).startswith(str(home)) for r in C._install_roots(home)),
+              "no unix roots left")
+
+        # And with nothing set, the C:\ fallbacks are still offered so a
+        # prefix with no environment is not a dead end.
+        real = dict(os.environ)
+        try:
+            for k in ("PROGRAMFILES(X86)", "PROGRAMFILES"):
+                os.environ.pop(k, None)
+            roots = [str(r) for r in C._install_roots(home)]
+        finally:
+            os.environ.clear()
+            os.environ.update(real)
+        check("a hardcoded C: fallback exists for a bare prefix",
+              any("Program Files" in r for r in roots), str(roots[-3:]))
+
+
 def test_path_option_reports_the_locations() -> None:
     """--path must answer its question and stop.
 
@@ -4772,6 +4820,7 @@ def main() -> int:
     test_air_resistance_override()
     test_hashfs_sibling_gets_an_honest_error()
     test_zip_wrapping_a_hashfs_container_is_not_a_crash()
+    test_game_install_is_found_on_a_native_windows_layout()
     test_path_option_reports_the_locations()
     test_game_install_is_found_by_its_contents()
     test_interrupted_write_leaves_no_broken_archive()
