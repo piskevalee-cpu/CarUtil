@@ -2749,6 +2749,95 @@ _CAR_TRANSMISSION = {
 _CAR_STALL_CEILING = 2.0
 _CAR_LOCK_GEAR = "3"
 
+# differential_ratio x ratios_forward[-1], measured across the four
+# transmissions SCS ships for its own Road Trip cars:
+#
+#   f150_23     10-speed  final 3.55  ->  2.26   1652 rpm at 60 mph
+#   bronco_24   10-speed  final 3.73  ->  2.37   1736
+#   victoria_06  4-speed  final 3.27  ->  2.29   1675
+#   mustang_67   3-speed  final 2.79  ->  2.79   2042
+#
+# A truck's top gear is geared for a 40-tonne combination and is far taller
+# than any of those. A car in that gear reaches 60 mph far below the revs where
+# it makes power, and below `rpm_range_low_gear` as well -- so the automatic
+# sits in top gear with the engine below the band it is supposed to be shifting
+# in, and simply does not accelerate. Measured on the real fixtures: the
+# Escalade's 10th gear put 60 mph at 1326 rpm and took 25 s, while the same car
+# in manual mode reached 60 in 5.3 s because the engine was finally allowed to
+# rev into its 4100-6000 power band. The Pilot (2.35) is already in range and
+# converts fine, which is why only some mods are affected.
+#
+# The comparison is a RATIO and so does not depend on wheel radius; the rpm
+# figures above assume a 0.35 m wheel purely to make the symptom legible.
+#
+# Outside this band the final drive is retargeted so the overall lands on the
+# nearer bound. One key, and it scales every gear by the same factor.
+_SCS_TOP_GEAR_RANGE = (2.26, 2.37)
+
+
+def _retarget_final_drive(lines: list[str], changed: list[str],
+                         force: bool = False) -> None:
+    """Move differential_ratio so the top gear lands in SCS's measured range.
+
+    `differential_ratio * ratios_forward[-1]` is the overall ratio of the
+    tallest gear, and it is what decides where the engine sits at a given road
+    speed. Below SCS's band the automatic cannot get out of top gear usefully;
+    above it, the engine never reaches its power band in any gear it is willing
+    to hold.
+
+    Only the product is tested, so this needs no wheel radius and no road
+    speed -- a 10-speed truck box and a 3-speed sports box are corrected by the
+    same rule.
+    """
+    top = None
+    count = 0
+    for raw in get_all_indexed(lines, "ratios_forward"):
+        try:
+            v = float(raw)
+        except ValueError:
+            continue
+        if v > 0:                      # skip the reverse array
+            top = v
+            count += 1
+    # Guard, and it is a real one rather than tidiness. ratios_forward[-1] is
+    # only the top gear if there IS a gearbox. A unit with one or two ratios is
+    # a truncated or hand-written stub, and "retargeting" one of those would
+    # rewrite a final drive to a nonsense value on a strength of arithmetic that
+    # assumes a top gear exists. SCS's own shortest is the Mustang's 3-speed.
+    if count < 3:
+        return
+    final_raw = get_key(lines, "differential_ratio")
+    if top is None or final_raw is None:
+        return
+    try:
+        final = float(final_raw)
+    except ValueError:
+        return
+    if final <= 0:
+        return
+
+    lo, hi = _SCS_TOP_GEAR_RANGE
+    overall = final * top
+    if lo <= overall <= hi and not force:
+        return                        # already car-geared; leave it alone
+
+    target = lo if overall < lo else hi
+    # Round AWAY from the band rather than to nearest: written to three
+    # decimals, a neutral round of 2.26/0.636 gives 3.553, and 3.553*0.636 is
+    # 2.25971 -- a hair under the bound we just corrected to, so the check
+    # below would fail on the value we deliberately chose. Ceil when raising
+    # the ratio, floor when lowering it, and the product always lands inside.
+    scaled = target / top
+    new_final = (math.ceil(scaled * 1000) / 1000 if overall < lo
+                 else math.floor(scaled * 1000) / 1000)
+    lines[:] = set_key(lines, "differential_ratio",
+                       f"{new_final:.3f}".rstrip("0").rstrip("."))
+    changed.append(
+        f"differential_ratio ({final:g} -> {new_final:.3g}): top gear was "
+        f"{overall:.2f}, outside the {lo}-{hi} SCS's own cars use, so the "
+        f"automatic sat in top gear below its power band"
+    )
+
 
 def tune_transmission(text: str, rep: Report, force: bool = False) -> str:
     """Bring a transmission's converter settings into car range.
@@ -2790,6 +2879,8 @@ def tune_transmission(text: str, rep: Report, force: bool = False) -> str:
     if get_key(lines, "torque_converter_lock_gear") is None and not force:
         lines = set_key(lines, "torque_converter_lock_gear", _CAR_LOCK_GEAR)
         changed.append(f"torque_converter_lock_gear (absent -> {_CAR_LOCK_GEAR})")
+
+    _retarget_final_drive(lines, changed, force)
 
     if changed:
         rep.action(f"car transmission applied: {', '.join(changed)}")

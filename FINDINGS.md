@@ -1768,3 +1768,85 @@ proof of existence makes `exists()` lie, and the converter then tries to inject
 `tags[]` into a `data.sii` with no bytes. `paths()` reports `ok` / `damaged` /
 `missing` for exactly this reason, and only `ok` paths are merged into the mod's
 name list.
+
+## 34. The top gear is the reason an automatic will not accelerate
+
+Reported on a Cadillac CTS: **25 seconds to 60 mph on the automatic, 5.3
+seconds in manual**, same mod, same engine. The automatic changed gear at about
+1200 rpm when peak torque was at 6000.
+
+### What it was not
+
+**Not the shift logic.** `rpm_range_low_gear` / `rpm_range_high_gear` /
+`rpm_range_power` are already inside SCS's own car range on every fixture
+measured:
+
+| | low_gear | high_gear | power |
+|---|---|---|---|
+| SCS `mustang_67` | (1400, 2300) | (1500, 2300) | (2200, 3400) |
+| SCS `victoria_06` | (1200, 3000) | (1600, 3400) | (3500, 5600) |
+| Escalade | (1350, 1900) | (1400, 2050) | (4100, 6000) |
+| Pilot | (1350, 1950) | (1450, 2050) | (3500, 6000) |
+
+Rewriting those to "look more like a car" would have been fitting the symptom
+with numbers that fit nothing.
+
+### What it was
+
+`differential_ratio x ratios_forward[-1]` — the overall ratio of the tallest
+gear, which decides where the engine sits at a given road speed. Measured across
+the four transmissions SCS ships for its own Road Trip cars:
+
+| transmission | gears | final | overall | rpm at 60 mph |
+|---|---|---|---|---|
+| SCS `ford_10r80` (f150_23) | 10 | 3.55 | **2.26** | 1652 |
+| SCS `ford_10r60` (bronco_24) | 10 | 3.73 | **2.37** | 1736 |
+| SCS `ford_r470w` (victoria_06) | 4 | 3.27 | **2.29** | 1675 |
+| SCS `m3sp` (mustang_67) | 3 | 2.79 | **2.79** | 2042 |
+| **Escalade** | 10 | 2.85 | **1.81** | **1326** |
+| **W223** | 9 | 2.82 | **1.70** | **1241** |
+| Pilot | 10 | 3.73 | **2.35** | 1720 |
+
+A truck's top gear is geared for a 40-tonne combination and is far taller than
+any car. At 1.81 the Escalade reaches 60 mph at **1326 rpm**, which is *below*
+`rpm_range_low_gear` (1350). The box was already in top gear, so it could not
+shift out of a gear it should have shifted into, and the engine sat at 1326 rpm
+with its power band at 4100-6000. Nothing to pull with.
+
+In manual the driver holds a gear and lets the engine reach 6000 rpm, which is
+exactly the 5.3 s. The engine was never the problem.
+
+**Only some mods are affected.** The Pilot measures 2.35, inside SCS's range,
+and converts fine. That is the control, and it is what makes the diagnosis
+falsifiable rather than merely plausible. (rpm figures assume a 0.35 m wheel; the
+overall ratios, which are what the fix uses, do not depend on it.)
+
+### The correction
+
+`_retarget_final_drive` moves `differential_ratio` so the product lands on the
+nearer bound of 2.26-2.37. One key, scaling every gear by one factor:
+
+- Escalade 2.85 -> 3.553, overall 1.81 -> 2.26
+- W223 2.821 -> 3.76, overall 1.70 -> 2.26
+- Pilot 3.73 -> **unchanged**, already in range
+
+Rounding is ceil when raising the ratio and floor when lowering it: a neutral
+round of 2.26/0.636 gives 3.553, and 3.553 x 0.636 is 2.25971, a hair under the
+bound it was just corrected to.
+
+**Guard: at least three forward gears.** `ratios_forward[-1]` is only the top
+gear if there is a gearbox. A unit carrying one or two ratios is a truncated or
+hand-written stub, and retargeting one would rewrite a final drive to a nonsense
+value on the strength of arithmetic that assumes a top gear exists.
+
+### The belief that caused this
+
+`AGENTS.md` said, in bold: **"Do not touch gearing — the mods' 10-speed already
+matches SCS's own 10R80."** That was measured false on two of three fixtures. It
+reads like caution and behaved like a prohibition, and it is very likely why
+this survived: a 25-second 0-60 is dramatic enough that someone would normally
+look, and the file's own instruction said not to.
+
+This is §26's lesson again, and §18's: the thing to distrust is a confident
+statement in our own notes that nothing was changed because it looked close
+enough.

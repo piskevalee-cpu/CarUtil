@@ -474,8 +474,27 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   and the tyres are. Truck engines declare `torque: 1400`/`4000` against their
   own `info[]` of `475 @@nm@@`/`520 @@nm@@`. A car wheel with no `grip_factor`
   runs on truck tyre defaults and will not pull even once the engine is fixed.
-  **Do not touch gearing** — the mods' 10-speed already matches SCS's own 10R80.
   See `FINDINGS.md` §18, §19 and §23.
+- **…except the top gear, which does need correcting.** This file used to say
+  *"do not touch gearing — the mods' 10-speed already matches SCS's own 10R80."*
+  **That was measured false** on 2 of the 3 fixtures, and it is very likely why
+  the bug below survived: `differential_ratio × ratios_forward[-1]` is **1.81**
+  on the Escalade and **1.70** on the W223, against **2.26–2.37** across the
+  four transmissions SCS ships for its own cars. A truck's top gear is geared
+  for 40 tonnes. `_retarget_final_drive` now moves the final drive so the
+  product lands on the nearer bound. It is a **ratio**, so no wheel radius is
+  involved, and it scales every gear by one factor. **Guard on ≥3 forward
+  gears** — `ratios_forward[-1]` is only the top gear if there *is* a gearbox,
+  and a one-ratio stub would otherwise be rewritten to nonsense.
+- **A too-tall top gear is not "shifts early", it is "does not accelerate".**
+  Reported on a Cadillac: 25 s to 60 mph on the automatic, shifting at ~1200 rpm
+  with peak torque at 6000; **5.3 s in manual** with the same engine. The box
+  held top gear while the engine sat at 1326 rpm — below `rpm_range_low_gear`,
+  so it could not shift *out* of the gear it should have shifted *into*. The
+  engine was fine and the shift logic was fine. Note that `rpm_range_*` in the
+  truck mods is **already** inside SCS's car range; it was never the cause, and
+  "fixing" it would have been fitting the symptom. Only some mods are affected:
+  the Pilot's box measures 2.35 and converts fine, which is the control.
 - **`residual_travel` is the body-roll key.** Truck mods ship 0.09–0.10 and
   SCS's cars use 0.093–0.134 — the ranges **overlap**, so no threshold separates
   them and the key must be written unconditionally. See `FINDINGS.md` §24.

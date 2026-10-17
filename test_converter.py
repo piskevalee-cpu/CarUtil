@@ -4427,6 +4427,74 @@ def test_game_install_is_found_on_a_native_windows_layout() -> None:
               any("Program Files" in r for r in roots), str(roots[-3:]))
 
 
+def _transmission(final: float, gears: list[float]) -> str:
+    body = [f"differential_ratio: {final}", "ratios_reverse[0]: -4.866"]
+    body += [f"ratios_forward[{i}]: {g}" for i, g in enumerate(gears)]
+    return ("SiiNunit\n{\naccessory_transmission_data : t\n{\n"
+            + "".join(f"\t{b}\n" for b in body) + "}\n}\n")
+
+
+def test_top_gear_is_retargeted_into_scs_range() -> None:
+    """A truck's tallest gear puts 60 mph far below the engine's power band.
+
+    Reported on a Cadillac: the automatic took 25 s to 60 mph, shifting at
+    about 1200 rpm when peak torque was at 6000. Manual mode did 5.3 s with the
+    same engine. The cause is the top gear, not the shift logic and not the
+    engine: `differential_ratio x ratios_forward[-1]` for that box is 1.81,
+    against 2.26-2.37 across the four transmissions SCS ships for its own Road
+    Trip cars. At 1.81, 60 mph lands at 1326 rpm -- below rpm_range_low_gear,
+    so the box held top gear with the engine under its power band and simply
+    did not accelerate.
+    """
+    section("the tallest gear is brought into SCS's measured range")
+    truck10 = [4.696, 2.985, 2.146, 1.8, 1.52, 1.275, 1.0, 0.854, 0.689, 0.636]
+    lo, hi = C._SCS_TOP_GEAR_RANGE
+
+    # The reported case: a too-tall 10-speed.
+    out = C.tune_transmission(_transmission(2.85, truck10), C.Report())
+    lines = edit_lines(out)
+    final = float(get_key(lines, "differential_ratio"))
+    gears = [float(x) for x in get_all_indexed(lines, "ratios_forward")]
+    check("the overall ratio lands in SCS's range",
+          lo <= final * gears[-1] <= hi, f"{final * gears[-1]:.2f}")
+    rep = C.Report()
+    C.tune_transmission(_transmission(2.85, truck10), rep)
+    check("and it says why in the summary",
+          any("differential_ratio" in c and "SCS" in c for c in rep.actions),
+          str(rep.actions))
+
+    # The gear ratios themselves must be untouched: only the final drive moved.
+    check("the ratios are not rewritten",
+          [round(g, 3) for g in gears] == truck10, str(gears))
+    check("reverse is untouched",
+          get_all_indexed(lines, "ratios_reverse") == ["-4.866"])
+
+    # A box already in range is left alone. This is the Pilot, measured at
+    # 2.35: if this moved, the rule would be a hammer rather than a correction.
+    ok10 = truck10[:-1] + [0.630]
+    rep2 = C.Report()
+    C.tune_transmission(_transmission(3.73, ok10), rep2)
+    check("a box already in range is not touched",
+          not any("differential_ratio" in c for c in rep2.actions),
+          str(rep2.actions))
+
+    # A 9-speed is corrected by the same rule -- the product is what matters,
+    # not the gear count.
+    out9 = edit_lines(C.tune_transmission(
+        _transmission(2.82, truck10[:-1] + [0.601]), C.Report()))
+    f9 = float(get_key(out9, "differential_ratio"))
+    g9 = [float(x) for x in get_all_indexed(out9, "ratios_forward")]
+    check("a 9-speed is corrected by the same rule",
+          lo <= f9 * g9[-1] <= hi, f"{f9 * g9[-1]:.2f}")
+
+    # A transmission with no ratios_forward must not be mangled.
+    bare = ("SiiNunit\n{\naccessory_transmission_data : t\n{\n"
+            "\tdifferential_ratio: 2.85\n}\n}\n")
+    check("a transmission with no forward ratios is left alone",
+          get_key(edit_lines(C.tune_transmission(bare, C.Report())),
+                  "differential_ratio") == "2.85")
+
+
 def test_path_option_reports_the_locations() -> None:
     """--path must answer its question and stop.
 
@@ -4821,6 +4889,7 @@ def main() -> int:
     test_hashfs_sibling_gets_an_honest_error()
     test_zip_wrapping_a_hashfs_container_is_not_a_crash()
     test_game_install_is_found_on_a_native_windows_layout()
+    test_top_gear_is_retargeted_into_scs_range()
     test_path_option_reports_the_locations()
     test_game_install_is_found_by_its_contents()
     test_interrupted_write_leaves_no_broken_archive()
