@@ -530,14 +530,20 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   manual, same engine. `_ensure_rpm_ranges` fills only the missing keys with the
   median of the three mods that do declare them (the Pilot's), and warns. A
   mod that declares them is byte-for-byte untouched.
-- **A rev ceiling can only cut revs off.** `SCS_TORQUE_SHAPE` reaches zero
-  torque at **4/3 of the power peak** (8000 against 6000), so that is the limit
-  of what is useful; above it `build_power_curve` just staples a `(limit, 0.0)`
-  point on and the revs make nothing. Warn rather than accept. Two ordering
-  rules: the ceiling is written **before** the curve is built, because the curve
-  is clipped to it; and the warning is judged against 4/3 of the peak, **never**
-  against the written curve's last non-zero point — the curve is always clipped
-  to the limit, so that test is true for every value. `FINDINGS.md` §39.
+- **A rev ceiling does not merely cut revs off.** Two regimes. **Above 4/3 of
+  the power peak** (8000 against 6000 in `SCS_TORQUE_SHAPE`) it is *air*:
+  `build_power_curve` staples a `(limit, 0.0)` point on and the revs make
+  nothing — warn, don't accept. **Below** it, clipping drops the shape's
+  second-highest point and `build_power_curve` re-stretches to put the power
+  peak on a shorter curve, which moves the torque peak up and costs real torque:
+  at a 5000 rpm power peak, ceiling 6000+ gives torque peak 3750 / 503 Nm,
+  ceiling 5625 gives 4500 / 464 Nm. **Our own 1.5x default lands in that
+  losing zone**, which is why the cost is now measured against the engine's
+  original ceiling and reported. Three ordering rules: the ceiling is written
+  **before** the curve is built; the air warning is judged against 4/3 of the
+  peak, **never** against the written curve (always clipped, so always true);
+  the torque-loss warning is judged against a second, unclipped build.
+  `FINDINGS.md` §39.
 - **`synthetic_mod` had no usable engine curve.** It wrote
   `torque_curve[0]: 0.43` — indexed, and not in the `(rpm, fraction)` form.
   `_tune_engine_to_hp` filters on `torque_curve\[\]:`, the **empty**-bracket form

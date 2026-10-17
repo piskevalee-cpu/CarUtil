@@ -649,6 +649,56 @@ def test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak() -> None:
               want == round(1.5 * round(0.75 * prm)))
 
 
+def test_clipping_the_ceiling_costs_torque_and_says_so() -> None:
+    """Cutting the ceiling below the shape's rev range changes the engine.
+
+    It does not merely stop it earlier. Drop the shape's second-highest point --
+    5882 rpm at a 5000 rpm power peak -- and build_power_curve re-stretches to
+    put the power peak on a shorter curve, which moves the torque peak up and
+    costs real torque:
+
+        ceiling 6000+   torque peak 3750   503 Nm   353 hp
+        ceiling 5625    torque peak 4500   464 Nm   326 hp
+
+    So the loss is measured against the engine's own ceiling and reported. This
+    is the case the default of 1.5x peak torque lands in, which is exactly why
+    it needed catching rather than absorbing.
+    """
+    section("a ceiling below the shape's rev range costs torque, and warns")
+    def build(limit):
+        C._rpm_ranges = None
+        rep = C.Report()
+        out = C.tune_engine(_ENGINE_CURVE, rep, target_hp=300,
+                            peak_power_rpm=5000, rev_limit=limit)
+        tq = float(get_key(edit_lines(out), "torque"))
+        peak = C._primary_curve_peak(out)
+        return tq * peak, rep
+
+    at_own, rep_own = build(6100)
+    check("at its own ceiling the engine is unharmed", at_own > 0, str(at_own))
+    check("and does not warn about losing torque",
+          not any("costs this engine torque" in w for w in rep_own.warnings),
+          str(rep_own.warnings))
+
+    clipped, rep_cut = build(5625)
+    check("clipping below the shape's range really costs torque",
+          clipped < at_own * 0.98, f"{at_own:.0f} -> {clipped:.0f} Nm")
+    check("and the cost is reported",
+          any("costs this engine torque" in w for w in rep_cut.warnings),
+          str(rep_cut.warnings))
+
+    # Above the shape's reach the ceiling is air instead: warned, but no torque
+    # is lost, because the curve was going to die there anyway.
+    C._rpm_ranges = None
+    rep_air = C.Report()
+    C.tune_engine(_ENGINE_CURVE, rep_air, target_hp=300, peak_power_rpm=5000,
+                  rev_limit=8000)
+    check("a ceiling above the curve's reach is air, not a torque loss",
+          any("runs out at about" in w for w in rep_air.warnings)
+          and not any("costs this engine torque" in w for w in rep_air.warnings),
+          str(rep_air.warnings))
+
+
 def test_rpm_band_input_is_validated() -> None:
     section("a rev band asked for by hand is validated")
     check("two numbers", C._parse_band("1350, 1950") == "(1350, 1950)")
@@ -5130,6 +5180,7 @@ def main() -> int:
     test_an_engine_with_no_rev_bands_gets_them()
     test_rpm_bands_scale_to_where_the_engine_peaks()
     test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak()
+    test_clipping_the_ceiling_costs_torque_and_says_so()
     test_rpm_band_input_is_validated()
     test_the_engine_follows_the_transmission_it_is_paired_with()
     test_defaults_come_from_the_mods_dealer_config()

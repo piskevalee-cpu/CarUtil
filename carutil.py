@@ -2704,11 +2704,14 @@ def _declared_peak_nm(text: str) -> float:
 def _set_rev_limit(text: str, rev_limit: int) -> str:
     """Write the ceiling.
 
-    A ceiling can only cut revs off. This shape reaches zero torque at 4/3 of the
-    power peak -- SCS's own, which puts its last point at 8000 against a 6000 rpm
-    power peak -- so anything above that is not more revs to use, it is air: the
-    curve has no shape left to stretch, and `build_power_curve` simply staples a
-    (limit, 0.0) point on the end. `_warn_airy_limit` says so when it happens.
+    Two regimes, and they are not the same thing. This shape reaches zero torque
+    at 4/3 of the power peak -- SCS's own, which puts its last point at 8000
+    against a 6000 rpm power peak -- so anything above that is not more revs to
+    use, it is air, and `build_power_curve` staples a (limit, 0.0) point on the
+    end. `_warn_airy_limit` says so.
+
+    Below it the ceiling is not merely a stop: see `_tune_engine_to_hp`, which
+    measures what the clipping costs in torque and reports it.
     """
     lines = edit_lines(text)
     lines = set_key(lines, "rpm_limit", str(rev_limit))
@@ -2756,8 +2759,21 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
     `rev_limit` is applied BEFORE the curve is built, not after: the curve is
     clipped to the limit, so setting it afterwards would leave a curve reaching
     past the limiter it is supposed to stop at.
+
+    And clipping is not free. It does not merely cut revs off: drop the shape's
+    second-highest point and `build_power_curve` re-stretches to place the power
+    peak on a shorter curve, which moves the torque peak up and costs real
+    torque. Measured at a 5000 rpm power peak, where that point lands at 5882:
+
+        ceiling 6000+  torque peak 3750  503 Nm  353 hp
+        ceiling 5625   torque peak 4500  464 Nm  326 hp
+
+    so the loss is reported rather than absorbed.
     """
+    original_limit = None
     if rev_limit is not None:
+        found = re.search(r"^\s*rpm_limit:\s*(\d+)", text, re.M)
+        original_limit = int(found.group(1)) if found else None
         text = _set_rev_limit(text, rev_limit)
     m = re.search(r"^\s*rpm_limit:\s*(\d+)", text, re.M)
     if m:
@@ -2776,6 +2792,27 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
     curve, peak_torque = build_power_curve(hp, peak, rpm_limit)
     if peak_torque < 1:
         return text
+
+    # What the same engine would have made at its own ceiling. Built here rather
+    # than cached because it is 11 points of arithmetic and the alternative is a
+    # silent 8% torque loss.
+    if rev_limit is not None and original_limit and original_limit != rpm_limit:
+        try:
+            _, unclipped_torque = build_power_curve(
+                hp, max(1000, min(int(peak_rpm or _DEFAULT_PEAK_POWER_RPM),
+                                  original_limit)), original_limit)
+        except ValueError:
+            unclipped_torque = 0.0
+        if unclipped_torque and peak_torque < unclipped_torque * 0.98:
+            rep.warn(
+                f"rev limit {rpm_limit} rpm costs this engine torque: it now "
+                f"makes {peak_torque} Nm where its own {original_limit} rpm "
+                f"ceiling gave {unclipped_torque} Nm "
+                f"({100 * (1 - peak_torque / unclipped_torque):.0f}% less). "
+                f"Cutting below the shape's own rev range changes the curve, "
+                f"not just where it stops -- {original_limit} rpm or above keeps "
+                f"the engine as built."
+            )
 
     lines = edit_lines(text)
     kept = [ln for ln in lines

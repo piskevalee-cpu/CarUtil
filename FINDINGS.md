@@ -2098,14 +2098,39 @@ They sit between **1.44 and 2.29**, so 1.5 is inside their range. It is a
 multiple of peak *torque*, not of peak power: with this shape torque peaks at
 0.75x the power peak, so a power peak of 5000 gives a default ceiling of 5625.
 
-### It can only ever cut revs off
+### It does NOT merely cut revs off — and our own default lands in the trap
 
-`SCS_TORQUE_SHAPE` reaches zero torque at 8000 against a 6000 rpm power peak, so
-**4/3 of the power peak is the ceiling of what is useful**. Above it there is no
-shape left to stretch: `build_power_curve` simply staples a `(limit, 0.0)` point
-on the end, and the revs above make nothing. So a requested ceiling above that is
-warned about rather than silently accepted — it is not a slower car, it is a
-tachometer with nowhere to go.
+The first version of this asserted that a ceiling can only cut revs. Measuring
+it says otherwise, in two regimes:
+
+**Above 4/3 of the power peak** it is *air*. `SCS_TORQUE_SHAPE` reaches zero
+torque at 8000 against a 6000 rpm power peak, so there is no shape left to
+stretch: `build_power_curve` staples a `(limit, 0.0)` point on the end and the
+revs make nothing. Warned rather than silently accepted — it is not a slower
+car, it is a tachometer with nowhere to go.
+
+**Below it, the clipping costs real torque.** Drop the shape's second-highest
+point and `build_power_curve` re-stretches to place the power peak on a shorter
+curve, which moves the torque peak upward and loses torque. Measured at a 5000
+rpm power peak, where that point lands at 5882:
+
+| ceiling | power peak | torque peak | Nm | hp |
+|---|---|---|---|---|
+| 6000 and above | 5000 | 3750 | **503** | 353 |
+| **5625** | 5000 | 4500 | **464** | 326 |
+| 5200 | 5000 | 4500 | 464 | 326 |
+| 4800 | 4800 (clamped) | 4320 | 484 | 326 |
+
+**5625 is what 1.5x peak torque gives at this power peak.** The default this
+section proposes lands in the losing zone and costs 8% of the engine. So the
+cost is now measured against the engine's own ceiling — a second, unclipped
+build of the same curve — and reported, rather than absorbed.
+
+This is the fifth time in this investigation that a claim written into a
+comment turned out to be wrong when measured, and the third time the default
+proposed here was itself the problem. `build_power_curve`'s dependence on its
+`rpm_limit` argument is not documented anywhere; this section is the first
+place it has been written down.
 
 Two things that had to be got right:
 
