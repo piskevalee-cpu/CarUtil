@@ -1582,6 +1582,21 @@ _RPM_RANGE_ORDER = ("rpm_range_low_gear", "rpm_range_high_gear", "rpm_range_powe
 # case they were measured from.
 _RPM_RANGE_REFERENCE_RPM = 5000
 
+# Rev ceiling as a multiple of peak TORQUE, not of peak power. Measured across
+# the four engines SCS ships for its own Road Trip cars:
+#
+#   ford_27l_eco    limit 5900  torque peak 3000  ->  1.97x
+#   ford_tivctv8    limit 6500  torque peak 4500  ->  1.44x
+#   ch289v8         limit 5500  torque peak 2400  ->  2.29x
+#   v8_46l          limit 6000  torque peak 4100  ->  1.46x
+#
+# so 1.5 sits inside their range rather than beside it, which is what makes it a
+# default rather than a guess. The three truck mods measure 1.50, 1.51 and 3.00.
+#
+# Only ever useful DOWNWARD. This shape reaches zero torque at 1.33x the power
+# peak, so a ceiling above that is not more revs to use -- it is air.
+_DEFAULT_REV_LIMIT_FACTOR = 1.5
+
 
 def _rpm_range_bands(power_peak_rpm: int | None,
                      rpm_limit: int | None = None) -> dict[str, str]:
@@ -1625,6 +1640,51 @@ def _power_peak_rpm(text: str) -> int | None:
 
 # A mod with several engines must be asked once, not once per engine.
 _rpm_ranges: dict[str, str] | None = None
+
+
+def prompt_rev_limit(peak_power_rpm: int | None) -> int | None:
+    """Ask how high the revs go, once the peak is known.
+
+    Asked after the power step so the answer can be expressed against the peak
+    rather than as a bare number. Returns None to take the measured default.
+    Off a terminal, or on Ctrl-C, the default is used -- as everywhere else.
+    """
+    if not _tty():
+        return None
+    # Our shape peaks torque at 0.75x the power peak; see build_power_curve.
+    tq_peak = round(0.75 * (peak_power_rpm or _DEFAULT_PEAK_POWER_RPM))
+    suggestion = round(_DEFAULT_REV_LIMIT_FACTOR * tq_peak)
+    ceiling = round(tq_peak / 0.75 * 4 / 3)      # where the curve reaches zero
+
+    print()
+    print("  How high do the revs go before it stops?")
+    print("    This is the redline, not the peak. SCS's own cars reach 1.44 to")
+    print(f"    2.29 times their peak torque, so about {suggestion} rpm for an")
+    print(f"    engine peaking at {tq_peak}.")
+    print("    Above the peak it just revs; the curve runs out of torque at")
+    print(f"    about {ceiling} rpm either way.")
+    print()
+    while True:
+        try:
+            raw = input("  Rev limit in rpm: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  cancelled -- keeping the engine's own limit.")
+            return None
+        if not raw:
+            print(f"  -> enter a number in rpm, e.g. {suggestion}")
+            continue
+        try:
+            value = int(float(raw.rstrip("k.")))
+        except ValueError:
+            print(f"  -> enter a number in rpm, e.g. {suggestion}")
+            continue
+        if value < 2000:
+            print(f"  -> {value} rpm is below idle for a car engine")
+            continue
+        if value > 12000:
+            print("  -> no car engine goes that high; check the number")
+            continue
+        return value
 
 
 def _parse_band(raw: str) -> str | None:
@@ -2641,10 +2701,44 @@ def _declared_peak_nm(text: str) -> float:
     return float(m.group(1)) * peak if m else 0.0
 
 
+def _set_rev_limit(text: str, rev_limit: int) -> str:
+    """Write the ceiling.
+
+    A ceiling can only cut revs off. This shape reaches zero torque at 4/3 of the
+    power peak -- SCS's own, which puts its last point at 8000 against a 6000 rpm
+    power peak -- so anything above that is not more revs to use, it is air: the
+    curve has no shape left to stretch, and `build_power_curve` simply staples a
+    (limit, 0.0) point on the end. `_warn_airy_limit` says so when it happens.
+    """
+    lines = edit_lines(text)
+    lines = set_key(lines, "rpm_limit", str(rev_limit))
+    return "\n".join(lines) + "\n"
+
+
+# 8000 / 6000 from SCS_TORQUE_SHAPE: its last curve point against its power peak.
+_CURVE_ZERO_PER_PEAK = 4 / 3
+
+
+def _warn_airy_limit(rep: Report, rev_limit: int | None, peak: int) -> None:
+    if rev_limit is None:
+        return
+    natural = round(peak * _CURVE_ZERO_PER_PEAK)
+    if rev_limit > natural:
+        rep.warn(
+            f"rev limit set to {rev_limit} rpm, but this engine's torque curve "
+            f"runs out at about {natural} rpm (its shape reaches zero at "
+            f"{_CURVE_ZERO_PER_PEAK:.2f}x the {peak} rpm power peak). The "
+            f"{rev_limit - natural} rpm above that add nothing -- no torque, no "
+            f"power -- so this is air rather than revs. Around {natural} says "
+            f"the same thing honestly."
+        )
+
+
 def _tune_engine_to_hp(text: str, rep: Report, hp: float,
                        peak_rpm: int | None,
                        target_source: str | None,
-                       force: bool = False) -> str:
+                       force: bool = False,
+                       rev_limit: int | None = None) -> str:
     """Rebuild the engine to make `hp`, using SCS's torque curve shape.
 
     Scaling the declared `torque` alone cannot fix a top-end problem. The mods'
@@ -2658,7 +2752,13 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
     starts at (0, 0): idle torque falls from roughly 800 Nm to something in the
     low hundreds, which is what stops the car walking away when Drive is
     selected.
+
+    `rev_limit` is applied BEFORE the curve is built, not after: the curve is
+    clipped to the limit, so setting it afterwards would leave a curve reaching
+    past the limiter it is supposed to stop at.
     """
+    if rev_limit is not None:
+        text = _set_rev_limit(text, rev_limit)
     m = re.search(r"^\s*rpm_limit:\s*(\d+)", text, re.M)
     if m:
         rpm_limit = int(m.group(1))
@@ -2725,7 +2825,10 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
         f"{peak_torque} Nm peak over {len(curve)} curve points, on SCS's shape"
         + (f" ({target_source})" if target_source else "")
     )
-    return "\n".join(kept) + "\n"
+    out = "\n".join(kept) + "\n"
+    # Judged on the curve that was just written, not the one that was replaced.
+    _warn_airy_limit(rep, rev_limit, peak)
+    return out
 
 
 def _drop_truck_engine_keys(lines: list[str], rep: Report) -> list[str]:
@@ -2862,7 +2965,8 @@ def tune_engine(text: str, rep: Report, force: bool = False,
                 tonnes: float = 1.0,
                 target_source: str | None = None,
                 target_hp: float | None = None,
-                peak_power_rpm: int | None = None) -> str:
+                peak_power_rpm: int | None = None,
+                rev_limit: int | None = None) -> str:
     """Rescale an engine's output to the figure its own info[] declares.
 
     `torque` is multiplied down and `secondary_torque` by the same factor, so
@@ -2906,7 +3010,13 @@ def tune_engine(text: str, rep: Report, force: bool = False,
     # shape rather than scaling the mod's.
     if target_hp is not None:
         return _tune_engine_to_hp(text, rep, target_hp, peak_power_rpm,
-                                  target_source, force=force)
+                                  target_source, force=force,
+                                  rev_limit=rev_limit)
+
+    # The rescale path keeps the mod's own curve, so the ceiling is just a
+    # scalar here rather than something to clip against.
+    if rev_limit is not None:
+        text = _set_rev_limit(text, rev_limit)
 
     stated = stated_engine_torque(text)
     if stated is None and target_nm is None and nm_per_tonne is None:
@@ -3211,6 +3321,7 @@ def convert(
     peak_power_rpm: int | None = None,
     air_resistance: float | None = None,
     price: int | None = None,
+    rev_limit: int | None = None,
 ) -> Report:
     rep = Report()
     overrides = {}
@@ -3375,7 +3486,8 @@ def convert(
                 target_source=target_source,
                 tonnes=tonnes,
                 target_hp=engine_hp,
-                peak_power_rpm=peak_power_rpm)
+                peak_power_rpm=peak_power_rpm,
+                rev_limit=rev_limit)
         elif car_tune and re.match(
             r"^def/vehicle/[a-z_]*tire/.*\.sii$", name
         ):
@@ -4259,6 +4371,14 @@ def main(argv: list[str] | None = None) -> int:
              "4500-6000 rpm",
     )
     ap.add_argument(
+        "--rev-limit",
+        type=int,
+        metavar="RPM",
+        help=f"highest rev the engine reaches, e.g. 5600. Defaults to "
+             f"{_DEFAULT_REV_LIMIT_FACTOR:g}x peak torque; SCS's own cars "
+             f"measure 1.44-2.29x",
+    )
+    ap.add_argument(
         "--price",
         type=int,
         metavar="DOLLARS",
@@ -4364,7 +4484,7 @@ def main(argv: list[str] | None = None) -> int:
         print(_ui.banner())
 
     guided = _tty() and not args.no_prompt
-    total = 7
+    total = 8
 
     # Optional but wanted-by-default: offer to install ImageMagick before the
     # user invests answers in the walkthrough. Cheap when it is already there.
@@ -4482,6 +4602,7 @@ def main(argv: list[str] | None = None) -> int:
         wanted = args.acceleration
         power = args.power
         peak_rpm = args.peak_power_rpm
+        rev_limit = args.rev_limit
         price = args.price
         if guided:
             # Interactive: only when a terminal is attached, so scripted runs
@@ -4498,8 +4619,14 @@ def main(argv: list[str] | None = None) -> int:
             elif wanted is None:
                 _ui.step(5, total, "Set the acceleration")
                 wanted = prompt_acceleration(kerb)
+            # Asked after the peak, never before: the useful answer is a multiple
+            # of where the engine makes its torque, so it is only meaningful once
+            # that is known. Skipped when --rev-limit was given.
+            if args.rev_limit is None:
+                _ui.step(6, total, "Set the rev limit")
+                rev_limit = prompt_rev_limit(peak_rpm)
             if args.price is None:
-                _ui.step(6, total, "Set the price")
+                _ui.step(7, total, "Set the price")
                 price = prompt_price()
 
         kerb = sum(mass) if mass else default_total(args.vtype)
@@ -4536,7 +4663,7 @@ def main(argv: list[str] | None = None) -> int:
             out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
 
         if guided:
-            _ui.step(7, total, "Convert")
+            _ui.step(8, total, "Convert")
             print()
 
         rep = convert(
@@ -4555,6 +4682,7 @@ def main(argv: list[str] | None = None) -> int:
             peak_power_rpm=peak_rpm,
             air_resistance=args.air_resistance,
             price=price,
+            rev_limit=rev_limit,
             dry_run=args.dry_run,
             car_tune=args.car_tune,
             mass=mass,

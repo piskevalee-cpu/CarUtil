@@ -2076,3 +2076,60 @@ worth recording because the user read the car's peak torque as being at 6000,
 which is that engine's `rpm_limit`. At 6000 rpm the curve is at 0.0; at 5000 it
 is 428 of 503 Nm. If in-game the effective peak really is elsewhere, the number
 that says so is more useful than either of our readings.
+
+## 39. The rev ceiling is a separate question from the peak, and 1.5x has an anchor
+
+"Ask the user for the rpm limit after the peak rpm, or default to 1.5x the
+peak." Asked because the CTS peaks its torque right at its own limiter.
+
+### The 1.5 is measured, not chosen
+
+Ceiling as a multiple of peak **torque**, across the four engines SCS ships for
+its own Road Trip cars:
+
+| engine | `rpm_limit` | torque peak | limit / peak |
+|---|---|---|---|
+| `ford_27l_eco` | 5900 | 3000 | 1.97 |
+| `ford_tivctv8` | 6500 | 4500 | **1.44** |
+| `ch289v8` | 5500 | 2400 | **2.29** |
+| `v8_46l` | 6000 | 4100 | 1.46 |
+
+They sit between **1.44 and 2.29**, so 1.5 is inside their range. It is a
+multiple of peak *torque*, not of peak power: with this shape torque peaks at
+0.75x the power peak, so a power peak of 5000 gives a default ceiling of 5625.
+
+### It can only ever cut revs off
+
+`SCS_TORQUE_SHAPE` reaches zero torque at 8000 against a 6000 rpm power peak, so
+**4/3 of the power peak is the ceiling of what is useful**. Above it there is no
+shape left to stretch: `build_power_curve` simply staples a `(limit, 0.0)` point
+on the end, and the revs above make nothing. So a requested ceiling above that is
+warned about rather than silently accepted — it is not a slower car, it is a
+tachometer with nowhere to go.
+
+Two things that had to be got right:
+
+- **The ceiling is written BEFORE the curve is built.** The curve is clipped to
+  the limit, so applying it afterwards leaves a curve reaching past the limiter
+  that is supposed to stop it.
+- **The warning is judged against 4/3 of the power peak**, not against the
+  written curve. An earlier version compared against the curve's last non-zero
+  point, which fires on *every* value: the curve is always clipped to the limit,
+  so the last point is always the limit and the test is true by construction.
+
+### The walkthrough is 8 steps now
+
+`total = 8`, with the rev limit as step 6, asked **after** the power step —
+because the useful answer is a multiple of where the engine makes its torque,
+which is not known until then. Price moves to 7 and Convert to 8.
+
+### A latent fixture bug this exposed
+
+`synthetic_mod` wrote its engine's curve as `torque_curve[0]: 0.43` — indexed, and
+not even in the `(rpm, fraction)` form. `_tune_engine_to_hp` filters on
+`torque_curve\[\]:`, the **empty**-bracket form SII actually uses, so every
+conversion test in the suite had been running against an engine the tuner could
+not see and had silently skipped with "no torque_curve to reshape". Two new
+fixtures of mine had the same defect, which is how it surfaced. It is the
+`KEY_RE` trap in a different place: `[]` in a pattern is a literal pair of
+brackets, not a wildcard.

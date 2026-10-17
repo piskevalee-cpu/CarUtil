@@ -182,8 +182,12 @@ UTF-8 internally, so generated files stay LF-only on every platform. Defs that
 
 ## Prompts
 
-The guided walkthrough is **7 steps** (`total = 7` in `main()`): source, type,
-brand, weight, power *or* acceleration, price, convert.
+The guided walkthrough is **8 steps** (`total = 8` in `main()`): source, type,
+brand, weight, power *or* acceleration, rev limit, price, convert. The rev
+limit is step 6 and is asked **after** the power, because the useful answer is
+a multiple of where the engine makes its torque, which is not known until then.
+Default 1.5x peak torque: SCS's own cars measure 1.44-2.29x, so it is inside
+their range. Only `--price` and `--acceleration` suppress their own step.
 
 **Flags do not remove the guided prompts.** On a terminal the prompts are
 mandatory: step 4 always asks for the weight and its answer replaces whatever
@@ -526,6 +530,20 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   manual, same engine. `_ensure_rpm_ranges` fills only the missing keys with the
   median of the three mods that do declare them (the Pilot's), and warns. A
   mod that declares them is byte-for-byte untouched.
+- **A rev ceiling can only cut revs off.** `SCS_TORQUE_SHAPE` reaches zero
+  torque at **4/3 of the power peak** (8000 against 6000), so that is the limit
+  of what is useful; above it `build_power_curve` just staples a `(limit, 0.0)`
+  point on and the revs make nothing. Warn rather than accept. Two ordering
+  rules: the ceiling is written **before** the curve is built, because the curve
+  is clipped to it; and the warning is judged against 4/3 of the peak, **never**
+  against the written curve's last non-zero point — the curve is always clipped
+  to the limit, so that test is true for every value. `FINDINGS.md` §39.
+- **`synthetic_mod` had no usable engine curve.** It wrote
+  `torque_curve[0]: 0.43` — indexed, and not in the `(rpm, fraction)` form.
+  `_tune_engine_to_hp` filters on `torque_curve\[\]:`, the **empty**-bracket form
+  SII uses, so every conversion test had been silently skipping engine tuning
+  with "no torque_curve to reshape". The `KEY_RE` trap again: `[]` in a pattern
+  is a literal bracket pair, not a wildcard. Fixed; check new fixtures for it.
 - **A trimmed fixture is a test of something the real unit does not do.**
   `_ENGINE_OFFICIAL` was captioned "verbatim" with the rpm keys removed and
   `_ENGINE_INFLATED` had lost the same three; four preservation checks broke on

@@ -155,8 +155,8 @@ def synthetic_mod(root: Path, slug: str = "testcar", *,
         unit("accessory_truck_chassis", f"chassis.{slug}.xdrive", chassis))
     (vdir / "engine" / "v8.sii").write_text(unit(
         "accessory_truck_engine", f"engine.{slug}.v8",
-        ["torque: 1400", "torque_curve[0]: 0.43", "torque_curve[1]: 1.0",
-         "engine_name: V8"]))
+        ["torque: 1400", "torque_curve[]: (1500, 0.43)",
+         "torque_curve[]: (3750, 1.0)", "engine_name: V8"]))
     (vdir / "interior" / "standard.sii").write_text(unit(
         "accessory_truck_interior", f"interior.{slug}.standard", ["ui_name: std"]))
     (vdir / "interior" / "amb_blue.sii").write_text(unit(
@@ -571,7 +571,7 @@ def test_rpm_bands_scale_to_where_the_engine_peaks() -> None:
     # for maximum revs would tune the engine and leave the gearbox behind.
     eng = ("SiiNunit\n{\naccessory_engine_data : e\n{\n\ttorque: 503\n"
            "\trpm_idle: 750\n\trpm_limit: 6100\n"
-           "\ttorque_curve[0]: (1500, 0.51)\n\ttorque_curve[1]: (3750, 0.57)\n"
+           "\ttorque_curve[]: (1500, 0.51)\n\ttorque_curve[]: (3750, 0.57)\n"
            "}\n}\n")
     for prm, want in ((4000, "(2800, 4800)"), (5000, "(3500, 6000)")):
         C._rpm_ranges = None
@@ -585,6 +585,68 @@ def test_rpm_bands_scale_to_where_the_engine_peaks() -> None:
         eng, C.Report(), target_hp=300, peak_power_rpm=6000)), "rpm_range_power")
     check("the power band never exceeds the rev limit",
           int(re.findall(r"\d+", clamped)[1]) <= 6100, clamped)
+
+
+_ENGINE_CURVE = ("SiiNunit\n{\naccessory_engine_data : e\n{\n\ttorque: 503\n"
+                 "\trpm_idle: 750\n\trpm_limit: 6100\n"
+                 "\ttorque_curve[]: (1500, 0.51)\n"
+                 "\ttorque_curve[]: (3750, 0.57)\n}\n}\n")
+
+
+def test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak() -> None:
+    """The redline is a separate question from where the peak is.
+
+    Asked after the power step, because the useful answer is a multiple of where
+    the engine makes its torque -- SCS's own cars reach 1.44 to 2.29 times their
+    peak torque, so 1.5 sits inside their range rather than beside it.
+
+    The ceiling is applied BEFORE the curve is built, never after: the curve is
+    clipped to the limit, so writing it afterwards would leave a curve reaching
+    past the limiter that is supposed to stop it.
+    """
+    section("the rev limit cuts the curve, and is asked after the peak")
+    C._rpm_ranges = None
+    out = C.tune_engine(_ENGINE_CURVE, C.Report(), target_hp=300,
+                        peak_power_rpm=5000, rev_limit=5600)
+    pts = re.findall(r"torque_curve\[\]\s*:\s*\((\d+)\s*,\s*([\d.]+)\)", out)
+    check("rpm_limit written", get_key(edit_lines(out), "rpm_limit") == "5600")
+    check("the curve is clipped to the limiter, not past it",
+          max(int(r) for r, f in pts) == 5600, out)
+    check("and it falls to zero there",
+          pts[-1][1] == "0.0", out)
+
+    # No flag: the mod's own ceiling stands.
+    C._rpm_ranges = None
+    check("without --rev-limit the mod's own limit is untouched",
+          get_key(edit_lines(C.tune_engine(_ENGINE_CURVE, C.Report(), target_hp=300,
+                                           peak_power_rpm=5000)), "rpm_limit")
+          == "6100")
+
+    # A ceiling above the shape's natural end is air, and is called air.
+    C._rpm_ranges = None
+    rep = C.Report()
+    C.tune_engine(_ENGINE_CURVE, rep, target_hp=300, peak_power_rpm=5000,
+                  rev_limit=8000)
+    check("a limit above the curve's reach is warned about",
+          any("runs out at about 6667" in w for w in rep.warnings),
+          str(rep.warnings))
+
+    C._rpm_ranges = None
+    rep2 = C.Report()
+    C.tune_engine(_ENGINE_CURVE, rep2, target_hp=300, peak_power_rpm=5000,
+                  rev_limit=6000)
+    check("a limit inside the curve's reach is not",
+          not any("rev limit" in w for w in rep2.warnings), str(rep2.warnings))
+
+    # The default is measured, not chosen: 1.5 x peak torque, and the shape
+    # peaks torque at 0.75 x the power peak.
+    check("the default factor is the one SCS's cars measure",
+          1.44 <= C._DEFAULT_REV_LIMIT_FACTOR <= 2.29,
+          f"{C._DEFAULT_REV_LIMIT_FACTOR}")
+    for prm in (4000, 5000, 6000):
+        want = round(C._DEFAULT_REV_LIMIT_FACTOR * round(0.75 * prm))
+        check(f"default ceiling for a {prm} rpm power peak is {want}",
+              want == round(1.5 * round(0.75 * prm)))
 
 
 def test_rpm_band_input_is_validated() -> None:
@@ -5067,6 +5129,7 @@ def main() -> int:
     test_fallback_appends_every_slot_when_the_mod_declares_none()
     test_an_engine_with_no_rev_bands_gets_them()
     test_rpm_bands_scale_to_where_the_engine_peaks()
+    test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak()
     test_rpm_band_input_is_validated()
     test_the_engine_follows_the_transmission_it_is_paired_with()
     test_defaults_come_from_the_mods_dealer_config()
