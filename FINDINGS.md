@@ -2206,3 +2206,39 @@ Two details that only showed up under test:
 
 The CTS is now built with `--shift-up-rpm 3200`, which is 0.85x its peak torque —
 between the Victoria and the Mustang.
+
+### Measured in game: 26 s -> 11 s
+
+The CTS-V Sport Wagon, built with `--power 300 --peak-power-rpm 5000
+--shift-up-rpm 3200` and the mod's own 6100 rpm ceiling: **11 seconds to 60 mph
+on the automatic**, reported as driving well. It was 25 s when first reported,
+26 s after the automatic-preference change, and 5.3 s in manual throughout.
+
+That is the whole chain of diagnoses, with a number against each:
+
+| build | automatic | what it fixed |
+|---|---|---|
+| as first reported | 25 s | — |
+| automatic bound | 26 s | gave it a Drive mode at all; cost 5.3 -> 8 s in manual |
+| manual bound back, bands written | "faster", unrecorded | the automatic had no rev band to shift on |
+| shift point at 3200 | **11 s** | the band sat with the pickup, 0.55x peak torque |
+
+**Only the last two were measured, and only the last was measured on a build
+whose prediction it matched.** 11 s is still slower than 300 hp and 1150 kg
+should be -- the manual suggests the drivetrain is not the limit -- so the shift
+point is the obvious next lever at 0.96x rather than 0.85x. The user is content,
+so that is a note rather than an open item.
+
+### What this cost, honestly
+
+Eight commits, and three of the diagnoses in it were wrong: the top gear
+(measured on the wrong car), the automatic preference (a regression the user
+caught at 8 s against 5.3), and the pair conflict (caused by the fix before it).
+The reason they were wrong is the same each time — **each was built on the
+previous being sufficient, and only an in-game number disproved it.** Five builds
+were handed over unverified.
+
+The fix was not a better method. It was that once the user started reporting a
+number, each change became falsifiable. `game.log.txt` turned out to be readable
+from the start and was only opened after three guesses had already been made and
+two of them committed.
