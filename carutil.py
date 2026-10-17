@@ -918,18 +918,53 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     if src.exists(f"{vdir}data.sii"):
         add_accessory("data", "vehicle", f"/{vdir}data.sii")
 
+    def _offers_drive(path: str) -> bool:
+        """Whether a transmission declares a Drive mode, read from mod bytes.
+
+        `auto_mode_name` is the key a mod puts on its automatic and leaves off
+        its manual, so this separates the two on the author's own terms rather
+        than guessing from ratios or from the file name.
+        """
+        try:
+            return "auto_mode_name" in src.read_def(path)
+        except SystemExit:
+            return False
+
+    def _pick_core(name: str, declared: str | None,
+                   candidates: list[str]) -> str | None:
+        """A truck dealer names the box the truck shipped with.
+
+        That is often the manual, and for a truck it is correct. A car is an
+        automatic unless the player buys otherwise: all four of SCS's own Road
+        Trip cars use a torque-converter box, and one shipped a 3-speed and a
+        4-speed, so a gear count of three is no argument against a car.
+
+        The rule only fires when the mod ships both and the dealer named the
+        one without Drive. Measured on the four fixtures: the CTS-V Sport Wagon
+        is the only one that does, and binding its manual meant the converted
+        car had no Drive mode at all -- selecting D put the game into an
+        automatic shift logic no unit in the mod describes, which is where a
+        reported 25-second 0-60 came from.
+        """
+        if name == "transmission" and declared and not _offers_drive(declared):
+            alt = sorted(n for n in candidates if _offers_drive(n))
+            if alt:
+                rep.action(
+                    f"bound the automatic {Path(alt[0]).name} instead of the "
+                    f"manual {Path(declared).name} the truck dealer names: a "
+                    f"car has no Drive mode in a box that declares none"
+                )
+                return alt[0]
+        return declared or (sorted(candidates)[0] if candidates else None)
+
     # 2. core parts, in reference order
     core = ["chassis", "cabin", "interior", "engine", "transmission", "head_light"]
     for name in core:
-        declared = _declared(name)
-        if declared:
-            first = declared
-        else:
-            candidates = [
-                n for n in src.readable
-                if n.startswith(f"{vdir}{name}/") and n.endswith(".sii")
-            ]
-            first = sorted(candidates)[0] if candidates else None
+        candidates = [
+            n for n in src.readable
+            if n.startswith(f"{vdir}{name}/") and n.endswith(".sii")
+        ]
+        first = _pick_core(name, _declared(name), candidates)
         if first:
             add_accessory(name, "vehicle", f"/{first}", SLOT.get(name))
             parts["fallbacks"].append(f"{name}|{Path(first).name}")

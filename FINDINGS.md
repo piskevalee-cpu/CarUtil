@@ -1850,3 +1850,63 @@ look, and the file's own instruction said not to.
 This is §26's lesson again, and §18's: the thing to distrust is a confident
 statement in our own notes that nothing was changed because it looked close
 enough.
+
+## 35. The 25-second automatic was a manual gearbox with no Drive mode
+
+§34 fixed the top gear and that was **not** the whole bug. The reported car was
+a Cadillac **CTS-V Sport Wagon**, and converting it from the original `.scs`
+showed why the §34 numbers do not explain it: its automatic box measures 2.16,
+only **4.6%** outside the range, against 25% for the Escalade. A 4.6% gearing
+change cannot turn 25 seconds into 6. So §34 was a real defect and the wrong
+diagnosis for this car. Both are recorded because the wrong one is what sent us
+looking for a third time.
+
+### What the archive actually said
+
+| engine | `rpm_range_*`? | | transmission | `auto_mode_name`? |
+|---|---|---|---|---|
+| `62l.sii` | **no** | | `6_manual.sii` | **no** |
+| `62l_auto.sii` | **no** | | `6_auto.sii` | **yes** |
+
+and the generated `data.sii` read:
+
+```
+fallback[]: "transmission|6_manual.sii"
+```
+
+**The car was bound to the manual gearbox.** The mod ships a proper automatic
+next to it; the mod's own `truck_dealer` names the manual, because for a truck
+that is what it shipped with, and `_declared()` is correct to believe the
+author. Selecting Drive on a unit with no `auto_mode_name` is behaviour no unit
+in the mod describes, and neither engine declares `rpm_range_*`, so there was
+not even a band for the box to shift on. Manual mode is fast precisely because
+the driver picks the gear and all of that is bypassed.
+
+### The correction
+
+`_pick_core` prefers a candidate transmission carrying `auto_mode_name` when the
+dealer names one without it. The key is the mod's own signal for Drive, not a
+filename and not a gear count -- all four of SCS's cars use converter boxes and
+one of them a 3-speed, so gear count argues nothing.
+
+Measured across the four fixtures, it fires on the CTS and nowhere else:
+
+| mod | transmissions | bound before | bound after |
+|---|---|---|---|
+| Escalade | one, has Drive | `10_speed.sii` | unchanged |
+| Pilot | one, has Drive | `10_speed.sii` | unchanged |
+| W223 | one, no Drive | `9_speed.sii` | unchanged (no alternative) |
+| **CTS** | **two** | `6_manual.sii` | **`6_auto.sii`** |
+
+### What is still unverified
+
+The 25 s was reported on a **build with neither fix**: wrong top gear *and* no
+Drive mode. Neither correction alone was tested in game. `rpm_range_*` remains
+the open question, and it is deliberately **not** written: no engine in this mod
+declares one, so there is no author anchor to copy, and the values SCS ships are
+tied to curves we would be inventing for. That is the same failure mode §26 and
+§34 both warn about, and it needs a game.log or a tacho reading to settle
+rather than a plausible-looking triple.
+
+`game.log.txt` after a run, and what the tacho actually shows on a full-throttle
+pull, are the two measurements that would close this.

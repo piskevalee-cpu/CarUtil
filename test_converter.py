@@ -387,6 +387,66 @@ def _desktop(archive: Path) -> str:
         return z.read(names[0]).decode()
 
 
+def _transmission_unit(ident: str, drive: bool) -> str:
+    keys = ["gear_count: 10", "manual_mode_name: \"M\""]
+    if drive:
+        keys.append("auto_mode_name: D")
+    return ("SiiNunit\n{\naccessory_truck_transmission : " + ident + "\n{\n"
+            + "".join(f"\t{k}\n" for k in keys) + "}\n}\n")
+
+
+def test_a_car_binds_the_automatic_the_mod_ships() -> None:
+    """A truck dealer names the manual, and a car has no Drive without one.
+
+    Measured on a Cadillac CTS-V Sport Wagon: the truck_dealer names
+    6_manual.sii, the mod also ships 6_auto.sii carrying `auto_mode_name: D`,
+    and the conversion bound the manual. Selecting D then ran an automatic shift
+    logic that no unit in the mod describes -- its two engines declare no
+    `rpm_range_*` at all, so there was no band to shift on. The reported symptom
+    was 25 seconds to 60 mph against 5.3 in manual, same engine.
+
+    The rule keys on `auto_mode_name`, which a mod puts on its automatic and
+    leaves off its manual. It is not a filename or a gear-count guess, and it
+    only fires when the mod actually ships both.
+    """
+    section("a car prefers the automatic the mod ships")
+    vdir = "/def/vehicle/truck/testcar"
+    both = {
+        "transmission/auto.sii": _transmission_unit("transmission.testcar.auto", True),
+        "transmission/manual.sii": _transmission_unit("transmission.testcar.manual", False),
+    }
+
+    def build(td: str, dealer_slot: str, extra: dict) -> list[str]:
+        root = Path(td) / "mod"
+        dealer = root / "def" / "vehicle" / "truck_dealer" / "tester"
+        dealer.mkdir(parents=True)
+        (dealer / "tester_0.sii").write_text(
+            _dealer_unit("transm", f"{vdir}/transmission/{dealer_slot}"))
+        mod = synthetic_mod(root, extra_defs=extra)
+        return get_all_indexed(edit_lines(_data_sii(mod, Path(td) / "o.scs")),
+                               "fallback")
+
+    with tempfile.TemporaryDirectory() as td:
+        fb = build(td, "manual.sii", both)
+        check("the automatic is bound, not the dealer's manual",
+              "transmission|auto.sii" in fb, str(fb))
+        check("the manual is not bound as the default",
+              "transmission|manual.sii" not in fb, str(fb))
+
+    # The dealer's choice is still honoured when it names the automatic.
+    with tempfile.TemporaryDirectory() as td:
+        fb = build(td, "auto.sii", both)
+        check("a dealer that names the automatic is left alone",
+              "transmission|auto.sii" in fb, str(fb))
+
+    # And a mod that ships only a manual keeps it: there is nothing to prefer.
+    with tempfile.TemporaryDirectory() as td:
+        fb = build(td, "manual.sii",
+                   {"transmission/manual.sii": both["transmission/manual.sii"]})
+        check("a mod with only a manual keeps it",
+              "transmission|manual.sii" in fb, str(fb))
+
+
 def test_defaults_come_from_the_mods_dealer_config() -> None:
     """The author's dealer unit names the car's real part; believe it.
 
@@ -4846,6 +4906,7 @@ def main() -> int:
     test_collapsed_keys_survive_a_real_tune()
     test_fallback_merges_with_the_mods_own()
     test_fallback_appends_every_slot_when_the_mod_declares_none()
+    test_a_car_binds_the_automatic_the_mod_ships()
     test_defaults_come_from_the_mods_dealer_config()
     test_decorative_slots_are_never_auto_bound()
     test_output_is_not_written_inside_the_input_folder()

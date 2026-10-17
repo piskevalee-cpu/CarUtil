@@ -495,6 +495,24 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   truck mods is **already** inside SCS's car range; it was never the cause, and
   "fixing" it would have been fitting the symptom. Only some mods are affected:
   the Pilot's box measures 2.35 and converts fine, which is the control.
+  **Read that "never the cause" narrowly — see the next entry.** It held on the
+  three fixtures that declare the keys; a fourth declares none at all.
+- **A truck dealer names the manual, and a car has no Drive without one.** The
+  CTS-V Sport Wagon's `truck_dealer` names `6_manual.sii`; the mod also ships
+  `6_auto.sii` with `auto_mode_name: D`. `_declared()` believed the author, so
+  the converted car was bound to a box with no Drive mode at all, and neither
+  engine declared `rpm_range_*` — so there was not even a band to shift on.
+  `_pick_core` prefers a candidate carrying `auto_mode_name`. It is the mod's
+  own signal, not a filename or a gear count (all four SCS cars are converter
+  boxes and one is a 3-speed). Fires on the CTS and nowhere else among the four
+  fixtures. **A correct diagnosis about one car is not a correct diagnosis in
+  general** — the 25 s had *both* causes and was verified with neither fix in.
+- **`rpm_range_*` is left alone even when absent, and that is deliberate.** No
+  engine in the CTS declares it, so there is no author anchor to copy and any
+  triple would be invented. Do not "fix" it by copying SCS's values: those are
+  tied to curves belonging to SCS's own engines. Closing it needs a
+  `game.log.txt` and a tacho reading, not a plausible-looking number. See
+  `FINDINGS.md` §35.
 - **`residual_travel` is the body-roll key.** Truck mods ship 0.09–0.10 and
   SCS's cars use 0.093–0.134 — the ranges **overlap**, so no threshold separates
   them and the key must be written unconditionally. See `FINDINGS.md` §24.
