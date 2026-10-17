@@ -32,6 +32,7 @@ HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
 import carutil as C  # noqa: E402
+import hashfs  # noqa: E402
 import sii  # noqa: E402
 from sii import (  # noqa: E402
     get_all_indexed,
@@ -4335,6 +4336,49 @@ def test_hashfs_sibling_gets_an_honest_error() -> None:
         check("a missing file is not mistaken for HashFS",
               C._hashfs_version(root / "does-not-exist.scs") is None)
 
+def test_zip_wrapping_a_hashfs_container_is_not_a_crash() -> None:
+    """A .zip holding a container must unwrap, not hand it to zipfile.
+
+    is_zip is computed for the OUTER archive, then self.path is reassigned to
+    the file inside it. When that file is a HashFS container rather than a ZIP,
+    is_zip stayed True and zipfile.ZipFile() raised BadZipFile out of
+    __init__ -- a bare traceback for what is an ordinary mod shape.
+    """
+    section("a zip wrapping a HashFS container is read, not crashed on")
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # A container-shaped file: real magic, and a table the reader can open.
+        container = root / "car.scs"
+        with open(container, "wb") as fh:
+            fh.write(b"SCS#")
+            fh.write(bytes([1, 0, 0, 0]))       # version 1, salt 0
+            fh.write(b"CITY")
+            fh.write(bytes([1, 0, 0, 0]))       # one entry
+            fh.write(bytes([0x00, 0x10, 0, 0, 0, 0, 0, 0]))   # u64 table offset
+            fh.write(bytes(0x1000 - 64))
+            fh.write(bytes(32))                 # one 32-byte entry
+        wrapper = root / "wrapped.zip"
+        with zipfile.ZipFile(wrapper, "w") as z:
+            z.write(container, "car.scs")
+
+        src = C.ModSource(wrapper)
+        try:
+            check("the wrapper is unwrapped",
+                  src.path.name == "car.scs", str(src.path))
+            check("the container was recognised as one",
+                  hashfs.is_hashfs(src.path), str(src.path))
+            # The point of the fix: NOT a ZipFile, and no BadZipFile escaping
+            # __init__. A stub container the reader cannot fully open leaves
+            # hashfs None with a note, which is the honest outcome -- what must
+            # not happen is the ZipFile branch grabbing a non-ZIP.
+            check("it is not handed to zipfile, and does not raise",
+                  src.zf is None, f"zf={src.zf}")
+            check("the wrapper is reported",
+                  "car.scs" in (src.wrapper_note or ""), str(src.wrapper_note))
+        finally:
+            src.close()
+
+
 def test_path_option_reports_the_locations() -> None:
     """--path must answer its question and stop.
 
@@ -4727,6 +4771,7 @@ def main() -> int:
     test_prompt_power_never_blocks()
     test_air_resistance_override()
     test_hashfs_sibling_gets_an_honest_error()
+    test_zip_wrapping_a_hashfs_container_is_not_a_crash()
     test_path_option_reports_the_locations()
     test_game_install_is_found_by_its_contents()
     test_interrupted_write_leaves_no_broken_archive()

@@ -160,6 +160,12 @@ class ModSource:
             inner = self._unwrap_single_scs()
             if inner is not None:
                 self.path = inner
+                # The wrapper need not contain a ZIP. It can hold a HashFS
+                # container, and is_zip still describes the OUTER archive at
+                # this point -- leaving it stale hands a container to
+                # zipfile.ZipFile, which raises BadZipFile out of __init__ as
+                # a bare traceback. Re-ask the question about the real target.
+                self.is_zip = zipfile.is_zipfile(inner)
                 self.wrapper_note = (
                     f"{path.name} contained a mod archive; read "
                     f"{inner.name} inside it"
@@ -174,7 +180,7 @@ class ModSource:
                     self.names.append(info.filename)
                 if info.flag_bits & 0x1:
                     self.encrypted.add(info.filename)
-        elif path.is_file() and hashfs.is_hashfs(path):
+        elif self.path.is_file() and hashfs.is_hashfs(self.path):
             self.zf = None
             self._open_hashfs(path)
         elif self.path.is_dir():
