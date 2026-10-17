@@ -957,14 +957,44 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
                 return alt[0]
         return declared or (sorted(candidates)[0] if candidates else None)
 
+    def _candidates(name: str) -> list[str]:
+        return [n for n in src.readable
+                if n.startswith(f"{vdir}{name}/") and n.endswith(".sii")]
+
+    def _default_of(path: str) -> str | None:
+        """The part a unit's own defaults[] names, when it names one that exists."""
+        try:
+            text = src.read_def(path)
+        except SystemExit:
+            return None
+        m = re.search(r'^\s*defaults\[\]\s*:\s*"([^"]+)"', text, re.M)
+        if not m:
+            return None
+        want = m.group(1).lstrip("/")
+        return want if src.exists(want) else None
+
     # 2. core parts, in reference order
+    #
+    # The transmission is resolved first because it decides the engine. Both of
+    # the CTS-V Sport Wagon's transmissions declare `conflict_with[]: engine`,
+    # so the two are only valid as the pairs their own defaults[] name: 62l
+    # with 6_manual, 62l_auto with 6_auto. Resolving them independently binds a
+    # combination the mod forbids outright, and the game answers a conflict by
+    # dropping an accessory -- which is a measured 26-second 0-60.
+    transmission = _pick_core("transmission", _declared("transmission"),
+                              _candidates("transmission"))
+    paired_engine = None
+    if transmission:
+        partner = _default_of(transmission)
+        if partner and "/engine/" in partner:
+            paired_engine = partner
+
     core = ["chassis", "cabin", "interior", "engine", "transmission", "head_light"]
     for name in core:
-        candidates = [
-            n for n in src.readable
-            if n.startswith(f"{vdir}{name}/") and n.endswith(".sii")
-        ]
-        first = _pick_core(name, _declared(name), candidates)
+        if name == "engine" and paired_engine:
+            first = paired_engine
+        else:
+            first = _pick_core(name, _declared(name), _candidates(name))
         if first:
             add_accessory(name, "vehicle", f"/{first}", SLOT.get(name))
             parts["fallbacks"].append(f"{name}|{Path(first).name}")

@@ -505,8 +505,22 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   `_pick_core` prefers a candidate carrying `auto_mode_name`. It is the mod's
   own signal, not a filename or a gear count (all four SCS cars are converter
   boxes and one is a 3-speed). Fires on the CTS and nowhere else among the four
-  fixtures. **A correct diagnosis about one car is not a correct diagnosis in
-  general** — the 25 s had *both* causes and was verified with neither fix in.
+  fixtures.
+- **Switching one half of a declared-incompatible pair is not a fix, it is the
+  next bug.** The CTS took **26 s** after §35 — *worse* than the 25 s before it.
+  Both its transmissions carry `conflict_with[]` against an engine and name
+  their partner in `defaults[]`: `62l`↔`6_manual`, `62l_auto`↔`6_auto`. Binding
+  the automatic while leaving the engine on the manual's partner is a pairing the
+  mod forbids, and the game answers a conflict by dropping an accessory. The
+  transmission is now resolved **first** and its `defaults[]` picks the engine.
+  Believing the author is right; applying that rule to both halves of a pair the
+  author declared incompatible is how you build a forbidden pair.
+- **Three diagnoses in a row on one car, and only the last was driven.** The
+  top gear was measured on the wrong vehicle, the Drive mode was incomplete, and
+  the pair conflict was *caused by* the fix before it. Each was built assuming
+  the previous was sufficient, and the in-game number is what disproved it.
+  **Do not stack a fix on an untested one.** Measure the previous one in game
+  before the next is built on it. See `FINDINGS.md` §36.
 - **`rpm_range_*` is left alone even when absent, and that is deliberate.** No
   engine in the CTS declares it, so there is no author anchor to copy and any
   triple would be invented. Do not "fix" it by copying SCS's values: those are

@@ -387,10 +387,30 @@ def _desktop(archive: Path) -> str:
         return z.read(names[0]).decode()
 
 
-def _transmission_unit(ident: str, drive: bool) -> str:
+def _engine_unit(ident: str, name: str, partner: str) -> str:
+    suitable = partner.rsplit("/", 1)[-1].replace(".sii", "") + ".engine"
+    return ("SiiNunit\n{\naccessory_truck_engine : " + ident + "\n{\n"
+            f"\ttorque: 1400\n\tengine_name: {name}\n"
+            f'\tdefaults[]: "{partner}"\n'
+            f'\tsuitable_for[]: "{suitable}"\n'
+            "}\n}\n")
+
+
+def _transmission_unit(ident: str, drive: bool,
+                       partner: tuple[str, str] | None = None) -> str:
+    """A transmission unit, optionally paired with an engine.
+
+    `partner` is (engine_path, engine_ident). Both of the real mod's boxes carry
+    a defaults[] naming the engine they belong with and a conflict_with[] naming
+    the engine they must NOT be bound to, which is what makes the pair load
+    bearing rather than a convention.
+    """
     keys = ["gear_count: 10", "manual_mode_name: \"M\""]
     if drive:
         keys.append("auto_mode_name: D")
+    if partner:
+        keys.append(f'defaults[]: "{partner[0]}"')
+        keys.append(f'conflict_with[]: {partner[1]}')
     return ("SiiNunit\n{\naccessory_truck_transmission : " + ident + "\n{\n"
             + "".join(f"\t{k}\n" for k in keys) + "}\n}\n")
 
@@ -445,6 +465,51 @@ def test_a_car_binds_the_automatic_the_mod_ships() -> None:
                    {"transmission/manual.sii": both["transmission/manual.sii"]})
         check("a mod with only a manual keeps it",
               "transmission|manual.sii" in fb, str(fb))
+
+
+def test_the_engine_follows_the_transmission_it_is_paired_with() -> None:
+    """A transmission that conflicts with the engine decides which engine it is.
+
+    The CTS-V Sport Wagon ships two mutually exclusive pairs -- 62l with
+    6_manual, 62l_auto with 6_auto -- and both transmissions declare
+    `conflict_with[]: engine`. Binding 62l to 6_auto is a combination the mod
+    forbids, and the game resolves a conflict by dropping an accessory. That is
+    a measured 26-second 0-60 against 5.3 in manual on the same engine.
+
+    So the transmission is resolved first and its own defaults[] picks the
+    engine. Resolving the two independently, which is what this used to do,
+    produces the forbidden pair.
+    """
+    section("the engine is the one the bound transmission defaults to")
+    vdir = "/def/vehicle/truck/testcar"
+    both = {
+        "transmission/auto.sii": _transmission_unit(
+            "transmission.testcar.auto", True,
+            (f"{vdir}/engine/auto.sii", "engine.testcar.manual")),
+        "transmission/manual.sii": _transmission_unit(
+            "transmission.testcar.manual", False,
+            (f"{vdir}/engine/manual.sii", "engine.testcar.auto")),
+        "engine/auto.sii": _engine_unit("engine.testcar.auto", "v8_auto",
+                                        f"{vdir}/transmission/auto.sii"),
+        "engine/manual.sii": _engine_unit("engine.testcar.manual", "v8_manual",
+                                          f"{vdir}/transmission/manual.sii"),
+    }
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "mod"
+        dealer = root / "def" / "vehicle" / "truck_dealer" / "tester"
+        dealer.mkdir(parents=True)
+        (dealer / "tester_0.sii").write_text(
+            _dealer_unit("engine", f"{vdir}/engine/manual.sii")
+            + _dealer_unit("transm", f"{vdir}/transmission/manual.sii"))
+        mod = synthetic_mod(root, extra_defs=both)
+        fb = get_all_indexed(edit_lines(_data_sii(mod, Path(td) / "o.scs")),
+                             "fallback")
+        check("the automatic is bound", "transmission|auto.sii" in fb, str(fb))
+        check("and its own engine with it, not the manual's",
+              "engine|auto.sii" in fb, str(fb))
+        check("the manual's engine is not bound to the automatic",
+              "engine|manual.sii" not in fb, str(fb))
 
 
 def test_defaults_come_from_the_mods_dealer_config() -> None:
@@ -4907,6 +4972,7 @@ def main() -> int:
     test_fallback_merges_with_the_mods_own()
     test_fallback_appends_every_slot_when_the_mod_declares_none()
     test_a_car_binds_the_automatic_the_mod_ships()
+    test_the_engine_follows_the_transmission_it_is_paired_with()
     test_defaults_come_from_the_mods_dealer_config()
     test_decorative_slots_are_never_auto_bound()
     test_output_is_not_written_inside_the_input_folder()

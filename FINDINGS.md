@@ -1910,3 +1910,60 @@ rather than a plausible-looking triple.
 
 `game.log.txt` after a run, and what the tacho actually shows on a full-throttle
 pull, are the two measurements that would close this.
+
+## 36. A transmission that conflicts with the engine decides which engine it is
+
+Continuing §35. The CTS-V Sport Wagon still took **26 seconds** to 60 mph after
+binding the automatic — so §35's fix was necessary and not sufficient, and the
+26 s had a second cause that §35 introduced.
+
+### The defect
+
+`3cb6d68` bound `6_auto.sii` and left the engine on `6_manual`'s partner:
+
+```
+fallback[]: "engine|62l.sii"
+fallback[]: "transmission|6_auto.sii"
+```
+
+The mod ships two mutually exclusive pairs and enforces them:
+
+| engine | `defaults[]` | paired transmission |
+|---|---|---|
+| `62l.wagan.engine` | `6_manual.sii` | `6_auto` names it `conflict_with[]` |
+| `62l_auto.wagan.engine` | `6_auto.sii` | `6_manual` names it `conflict_with[]` |
+
+Both transmissions declare `conflict_with[]` against an engine. The bound pair
+was one the mod forbids outright, and the game resolves a conflict by dropping
+an accessory — which is a car with no working drivetrain and a 26-second 0-60.
+
+**This was self-inflicted.** The transmission and engine were resolved
+independently, each by the dealer's declaration, and switching one without the
+other created the mismatch. §35's own reasoning — believe the author — is right,
+and it is exactly that rule applied to both halves of a pair the author had
+declared incompatible.
+
+### The correction
+
+The transmission is resolved first, and its own `defaults[]` picks the engine.
+An engine slot bound to a partner the chosen transmission conflicts with is the
+bug, not a preference.
+
+### What it cost, and what it bought
+
+Three diagnoses in a row on this one car, and the two before this were wrong:
+
+- §34, the top gear — measured on the **Escalade**, which is not the car that
+  was reported. Real defect, wrong car: the CTS is only 4.6% out.
+- §35, the missing Drive mode — right about what it found, incomplete.
+- §36, the conflicting pair — **caused by §35.**
+
+Each was built on the previous one being sufficient, which the in-game 25 → 26 s
+disproved. Two of the three diagnoses would have been caught by actually driving
+the car, and only one of the three was ever tested in game before the next was
+built on it.
+
+The remaining open question is unchanged and still unmeasured: neither CTS engine
+declares `rpm_range_*`, unlike all four of SCS's own car engines. It is now the
+only structural difference left, and it stays unwritten until there is a
+`game.log.txt` or a tacho reading to anchor it.
