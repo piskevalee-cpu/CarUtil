@@ -1568,6 +1568,61 @@ _RPM_RANGE_DEFAULTS = {
 }
 _RPM_RANGE_ORDER = ("rpm_range_low_gear", "rpm_range_high_gear", "rpm_range_power")
 
+# The bands above are the median of three mods measured, and all three of their
+# engines peak their power within 100 rpm of 5000 -- which is also where this
+# converter rebuilds engines by default. A fixed pair of numbers is therefore
+# only ever right for an engine near that peak: a car making 503 Nm at 4000 rpm
+# and one making the same 503 Nm at 6000 rpm cannot both be served by an upshift
+# at 1950, and the second one leaves its whole power band unused.
+#
+# So the bands scale with where the engine actually peaks. Divided by 5000 they
+# are clean fractions, which is what makes this a derivation rather than a
+# curve fit: low (0.27, 0.39), high (0.29, 0.41), power (0.70, 1.20). At
+# P = 5000 they reproduce the measured values exactly, so nothing moves for the
+# case they were measured from.
+_RPM_RANGE_REFERENCE_RPM = 5000
+
+
+def _rpm_range_bands(power_peak_rpm: int | None,
+                     rpm_limit: int | None = None) -> dict[str, str]:
+    """The measured car bands, scaled to where this engine makes its power.
+
+    The power band's top is clamped to the rev limit: at 1.20x a 6000 rpm peak
+    it would otherwise ask the game to treat 7200 rpm as full power on an engine
+    that cuts out at 6100.
+    """
+    p = power_peak_rpm or _RPM_RANGE_REFERENCE_RPM
+    p = max(1000, int(p))
+
+    def band(lo: int, hi: int) -> str:
+        return f"({round(lo * p / _RPM_RANGE_REFERENCE_RPM)}, " \
+               f"{round(hi * p / _RPM_RANGE_REFERENCE_RPM)})"
+
+    power = (round(3500 * p / _RPM_RANGE_REFERENCE_RPM),
+             round(6000 * p / _RPM_RANGE_REFERENCE_RPM))
+    if rpm_limit and power[1] > rpm_limit:
+        power = (power[0], int(rpm_limit))
+
+    return {
+        "rpm_range_low_gear": band(1350, 1950),
+        "rpm_range_high_gear": band(1450, 2050),
+        "rpm_range_power": f"({power[0]}, {power[1]})",
+    }
+
+
+def _power_peak_rpm(text: str) -> int | None:
+    """Where an engine's own torque curve makes the most power.
+
+    Read from the curve rather than from `rpm_limit`: an engine with a high
+    limiter and an early peak is not a peak-at-the-limit engine, and scaling to
+    the limiter would move the bands onto revs the engine never works at.
+    """
+    pts = [(int(r), float(f)) for r, f in re.findall(
+        r"^\s*torque_curve\[\]\s*:\s*\((\d+)\s*,\s*([\d.]+)", text, re.M)]
+    if not pts:
+        return None
+    return max(pts, key=lambda p: p[0] * p[1])[0]
+
 # A mod with several engines must be asked once, not once per engine.
 _rpm_ranges: dict[str, str] | None = None
 
@@ -1583,7 +1638,7 @@ def _parse_band(raw: str) -> str | None:
     return f"({lo}, {hi})"
 
 
-def _ask_band(key: str) -> str:
+def _ask_band(key: str, default: str) -> str:
     """One band, asked plainly. Empty input is an omission and re-asks.
 
     No bracketed suggestion in the label: a visible default invites the answer
@@ -1591,24 +1646,25 @@ def _ask_band(key: str) -> str:
     which is how prompt_weight does it. Ctrl-C takes the default, as everywhere
     else here -- otherwise a mandatory field would be unescapable.
     """
-    nums = re.findall(r"\d+", _RPM_RANGE_DEFAULTS[key])
+    nums = re.findall(r"\d+", default)
     while True:
         try:
             raw = input(f"  {key} as 'min, max': ").strip()
         except (EOFError, KeyboardInterrupt):
-            print(f"\n  cancelled -- using {_RPM_RANGE_DEFAULTS[key]}.")
-            return _RPM_RANGE_DEFAULTS[key]
+            print(f"\n  cancelled -- using {default}.")
+            return default
         band = _parse_band(raw) if raw else None
         if band:
             return band
         print(f"  -> two whole numbers, low then high, e.g. {nums[0]}, {nums[1]}")
 
 
-def prompt_rpm_ranges() -> dict[str, str]:
+def prompt_rpm_ranges(bands: dict[str, str]) -> dict[str, str]:
     """Ask whether to take the measured car bands or to type each one.
 
-    Reached only for an engine that declares none of them. Off a terminal the
-    defaults are taken silently, so scripted runs and CI never block.
+    `bands` are already scaled to this engine, so what is offered is what would
+    be written. Reached only for an engine that declares none of them. Off a
+    terminal they are taken silently, so scripted runs and CI never block.
     """
     global _rpm_ranges
     if _rpm_ranges is not None:
@@ -1619,7 +1675,7 @@ def prompt_rpm_ranges() -> dict[str, str]:
         # engines asks once; caching here would also make an off-terminal run
         # suppress a prompt later in the same process, which is exactly what a
         # test suite doing many conversions would trip over.
-        return dict(_RPM_RANGE_DEFAULTS)
+        return dict(bands)
 
     print()
     _ui.heading("This engine declares no rev bands for the automatic")
@@ -1632,19 +1688,20 @@ def prompt_rpm_ranges() -> dict[str, str]:
     print("  for a truck and changes up far too early. Measured on a Cadillac")
     print("  that was a 26-second 0-60 against 5.3 in manual, same engine.")
     print()
-    print("  Bands measured from the mods that do declare them:")
+    print("  Measured from the mods that do declare them, scaled to this")
+    print("  engine's power peak:")
     for key in _RPM_RANGE_ORDER:
-        print(f"    {key:<22} {_RPM_RANGE_DEFAULTS[key]}")
+        print(f"    {key:<22} {bands[key]}")
     print()
     options = [
-        ("use the measured car defaults", "what the other mods ship"),
+        ("use the measured car defaults", "scaled to this engine"),
         ("enter each value manually", "one prompt per band"),
     ]
     idx = _ui.arrow_menu(options, default=0)
     if idx == 0:
-        _rpm_ranges = dict(_RPM_RANGE_DEFAULTS)
+        _rpm_ranges = dict(bands)
     else:
-        _rpm_ranges = {key: _ask_band(key) for key in _RPM_RANGE_ORDER}
+        _rpm_ranges = {key: _ask_band(key, bands[key]) for key in _RPM_RANGE_ORDER}
     return dict(_rpm_ranges)
 
 
@@ -2736,7 +2793,29 @@ def _drop_truck_engine_keys(lines: list[str], rep: Report) -> list[str]:
     return out
 
 
-def _ensure_rpm_ranges(text: str, rep: Report) -> str:
+def _requested_power_peak(text: str, peak_power_rpm: int | None) -> int | None:
+    """The rpm at which a rebuilt curve will make its most power.
+
+    Mirrors the clamping in `_tune_engine_to_hp`, which reads the rev limit from
+    the unit and caps the request at it. Duplicating the cap rather than
+    extracting a shared helper keeps the two paths independent -- the curve this
+    predicts is only ever used to scale three numbers.
+    """
+    limit = re.search(r"^\s*rpm_limit:\s*(\d+)", text, re.M)
+    if limit:
+        rpm_limit = int(limit.group(1))
+    else:
+        revs = [int(r) for r in re.findall(
+            r"^\s*torque_curve\[\]\s*:\s*\((\d+)\s*,", text, re.M)]
+        if not revs:
+            return None
+        rpm_limit = max(revs)
+    return max(1000, min(int(peak_power_rpm or _DEFAULT_PEAK_POWER_RPM),
+                         rpm_limit))
+
+
+def _ensure_rpm_ranges(text: str, rep: Report,
+                       power_peak_rpm: int | None = None) -> str:
     """Give an engine the rev bands the automatic shifts on, when it has none.
 
     A mod that declares them is left completely alone -- the Escalade, the Pilot
@@ -2744,6 +2823,9 @@ def _ensure_rpm_ranges(text: str, rep: Report) -> str:
     defect rather than a universal one. Only the gap is filled, and only the
     keys that are actually missing, so a mod with two of the three keeps them
     untouched.
+
+    The bands are scaled to `power_peak_rpm`, so an engine that peaks early is
+    not handed an upshift point that belongs to one that peaks late.
     """
     if "accessory_engine_data" not in text:
         return text
@@ -2752,6 +2834,10 @@ def _ensure_rpm_ranges(text: str, rep: Report) -> str:
     if not missing:
         return text
 
+    peak = power_peak_rpm or _power_peak_rpm(text)
+    limit = re.search(r"^\s*rpm_limit:\s*(\d+)", text, re.M)
+    bands = _rpm_range_bands(peak, int(limit.group(1)) if limit else None)
+
     rep.warn(
         f"engine declares none of {_RPM_RANGE_ORDER[0]}, {_RPM_RANGE_ORDER[1]} "
         f"and {_RPM_RANGE_ORDER[2]}; every car engine in the base game sets all "
@@ -2759,11 +2845,12 @@ def _ensure_rpm_ranges(text: str, rep: Report) -> str:
         f"falls back to a default tuned for a truck, which changes up far too "
         f"early -- measured on a Cadillac, a 26-second 0-60 against 5.3 in "
         f"manual on the same engine. Writing the bands measured from the mods "
-        f"that do declare them: "
-        + ", ".join(f"{k} {_RPM_RANGE_DEFAULTS[k]}" for k in missing) + "."
+        f"that do declare them, scaled to this engine peaking at "
+        f"{peak} rpm: "
+        + ", ".join(f"{k} {bands[k]}" for k in missing) + "."
     )
 
-    chosen = prompt_rpm_ranges()
+    chosen = prompt_rpm_ranges(bands)
     for key in missing:
         lines = set_key(lines, key, chosen[key])
     return "\n".join(lines) + "\n"
@@ -2797,9 +2884,16 @@ def tune_engine(text: str, rep: Report, force: bool = False,
     if tonnes <= 0:
         raise ValueError("tonnes must be positive")
 
-    # Before every early return, so it covers the horsepower path too -- that
-    # one rebuilds the curve and returns before any other tuning runs.
-    text = _ensure_rpm_ranges(text, rep)
+    # Before every early return, so it covers the horsepower path too -- that one
+    # rebuilds the curve and returns before any other tuning runs. The bands are
+    # scaled to the peak this engine WILL have, not the one it has now, so the
+    # rebuilt case passes the requested power peak rather than reading the curve
+    # that is about to be replaced.
+    if target_hp is not None:
+        text = _ensure_rpm_ranges(text, rep, _requested_power_peak(
+            text, peak_power_rpm))
+    else:
+        text = _ensure_rpm_ranges(text, rep)
 
     # An explicit --engine-torque or --acceleration replaces the ratio; both
     # are deliberate overrides, not second opinions.

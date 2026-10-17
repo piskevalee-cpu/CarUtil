@@ -507,6 +507,17 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   Preferring the automatic was measured at **5.3 s → 8 s in manual**, because
   the mode-M of a torque-converter box is not a manual box. The binding stays
   with the author. `FINDINGS.md` §37.
+- **`rpm_range_*` scales with the engine's power peak, never fixed.** The
+  measured median is the median of three mods whose engines all peak within
+  100 rpm of 5000, so it is only correct for an engine near that peak — and
+  this converter rebuilds every engine to a *requested* peak. Divide the six
+  numbers by 5000 and they are clean fractions, which is the point: (0.27,
+  0.39), (0.29, 0.41), (0.70, **1.20**), reproducing the measured values exactly
+  at P=5000 and scaling correctly elsewhere. Two guards: take the peak from the
+  curve (argmax of `rpm * f`), never from `rpm_limit`, because a high limiter
+  with an early peak is not a peak-at-the-limit engine; and clamp the power
+  band's top to `rpm_limit`, or 1.20x a 6000 rpm peak asks for power at 7200.
+  Our shape peaks **torque** at 0.75x the power peak. `FINDINGS.md` §38.
 - **`rpm_range_*` is the whole bug, and absence is the signal.** Neither CTS
   engine declares `rpm_range_low_gear` / `_high_gear` / `_power`; it is the
   only mod measured that does not, and without them the automatic has no rev

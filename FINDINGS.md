@@ -2032,3 +2032,47 @@ becomes a test of something the real unit does not do.
 The 26 s was measured with no bands and the automatic bound. This build reverts
 the binding and adds the bands, so it has not been driven. It is the first of
 these three attempts to be tested in game before the next one was built on it.
+
+## 38. The rev bands scale to the engine, because a fixed pair cannot be right
+
+The §37 build was driven: **faster**, though the user could not record the
+number. That confirms the missing bands were the fault.
+
+But the bands written were fixed numbers, and that is only ever right for one
+engine. The same 503 Nm peaking at 4000 rpm and the same 503 Nm peaking at 6000
+rpm cannot both be served by an upshift at 1950 rpm — the second leaves its
+entire power band unused, which is the user's own observation: a car that makes
+its torque at 6000 will be slower than one that makes it at 4000, given equal
+torque figures.
+
+So the bands now scale with where the engine actually peaks. Expressed against
+the 5000 rpm peak the three measured mods sit at, the six numbers divide into
+clean fractions:
+
+| band | fraction of P | at P = 5000 |
+|---|---|---|
+| `rpm_range_low_gear` | 0.27, 0.39 | (1350, 1950) |
+| `rpm_range_high_gear` | 0.29, 0.41 | (1450, 2050) |
+| `rpm_range_power` | 0.70, **1.20** | (3500, 6000) |
+
+That is what makes this a derivation and not a curve fit: at P = 5000 it
+reproduces the measured median exactly, and it is the case those numbers were
+measured from, so nothing moves for it.
+
+Two details that are load bearing:
+
+- **The peak is read, not assumed.** For a rebuilt curve it is the requested
+  `--peak-power-rpm` (clamped to `rpm_limit`, mirroring `_tune_engine_to_hp`), and
+  for an engine whose curve is merely rescaled it is the argmax of `rpm * f`
+  from the curve itself. Reading `rpm_limit` instead would be wrong: an engine
+  with a high limiter and an early peak is not a peak-at-the-limit engine.
+- **The power band's top is clamped to the rev limit.** At 1.20x a 6000 rpm
+  peak it would otherwise ask the game to treat 7200 rpm as full power on an
+  engine that cuts out at 6100.
+
+Note also that our shape puts **torque peak at 0.75x the power peak**, so on the
+CTS rebuilt to peak power at 5000 the torque peak is 3750 rpm — measured, and
+worth recording because the user read the car's peak torque as being at 6000,
+which is that engine's `rpm_limit`. At 6000 rpm the curve is at 0.0; at 5000 it
+is 428 of 503 Nm. If in-game the effective peak really is elsewhere, the number
+that says so is more useful than either of our readings.

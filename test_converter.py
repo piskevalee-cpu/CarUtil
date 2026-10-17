@@ -541,6 +541,52 @@ def test_an_engine_with_no_rev_bands_gets_them() -> None:
           == C._RPM_RANGE_DEFAULTS["rpm_range_power"], hp)
 
 
+def test_rpm_bands_scale_to_where_the_engine_peaks() -> None:
+    """A fixed band is only right for one engine, and we build a different one.
+
+    503 Nm peaking at 4000 rpm and 503 Nm peaking at 6000 rpm cannot both be
+    served by an upshift at 1950; the second one leaves its whole power band
+    unused. So the measured bands scale with the engine's power peak.
+
+    Expressed against the 5000 rpm peak the three measured mods sit at, the six
+    numbers are clean fractions -- (0.27, 0.39), (0.29, 0.41), (0.70, 1.20) --
+    which is what makes this a derivation rather than a fit: at P = 5000 it
+    reproduces the measured median exactly.
+    """
+    section("the rev bands follow the engine's own power peak")
+    at_ref = C._rpm_range_bands(5000)
+    check("the reference peak reproduces the measured median exactly",
+          at_ref == C._RPM_RANGE_DEFAULTS, str(at_ref))
+
+    early = C._rpm_range_bands(4000)
+    late = C._rpm_range_bands(6000)
+    for key in C._RPM_RANGE_ORDER:
+        e = int(re.search(r"\d+", early[key]).group(0))
+        r = int(re.search(r"\d+", at_ref[key]).group(0))
+        l = int(re.findall(r"\d+", late[key])[1])
+        check(f"{key} moves up with a later peak",
+              e < r < l, f"4000={early[key]} 5000={at_ref[key]} 6000={late[key]}")
+
+    # End to end: --peak-power-rpm has to reach the written bands, or the prompt
+    # for maximum revs would tune the engine and leave the gearbox behind.
+    eng = ("SiiNunit\n{\naccessory_engine_data : e\n{\n\ttorque: 503\n"
+           "\trpm_idle: 750\n\trpm_limit: 6100\n"
+           "\ttorque_curve[0]: (1500, 0.51)\n\ttorque_curve[1]: (3750, 0.57)\n"
+           "}\n}\n")
+    for prm, want in ((4000, "(2800, 4800)"), (5000, "(3500, 6000)")):
+        C._rpm_ranges = None
+        got = get_key(edit_lines(C.tune_engine(
+            eng, C.Report(), target_hp=300, peak_power_rpm=prm)), "rpm_range_power")
+        check(f"--peak-power-rpm {prm} moves the band", got == want, got)
+
+    # An engine cannot make power above its own limiter.
+    C._rpm_ranges = None
+    clamped = get_key(edit_lines(C.tune_engine(
+        eng, C.Report(), target_hp=300, peak_power_rpm=6000)), "rpm_range_power")
+    check("the power band never exceeds the rev limit",
+          int(re.findall(r"\d+", clamped)[1]) <= 6100, clamped)
+
+
 def test_rpm_band_input_is_validated() -> None:
     section("a rev band asked for by hand is validated")
     check("two numbers", C._parse_band("1350, 1950") == "(1350, 1950)")
@@ -5020,6 +5066,7 @@ def main() -> int:
     test_fallback_merges_with_the_mods_own()
     test_fallback_appends_every_slot_when_the_mod_declares_none()
     test_an_engine_with_no_rev_bands_gets_them()
+    test_rpm_bands_scale_to_where_the_engine_peaks()
     test_rpm_band_input_is_validated()
     test_the_engine_follows_the_transmission_it_is_paired_with()
     test_defaults_come_from_the_mods_dealer_config()
