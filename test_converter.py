@@ -415,58 +415,6 @@ def _transmission_unit(ident: str, drive: bool,
             + "".join(f"\t{k}\n" for k in keys) + "}\n}\n")
 
 
-def test_a_car_binds_the_automatic_the_mod_ships() -> None:
-    """A truck dealer names the manual, and a car has no Drive without one.
-
-    Measured on a Cadillac CTS-V Sport Wagon: the truck_dealer names
-    6_manual.sii, the mod also ships 6_auto.sii carrying `auto_mode_name: D`,
-    and the conversion bound the manual. Selecting D then ran an automatic shift
-    logic that no unit in the mod describes -- its two engines declare no
-    `rpm_range_*` at all, so there was no band to shift on. The reported symptom
-    was 25 seconds to 60 mph against 5.3 in manual, same engine.
-
-    The rule keys on `auto_mode_name`, which a mod puts on its automatic and
-    leaves off its manual. It is not a filename or a gear-count guess, and it
-    only fires when the mod actually ships both.
-    """
-    section("a car prefers the automatic the mod ships")
-    vdir = "/def/vehicle/truck/testcar"
-    both = {
-        "transmission/auto.sii": _transmission_unit("transmission.testcar.auto", True),
-        "transmission/manual.sii": _transmission_unit("transmission.testcar.manual", False),
-    }
-
-    def build(td: str, dealer_slot: str, extra: dict) -> list[str]:
-        root = Path(td) / "mod"
-        dealer = root / "def" / "vehicle" / "truck_dealer" / "tester"
-        dealer.mkdir(parents=True)
-        (dealer / "tester_0.sii").write_text(
-            _dealer_unit("transm", f"{vdir}/transmission/{dealer_slot}"))
-        mod = synthetic_mod(root, extra_defs=extra)
-        return get_all_indexed(edit_lines(_data_sii(mod, Path(td) / "o.scs")),
-                               "fallback")
-
-    with tempfile.TemporaryDirectory() as td:
-        fb = build(td, "manual.sii", both)
-        check("the automatic is bound, not the dealer's manual",
-              "transmission|auto.sii" in fb, str(fb))
-        check("the manual is not bound as the default",
-              "transmission|manual.sii" not in fb, str(fb))
-
-    # The dealer's choice is still honoured when it names the automatic.
-    with tempfile.TemporaryDirectory() as td:
-        fb = build(td, "auto.sii", both)
-        check("a dealer that names the automatic is left alone",
-              "transmission|auto.sii" in fb, str(fb))
-
-    # And a mod that ships only a manual keeps it: there is nothing to prefer.
-    with tempfile.TemporaryDirectory() as td:
-        fb = build(td, "manual.sii",
-                   {"transmission/manual.sii": both["transmission/manual.sii"]})
-        check("a mod with only a manual keeps it",
-              "transmission|manual.sii" in fb, str(fb))
-
-
 def test_the_engine_follows_the_transmission_it_is_paired_with() -> None:
     """A transmission that conflicts with the engine decides which engine it is.
 
@@ -505,11 +453,105 @@ def test_the_engine_follows_the_transmission_it_is_paired_with() -> None:
         mod = synthetic_mod(root, extra_defs=both)
         fb = get_all_indexed(edit_lines(_data_sii(mod, Path(td) / "o.scs")),
                              "fallback")
-        check("the automatic is bound", "transmission|auto.sii" in fb, str(fb))
-        check("and its own engine with it, not the manual's",
-              "engine|auto.sii" in fb, str(fb))
-        check("the manual's engine is not bound to the automatic",
-              "engine|manual.sii" not in fb, str(fb))
+        check("the dealer's transmission is bound, automatic preference aside",
+              "transmission|manual.sii" in fb, str(fb))
+        check("and its own engine with it",
+              "engine|manual.sii" in fb, str(fb))
+        check("the other engine, which it conflicts with, is not",
+              "engine|auto.sii" not in fb, str(fb))
+
+        # A dealer that names the other transmission gets that one's engine,
+        # which is the property the first case does not exercise.
+        root2 = Path(td) / "mod2"
+        dealer2 = root2 / "def" / "vehicle" / "truck_dealer" / "tester"
+        dealer2.mkdir(parents=True)
+        (dealer2 / "tester_0.sii").write_text(
+            _dealer_unit("transm", f"{vdir}/transmission/auto.sii"))
+        mod2 = synthetic_mod(root2, extra_defs=both)
+        fb2 = get_all_indexed(edit_lines(_data_sii(mod2, Path(td) / "o2.scs")),
+                              "fallback")
+        check("switching transmission switches its engine too",
+              "transmission|auto.sii" in fb2 and "engine|auto.sii" in fb2, str(fb2))
+        check("even when the dealer never named an engine",
+              "engine|manual.sii" not in fb2, str(fb2))
+
+
+def test_an_engine_with_no_rev_bands_gets_them() -> None:
+    """The automatic has no shift band unless the engine declares one.
+
+    Measured on a Cadillac CTS-V Sport Wagon: 26 seconds to 60 mph on the
+    automatic, 5.3 in manual, same engine. Both its engines declare none of
+    rpm_range_low_gear / _high_gear / _power -- and neither does any other mod
+    measured: the Escalade, the Pilot and the W223 all set all three, as do all
+    four of SCS's own car engines. Without them the game falls back to a default
+    tuned for a truck and changes up far too early.
+
+    The defaults written are the median of the three mods that do declare them,
+    so a mod that already has bands is left byte-for-byte alone and only the gap
+    is filled.
+    """
+    section("an engine with no rev bands is given measured ones")
+    with_bands = "\n".join(f"\t{k}: {C._RPM_RANGE_DEFAULTS[k]}"
+                       for k in C._RPM_RANGE_ORDER) + "\n"
+
+    def engine(body: str) -> str:
+        return ("SiiNunit\n{\naccessory_engine_data : e\n{\n"
+                f"\ttorque: 503\n\trpm_idle: 750\n{body}\tengine_name: V8\n"
+                "}\n}\n")
+
+    # 1. none present: all three written, and the user is told.
+    C._rpm_ranges = None
+    rep = C.Report()
+    out = C.tune_engine(engine(""), rep)
+    lines = edit_lines(out)
+    for key in C._RPM_RANGE_ORDER:
+        check(f"{key} written",
+              get_key(lines, key) == C._RPM_RANGE_DEFAULTS[key], out)
+    check("the user is warned, not left to guess",
+          any("rpm_range_low_gear" in w for w in rep.warnings), str(rep.warnings))
+
+    # 2. all present: untouched. The other three mods take this path.
+    C._rpm_ranges = None
+    already = engine(with_bands)
+    rep2 = C.Report()
+    check("an engine that declares them is untouched",
+          C.tune_engine(already, rep2) == already)
+    check("and is not warned about",
+          not any("rpm_range" in w for w in rep2.warnings), str(rep2.warnings))
+
+    # 3. only some missing: only the gap is filled.
+    C._rpm_ranges = None
+    partial = engine("\trpm_range_low_gear: (1250, 1850)\n"
+                     "\trpm_range_power: (1800, 6000)\n")
+    lines3 = edit_lines(C.tune_engine(partial, C.Report()))
+    check("a band already declared is kept",
+          get_key(lines3, "rpm_range_low_gear") == "(1250, 1850)")
+    check("the missing one is filled",
+          get_key(lines3, "rpm_range_high_gear")
+          == C._RPM_RANGE_DEFAULTS["rpm_range_high_gear"])
+    check("and the third is still the author's",
+          get_key(lines3, "rpm_range_power") == "(1800, 6000)")
+
+    # 4. the horsepower path rebuilds the curve and returns early, so the bands
+    #    have to be written there too or --power silently skips them.
+    C._rpm_ranges = None
+    hp = C.tune_engine(engine(""), C.Report(), target_hp=300, peak_power_rpm=5000)
+    check("the --power path writes them too",
+          get_key(edit_lines(hp), "rpm_range_power")
+          == C._RPM_RANGE_DEFAULTS["rpm_range_power"], hp)
+
+
+def test_rpm_band_input_is_validated() -> None:
+    section("a rev band asked for by hand is validated")
+    check("two numbers", C._parse_band("1350, 1950") == "(1350, 1950)")
+    check("spaces are fine", C._parse_band(" 1350 , 1950 ") == "(1350, 1950)")
+    check("one number is not a band", C._parse_band("1350") is None)
+    check("three are not a band", C._parse_band("1, 2, 3") is None)
+    check("words are not numbers", C._parse_band("low, high") is None)
+    check("backwards is not a band", C._parse_band("1950, 1350") is None)
+    check("equal ends is not a band", C._parse_band("1500, 1500") is None)
+    check("zero is not a rev", C._parse_band("0, 1500") is None)
+    check("empty is not a band", C._parse_band("") is None)
 
 
 def test_defaults_come_from_the_mods_dealer_config() -> None:
@@ -1219,6 +1261,9 @@ accessory_engine_data : 35l.test.engine
 \tinfo[]: "365 @@hp@@ (272@@kw@@)"
 \tinfo[]: "350 @@lb_ft@@ (475 @@nm@@)"
 \ttorque: 1400
+\trpm_range_low_gear: (1350, 1950)
+\trpm_range_high_gear: (1450, 2050)
+\trpm_range_power: (3500, 6000)
 \ttorque_curve[]: (1500, 0.51)
 \ttorque_curve[]: (3750, 0.57)
 \tsecondary_torque: 2250 # torque x 1.26 (final drive relation)
@@ -1237,6 +1282,9 @@ accessory_engine_data : ford_tivctv8.ford.f150_23.engine
 \tinfo[]: "410 @@lb_ft@@ (556@@nm@@)"
 \ttorque: 556
 \tvolume: 5.0
+\trpm_range_low_gear: (1300, 1800)
+\trpm_range_high_gear: (1500, 2200)
+\trpm_range_power: (5000, 6000)
 \ttorque_curve[]: (1000, 0.6)
 \ttorque_curve[]: (4500, 1.0)
 }
@@ -4971,7 +5019,8 @@ def main() -> int:
     test_collapsed_keys_survive_a_real_tune()
     test_fallback_merges_with_the_mods_own()
     test_fallback_appends_every_slot_when_the_mod_declares_none()
-    test_a_car_binds_the_automatic_the_mod_ships()
+    test_an_engine_with_no_rev_bands_gets_them()
+    test_rpm_band_input_is_validated()
     test_the_engine_follows_the_transmission_it_is_paired_with()
     test_defaults_come_from_the_mods_dealer_config()
     test_decorative_slots_are_never_auto_bound()

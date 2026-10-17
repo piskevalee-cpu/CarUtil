@@ -918,45 +918,6 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     if src.exists(f"{vdir}data.sii"):
         add_accessory("data", "vehicle", f"/{vdir}data.sii")
 
-    def _offers_drive(path: str) -> bool:
-        """Whether a transmission declares a Drive mode, read from mod bytes.
-
-        `auto_mode_name` is the key a mod puts on its automatic and leaves off
-        its manual, so this separates the two on the author's own terms rather
-        than guessing from ratios or from the file name.
-        """
-        try:
-            return "auto_mode_name" in src.read_def(path)
-        except SystemExit:
-            return False
-
-    def _pick_core(name: str, declared: str | None,
-                   candidates: list[str]) -> str | None:
-        """A truck dealer names the box the truck shipped with.
-
-        That is often the manual, and for a truck it is correct. A car is an
-        automatic unless the player buys otherwise: all four of SCS's own Road
-        Trip cars use a torque-converter box, and one shipped a 3-speed and a
-        4-speed, so a gear count of three is no argument against a car.
-
-        The rule only fires when the mod ships both and the dealer named the
-        one without Drive. Measured on the four fixtures: the CTS-V Sport Wagon
-        is the only one that does, and binding its manual meant the converted
-        car had no Drive mode at all -- selecting D put the game into an
-        automatic shift logic no unit in the mod describes, which is where a
-        reported 25-second 0-60 came from.
-        """
-        if name == "transmission" and declared and not _offers_drive(declared):
-            alt = sorted(n for n in candidates if _offers_drive(n))
-            if alt:
-                rep.action(
-                    f"bound the automatic {Path(alt[0]).name} instead of the "
-                    f"manual {Path(declared).name} the truck dealer names: a "
-                    f"car has no Drive mode in a box that declares none"
-                )
-                return alt[0]
-        return declared or (sorted(candidates)[0] if candidates else None)
-
     def _candidates(name: str) -> list[str]:
         return [n for n in src.readable
                 if n.startswith(f"{vdir}{name}/") and n.endswith(".sii")]
@@ -981,8 +942,10 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     # with 6_manual, 62l_auto with 6_auto. Resolving them independently binds a
     # combination the mod forbids outright, and the game answers a conflict by
     # dropping an accessory -- which is a measured 26-second 0-60.
-    transmission = _pick_core("transmission", _declared("transmission"),
-                              _candidates("transmission"))
+    transmission = _declared("transmission")
+    if not transmission:
+        cands = _candidates("transmission")
+        transmission = sorted(cands)[0] if cands else None
     paired_engine = None
     if transmission:
         partner = _default_of(transmission)
@@ -994,7 +957,10 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
         if name == "engine" and paired_engine:
             first = paired_engine
         else:
-            first = _pick_core(name, _declared(name), _candidates(name))
+            first = _declared(name)
+            if not first:
+                cands = _candidates(name)
+                first = sorted(cands)[0] if cands else None
         if first:
             add_accessory(name, "vehicle", f"/{first}", SLOT.get(name))
             parts["fallbacks"].append(f"{name}|{Path(first).name}")
@@ -1577,6 +1543,109 @@ def prompt_weight(vtype: str, preset: str | None) -> list[int] | None:
             print(f"  -> a car should be {_MIN_KG}-{_MAX_KG} kg, got {total}")
             continue
         return split_mass(total, vtype, 2)
+
+
+# The three rev bands an automatic gearbox shifts on. All four engines SCS ships
+# for its own Road Trip cars declare all three, and so do three of the four
+# truck mods measured here -- the CTS-V Sport Wagon is the outlier and declares
+# none, which is the only structural difference between it and the others.
+#
+# The defaults are the median of the three mods that do declare them, component
+# by component, rather than the widest or the newest:
+#
+#                low_gear        high_gear       power
+#   Escalade     (1350, 1900)   (1400, 2050)   (4100, 6000)
+#   Pilot        (1350, 1950)   (1450, 2050)   (3500, 6000)
+#   W223         (1250, 1850)   (1350, 1950)   (1800, 6000)
+#
+# The Pilot sits at or next to the median on all six components, and its power
+# band brackets the 4500-6000 rpm this converter rebuilds every engine to peak
+# in, so it is the one set that is never the odd one out.
+_RPM_RANGE_DEFAULTS = {
+    "rpm_range_low_gear": "(1350, 1950)",
+    "rpm_range_high_gear": "(1450, 2050)",
+    "rpm_range_power": "(3500, 6000)",
+}
+_RPM_RANGE_ORDER = ("rpm_range_low_gear", "rpm_range_high_gear", "rpm_range_power")
+
+# A mod with several engines must be asked once, not once per engine.
+_rpm_ranges: dict[str, str] | None = None
+
+
+def _parse_band(raw: str) -> str | None:
+    """`1200, 1900` -> `(1200, 1900)`; None when that is not two ordered revs."""
+    parts = [p for p in re.split(r"[,\s]+", raw.strip()) if p]
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return None
+    lo, hi = int(parts[0]), int(parts[1])
+    if not 0 < lo < hi:
+        return None
+    return f"({lo}, {hi})"
+
+
+def _ask_band(key: str) -> str:
+    """One band, asked plainly. Empty input is an omission and re-asks.
+
+    No bracketed suggestion in the label: a visible default invites the answer
+    the prompt is trying to avoid. The range is in the prose above it instead,
+    which is how prompt_weight does it. Ctrl-C takes the default, as everywhere
+    else here -- otherwise a mandatory field would be unescapable.
+    """
+    nums = re.findall(r"\d+", _RPM_RANGE_DEFAULTS[key])
+    while True:
+        try:
+            raw = input(f"  {key} as 'min, max': ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  cancelled -- using {_RPM_RANGE_DEFAULTS[key]}.")
+            return _RPM_RANGE_DEFAULTS[key]
+        band = _parse_band(raw) if raw else None
+        if band:
+            return band
+        print(f"  -> two whole numbers, low then high, e.g. {nums[0]}, {nums[1]}")
+
+
+def prompt_rpm_ranges() -> dict[str, str]:
+    """Ask whether to take the measured car bands or to type each one.
+
+    Reached only for an engine that declares none of them. Off a terminal the
+    defaults are taken silently, so scripted runs and CI never block.
+    """
+    global _rpm_ranges
+    if _rpm_ranges is not None:
+        return dict(_rpm_ranges)
+
+    if not _tty():
+        # Deliberately NOT cached. The cache exists so a mod with several
+        # engines asks once; caching here would also make an off-terminal run
+        # suppress a prompt later in the same process, which is exactly what a
+        # test suite doing many conversions would trip over.
+        return dict(_RPM_RANGE_DEFAULTS)
+
+    print()
+    _ui.heading("This engine declares no rev bands for the automatic")
+    print("  An automatic gearbox decides when to change gear from its engine's")
+    print("  rpm_range_low_gear, rpm_range_high_gear and rpm_range_power -- the")
+    print("  band of revs in which each gear is used, and the band the engine is")
+    print("  at full power. Every car engine in the base game sets all three.")
+    print()
+    print("  Without them the game falls back to its own default, which is tuned")
+    print("  for a truck and changes up far too early. Measured on a Cadillac")
+    print("  that was a 26-second 0-60 against 5.3 in manual, same engine.")
+    print()
+    print("  Bands measured from the mods that do declare them:")
+    for key in _RPM_RANGE_ORDER:
+        print(f"    {key:<22} {_RPM_RANGE_DEFAULTS[key]}")
+    print()
+    options = [
+        ("use the measured car defaults", "what the other mods ship"),
+        ("enter each value manually", "one prompt per band"),
+    ]
+    idx = _ui.arrow_menu(options, default=0)
+    if idx == 0:
+        _rpm_ranges = dict(_RPM_RANGE_DEFAULTS)
+    else:
+        _rpm_ranges = {key: _ask_band(key) for key in _RPM_RANGE_ORDER}
+    return dict(_rpm_ranges)
 
 
 # Measured calibration, not a guess. Two timing points on the W223 (9.67 s at
@@ -2667,6 +2736,39 @@ def _drop_truck_engine_keys(lines: list[str], rep: Report) -> list[str]:
     return out
 
 
+def _ensure_rpm_ranges(text: str, rep: Report) -> str:
+    """Give an engine the rev bands the automatic shifts on, when it has none.
+
+    A mod that declares them is left completely alone -- the Escalade, the Pilot
+    and the W223 all do, and their bands are the reason this looks like a rare
+    defect rather than a universal one. Only the gap is filled, and only the
+    keys that are actually missing, so a mod with two of the three keeps them
+    untouched.
+    """
+    if "accessory_engine_data" not in text:
+        return text
+    lines = edit_lines(text)
+    missing = [k for k in _RPM_RANGE_ORDER if get_key(lines, k) is None]
+    if not missing:
+        return text
+
+    rep.warn(
+        f"engine declares none of {_RPM_RANGE_ORDER[0]}, {_RPM_RANGE_ORDER[1]} "
+        f"and {_RPM_RANGE_ORDER[2]}; every car engine in the base game sets all "
+        f"three. Without them the automatic has no rev band to shift on and "
+        f"falls back to a default tuned for a truck, which changes up far too "
+        f"early -- measured on a Cadillac, a 26-second 0-60 against 5.3 in "
+        f"manual on the same engine. Writing the bands measured from the mods "
+        f"that do declare them: "
+        + ", ".join(f"{k} {_RPM_RANGE_DEFAULTS[k]}" for k in missing) + "."
+    )
+
+    chosen = prompt_rpm_ranges()
+    for key in missing:
+        lines = set_key(lines, key, chosen[key])
+    return "\n".join(lines) + "\n"
+
+
 def tune_engine(text: str, rep: Report, force: bool = False,
                 target_nm: int | None = None,
                 nm_per_tonne: float | None = _DEFAULT_NM_PER_TONNE,
@@ -2694,6 +2796,10 @@ def tune_engine(text: str, rep: Report, force: bool = False,
 
     if tonnes <= 0:
         raise ValueError("tonnes must be positive")
+
+    # Before every early return, so it covers the horsepower path too -- that
+    # one rebuilds the curve and returns before any other tuning runs.
+    text = _ensure_rpm_ranges(text, rep)
 
     # An explicit --engine-torque or --acceleration replaces the ratio; both
     # are deliberate overrides, not second opinions.

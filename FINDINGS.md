@@ -1967,3 +1967,68 @@ The remaining open question is unchanged and still unmeasured: neither CTS engin
 declares `rpm_range_*`, unlike all four of SCS's own car engines. It is now the
 only structural difference left, and it stays unwritten until there is a
 `game.log.txt` or a tacho reading to anchor it.
+
+## 37. The engine with no rev bands, and reverting the automatic binding
+
+§36 closed with a build the user drove: the CTS-V Sport Wagon came down from
+26 seconds to **8 in manual**, against the 5.3 it had before any of this work.
+So the engine and chassis were healthy all along and the whole fault was in the
+automatic's control logic.
+
+### Reverted: preferring the automatic
+
+§35 bound `6_auto.sii` instead of the manual the truck dealer names. That is
+now removed. Measured cost of keeping it: manual went 5.3 -> 8 s, because the
+mode-M of a torque-converter box is not the manual box — different ratios
+(4.03/2.36/1.53/1.15/0.85/0.67 against 2.66/1.78/1.30/1.00/0.80/0.63) and a
+different final drive. The binding is back to what the author declared:
+
+```
+fallback[]: "engine|62l.sii"
+fallback[]: "transmission|6_manual.sii"
+```
+
+§36's pairing is kept. With the dealer's manual declared, its `defaults[]` names
+`62l.sii`, which is what the dealer already named — inert for this mod, still a
+guard against the mismatch class.
+
+### The actual defect
+
+Neither CTS engine declares `rpm_range_low_gear`, `rpm_range_high_gear` or
+`rpm_range_power`. It is the only mod measured that does not — the Escalade, the
+Pilot and the W223 all set all three, and so do all four of SCS's own car
+engines. Without them the automatic has no rev band to shift on and falls back
+to a game default tuned for a truck, which changes up far too early: measured at
+about 1200 rpm against a rebuilt curve that peaks at 3750.
+
+The defaults written are the median of the three mods that do declare them:
+
+```
+rpm_range_low_gear:  (1350, 1950)
+rpm_range_high_gear: (1450, 2050)
+rpm_range_power:     (3500, 6000)
+```
+
+The Pilot sits at or beside the median on all six components, and
+`(3500, 6000)` brackets the 4500-6000 rpm this converter rebuilds every engine
+to peak in. An engine that declares any of the three keeps it; only the gap is
+filled. Off a terminal the defaults are taken silently and never block.
+
+On a terminal the user is warned, shown the measured values, and offered the
+defaults or one prompt per band. `Ctrl-C` takes the defaults, as everywhere
+else here.
+
+### Two fixture corrections this exposed
+
+`_ENGINE_OFFICIAL` was labelled "SCS's own Road Trip F-150 V8, verbatim" and was
+not verbatim — the rpm_range keys had been dropped. `_ENGINE_INFLATED`, a copy
+of the Pilot's `35l`, had lost the same three keys. Both now carry their real
+values, which is what let the four pre-existing preservation checks pass
+unchanged. A fixture that is a copy should be a copy; a trimmed one silently
+becomes a test of something the real unit does not do.
+
+### Still unverified
+
+The 26 s was measured with no bands and the automatic bound. This build reverts
+the binding and adds the bands, so it has not been driven. It is the first of
+these three attempts to be tested in game before the next one was built on it.

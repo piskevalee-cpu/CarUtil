@@ -497,15 +497,29 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   the Pilot's box measures 2.35 and converts fine, which is the control.
   **Read that "never the cause" narrowly — see the next entry.** It held on the
   three fixtures that declare the keys; a fourth declares none at all.
+  **And note this top-gear fix was derived from the wrong car.** It was measured
+  on the Escalade (25% out of range). The car actually reported was the CTS-V
+  Sport Wagon, 4.6% out, where a 4.6% change cannot explain a 25-second 0-60.
+  Both are real defects; only the Escalade one was the diagnosis.
 - **A truck dealer names the manual, and a car has no Drive without one.** The
   CTS-V Sport Wagon's `truck_dealer` names `6_manual.sii`; the mod also ships
-  `6_auto.sii` with `auto_mode_name: D`. `_declared()` believed the author, so
-  the converted car was bound to a box with no Drive mode at all, and neither
-  engine declared `rpm_range_*` — so there was not even a band to shift on.
-  `_pick_core` prefers a candidate carrying `auto_mode_name`. It is the mod's
-  own signal, not a filename or a gear count (all four SCS cars are converter
-  boxes and one is a 3-speed). Fires on the CTS and nowhere else among the four
-  fixtures.
+  `6_auto.sii` with `auto_mode_name: D`. **Tried and reverted — do not redo it.**
+  Preferring the automatic was measured at **5.3 s → 8 s in manual**, because
+  the mode-M of a torque-converter box is not a manual box. The binding stays
+  with the author. `FINDINGS.md` §37.
+- **`rpm_range_*` is the whole bug, and absence is the signal.** Neither CTS
+  engine declares `rpm_range_low_gear` / `_high_gear` / `_power`; it is the
+  only mod measured that does not, and without them the automatic has no rev
+  band to shift on and falls back to a truck-tuned default that changes up near
+  1200 rpm against a curve peaking at 3750. Measured 26 s automatic, 5.3 s
+  manual, same engine. `_ensure_rpm_ranges` fills only the missing keys with the
+  median of the three mods that do declare them (the Pilot's), and warns. A
+  mod that declares them is byte-for-byte untouched.
+- **A trimmed fixture is a test of something the real unit does not do.**
+  `_ENGINE_OFFICIAL` was captioned "verbatim" with the rpm keys removed and
+  `_ENGINE_INFLATED` had lost the same three; four preservation checks broke on
+  the fix rather than on a regression. When a fixture copies a real unit, copy
+  the whole unit.
 - **Switching one half of a declared-incompatible pair is not a fix, it is the
   next bug.** The CTS took **26 s** after §35 — *worse* than the 25 s before it.
   Both its transmissions carry `conflict_with[]` against an engine and name
@@ -520,13 +534,14 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   the pair conflict was *caused by* the fix before it. Each was built assuming
   the previous was sufficient, and the in-game number is what disproved it.
   **Do not stack a fix on an untested one.** Measure the previous one in game
-  before the next is built on it. See `FINDINGS.md` §36.
-- **`rpm_range_*` is left alone even when absent, and that is deliberate.** No
-  engine in the CTS declares it, so there is no author anchor to copy and any
-  triple would be invented. Do not "fix" it by copying SCS's values: those are
-  tied to curves belonging to SCS's own engines. Closing it needs a
-  `game.log.txt` and a tacho reading, not a plausible-looking number. See
-  `FINDINGS.md` §35.
+  before the next is built on it. See `FINDINGS.md` §36 and §37.
+- **`rpm_range_*` is filled from sibling mods, never from SCS's own values.**
+  SCS's four car engines set all three, but with bands tied to *their* curves,
+  so copying them would be a plausible-looking guess. The defaults are instead
+  the median of the three truck mods measured here, which is a real anchor: the
+  same family, the same file format, and agreeing to within 100 rpm on all six
+  components. Do not "improve" them by reaching for SCS's numbers.
+  `FINDINGS.md` §35 and §37.
 - **`residual_travel` is the body-roll key.** Truck mods ship 0.09–0.10 and
   SCS's cars use 0.093–0.134 — the ranges **overlap**, so no threshold separates
   them and the key must be written unconditionally. See `FINDINGS.md` §24.
