@@ -32,6 +32,7 @@ vendor with no logo. Check both lists when adding a brand.
 python3 test_converter.py                                        # the whole suite
 CARUTIL_FIXTURES=/path/to/mods python3 test_converter.py         # incl. fixture checks
 python3 carutil.py                                               # guided walkthrough
+python3 carutil.py --path                                        # where are my files?
 python3 carutil.py mod.scs --type suv --brand cadillac -o out.scs
 ```
 
@@ -359,6 +360,19 @@ Proton/Wine/Flatpak/Snap/Lutris, `My Documents`, a prefix with no `pfx/`,
 and both Flatpak arrangements — and asserts each is found. It also asserts the
 search completes in under two seconds, which is what stops anyone reintroducing a
 walk. It runs **before** the fixture gate, since it needs no real mods.
+
+**Two different directories, and they are not related.** `find_mod_folders()`
+returns ATS **user data** — inside a Proton prefix that lives under a fake
+`C:` drive, never at the Steam install. `find_game_install()` returns the game
+itself, under `steamapps/common`. They have separate root lists
+(`_prefix_candidates` vs `_install_roots`) because conflating them prints a path
+that looks like an install and has no `def.scs` in it. The install is
+identified by `def.scs` **and** `base.scs` together, so a Steam library or
+prefix named `American Truck Simulator` is rejected and a renamed install still
+resolves. `--path` prints both; it short-circuits before the banner, the
+ImageMagick preflight and the "no input given" refusal, because asking where
+your mod folder is must not first demand an input or offer to install a program
+you did not ask about.
 
 **Enumerate Steam *roots*, not finished `compatdata` paths.** Steam's layout is
 not one thing: `~/.steam` is normally a symlink farm whose `root` and `steam`

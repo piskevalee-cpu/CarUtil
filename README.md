@@ -151,6 +151,7 @@ You can always type a name instead of using the arrows (e.g. `sedan`,
 | `--brand-logo-dir` | Directory to look for `<brand>.png` in, instead of the bundled `logos/`. |
 | `--brand` | Brand name, used for the dealer folder and `info[]`. |
 | `--mod-dir` | Where this machine keeps its ATS user data, if the automatic search cannot find it. Repeatable. Only affects the folder printed at the end. |
+| `--path` | Print where the game and the mod folder are, then exit. Converts nothing. |
 | `--slug` | Vehicle identifier. Defaults to the vehicle's own unit name — see below. |
 | `--asset-root` | Explicit model root. Default: `/vehicle/car/<slug>`. |
 | `--mass` | Kerb weight: `TOTAL` kg (`--mass 1650`) or `FRONT,REAR` (`--mass 1150,1050`). Skips the prompt. |
@@ -769,6 +770,47 @@ than broken. Capacity and consumption have to move together, or not at all.
   body/collision split.
 - **Does not copy addons from other mods.** The Parati's ~25 accessories are not
   transplanted into your car — those are its author's work.
+
+## Where are my files?
+
+```bash
+python3 carutil.py --path
+```
+
+```
+  American Truck Simulator
+  game files    /home/you/.local/share/Steam/steamapps/common/American Truck Simulator
+                def.scs, base.scs -- the game itself
+  road trip     /home/you/.local/share/Steam/steamapps/common/American Truck Simulator/dlc_rt_ford.scs
+                dlc_rt_ford.scs -- Car Mode is unlocked
+  user data     /home/you/Documents/American Truck Simulator
+                conversion profiles, game.log.txt
+  mod folder    /home/you/Documents/American Truck Simulator/mod
+                put a converted .scs in here
+```
+
+Nothing is converted and no input is needed. The mod folder in particular is
+worth checking before you start, because where it lives is **not** guessable by
+eye on the machines this runs on — the finder resolves Proton prefixes (the
+Windows install's data sits under a fake `C:` drive), Flatpak sandboxes, Snap
+revisions, Lutris, `My Documents`, and five different Steam layouts, matching
+every path component case-insensitively because ext4 is case-sensitive by
+default. Copy a converted car into the wrong one and the game never sees it,
+which looks exactly like the tool being broken.
+
+`--mod-dir` can be repeated alongside it to see what the tool makes of a path
+you name yourself.
+
+Two notes on how it decides:
+
+- **The game install is found by its contents, not its name.** A directory
+  called `American Truck Simulator` with no `def.scs` and `base.scs` in it is
+  a Steam library or a prefix, not an install, and is rejected. A renamed
+  install directory still resolves.
+- **`game files not found` is not an error.** It only means the install is
+  somewhere this tool does not know to look — a non-Steam copy, or a game
+  directory the user moved. The mod folder is the one that matters for
+  installing a converted car, and the two are independent.
 
 ## Prerequisites for a car to work
 

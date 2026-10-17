@@ -4335,6 +4335,94 @@ def test_hashfs_sibling_gets_an_honest_error() -> None:
         check("a missing file is not mistaken for HashFS",
               C._hashfs_version(root / "does-not-exist.scs") is None)
 
+def test_path_option_reports_the_locations() -> None:
+    """--path must answer its question and stop.
+
+    The mod-folder finder resolves Proton prefixes, Flatpak sandboxes, Snap
+    revisions and five Steam layouts, so "where does my mod go" is not
+    answerable by eye on the machines this runs on. Asking it must not first
+    demand an input, print the banner, or offer to install ImageMagick.
+    """
+    section("--path prints the locations and converts nothing")
+    with tempfile.TemporaryDirectory() as td:
+        mod_dir = Path(td) / "American Truck Simulator"
+        (mod_dir / "mod").mkdir(parents=True)
+        (mod_dir / "profiles").mkdir()
+
+        r = subprocess.run(
+            [sys.executable, str(HERE / "carutil.py"), "--path",
+             "--mod-dir", str(mod_dir)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        out = r.stdout
+        check("it exits cleanly", r.returncode == 0, r.stderr[-300:])
+        check("it does not demand an input", "no input given" not in r.stderr,
+              r.stderr[-200:])
+        check("it does not print the banner", "CarUtil" not in out, out[:200])
+        check("it does not offer to install anything",
+              "install" not in out.lower(), out[:300])
+        check("it names the mod folder",
+              str(mod_dir / "mod") in out, out[-400:])
+        check("it labels the sections", "game files" in out
+              and "user data" in out, out[-400:])
+        check("it writes no archive", not list(Path(td).glob("*.scs")),
+              str(list(Path(td).glob("*.scs"))))
+
+
+def test_game_install_is_found_by_its_contents() -> None:
+    """The install is identified by def.scs and base.scs, not by its name.
+
+    A Steam library, a Proton prefix or a Lutris directory can all be named
+    'American Truck Simulator' without being an install. Probing the pair of
+    files also means a renamed install directory still resolves.
+    """
+    section("game install discovery")
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        check("nothing found on an empty home",
+              C.find_game_install(home) is None)
+
+        # A directory with the right NAME but no game files must be rejected.
+        decoy = (home / ".steam" / "debian-installation" / "steamapps"
+                 / "common" / "American Truck Simulator")
+        decoy.mkdir(parents=True)
+        check("a decoy with the right name is rejected",
+              C.find_game_install(home) is None, str(C.find_game_install(home)))
+
+        # Both files together identify it.
+        real = (home / ".local" / "share" / "Steam" / "steamapps" / "common"
+                / "American Truck Simulator")
+        real.mkdir(parents=True)
+        (real / "def.scs").write_bytes(b"SCS#\x02")
+        check("one of the two files is not enough",
+              C.find_game_install(home) is None, str(C.find_game_install(home)))
+        (real / "base.scs").write_bytes(b"SCS#\x02")
+        found = C.find_game_install(home)
+        check("both files identify the install", found == real.resolve(),
+              f"{found}")
+
+        # Road Trip presence is reported separately: without dlc_rt_ford.scs
+        # Car Mode cannot be unlocked at all, whatever the conversion does.
+        buf = io.StringIO()
+        real_stdout, sys.stdout = sys.stdout, buf
+        try:
+            C.print_paths([home / "data"], install=real)
+        finally:
+            sys.stdout = real_stdout
+        text = buf.getvalue()
+        check("a missing Road Trip DLC is reported as not found",
+              "road trip" in text and "not found" in text, text[-400:])
+
+        (real / "dlc_rt_ford.scs").write_bytes(b"SCS#\x02")
+        buf2 = io.StringIO()
+        real_stdout, sys.stdout = sys.stdout, buf2
+        try:
+            C.print_paths([home / "data"], install=real)
+        finally:
+            sys.stdout = real_stdout
+        check("and a present one is named",
+              "dlc_rt_ford.scs" in buf2.getvalue(), buf2.getvalue()[-400:])
+
+
 def test_interrupted_write_leaves_no_broken_archive() -> None:
     """A Ctrl-C part-way through must not leave a truncated .scs behind.
 
@@ -4639,6 +4727,8 @@ def main() -> int:
     test_prompt_power_never_blocks()
     test_air_resistance_override()
     test_hashfs_sibling_gets_an_honest_error()
+    test_path_option_reports_the_locations()
+    test_game_install_is_found_by_its_contents()
     test_interrupted_write_leaves_no_broken_archive()
     test_carutil_is_the_entry_point()
     test_modsource_releases_its_handle()

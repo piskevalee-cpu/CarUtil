@@ -3429,6 +3429,59 @@ def _prefix_candidates(home: Path) -> list[Path]:
     return candidates
 
 
+def _install_roots(home: Path) -> list[Path]:
+    """Directories that can hold an ATS INSTALL (not its user data).
+
+    A separate list from _prefix_candidates on purpose. That one enumerates
+    Proton prefixes, where a Windows install's *user data* lives under
+    drive_c/users; the game files are a separate copy under Steam's
+    steamapps/common on a native Linux install. Conflating the two is how you
+    end up printing a path that looks like an install and has no def.scs in it.
+    """
+    roots = [r / "steamapps" / "common" for r in (
+        home / ".local" / "share" / "Steam",
+        home / ".steam",
+        home / ".steam" / "root",
+        home / ".steam" / "steam",
+        home / ".steam" / "debian-installation",
+        home / ".var" / "app" / "com.valvesoftware.Steam" / "data" / "Steam",
+        home / ".var" / "app" / "com.valvesoftware.Steam" / ".steam",
+        home / ".var" / "app" / "com.valvesoftware.Steam" / ".local"
+             / "share" / "Steam",
+        home / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
+        home / "snap" / "steam" / "current" / ".local" / "share" / "Steam",
+    )]
+    # Wine and Lutris run a real Windows install under drive_c.
+    roots += [
+        home / ".wine" / "drive_c" / "Program Files (x86)" / "Steam"
+             / "steamapps" / "common",
+        home / "Games" / "lutris" / "drive_c" / "Program Files (x86)"
+             / "Steam" / "steamapps" / "common",
+        home / "Games" / "lutris" / "drive_c" / "Program Files" / "Steam"
+             / "steamapps" / "common",
+    ]
+    return roots
+
+
+def find_game_install(home: Path | None = None) -> Path | None:
+    """Where the game itself is installed, or None if we cannot see it.
+
+    Identified by def.scs and base.scs, because those are what every ATS
+    install has and what makes the directory unmistakably the game rather than
+    a Steam library or a prefix that merely looks plausible. Probing the pair
+    rather than the name also means a renamed install directory still works.
+    """
+    home = home or Path.home()
+    for root in _install_roots(home):
+        candidate = root / _ATS_DIR
+        if (candidate / "def.scs").is_file() and (candidate / "base.scs").is_file():
+            try:
+                return candidate.resolve()
+            except OSError:
+                return candidate
+    return None
+
+
 def _looks_like_ats_data(p: Path) -> bool:
     """True if `p` is an ATS user-data directory rather than a stray match.
 
@@ -3635,6 +3688,56 @@ def _write_scs(files: dict[str, str], out_path: Path,
         raise
 
 
+def print_paths(mod_dirs: list[Path] | None = None,
+                install: Path | None = None) -> None:
+    """Report where the game and the mod folder are, and nothing else.
+
+    The mod-folder finder resolves Proton prefixes, Flatpak sandboxes, Snap
+    revisions and five Steam layouts, so "where does my mod go" is genuinely
+    not answerable by eye on the machines this runs on. Showing it beats making
+    the user guess -- or worse, copy a converted car somewhere the game never
+    looks and conclude the tool is broken.
+    """
+    if mod_dirs is None:
+        mod_dirs = find_mod_folders()
+    if install is None:
+        install = find_game_install()
+
+    print()
+    _ui.heading("American Truck Simulator")
+
+    def row(label: str, path: Path | None, note: str = "") -> None:
+        if path is None:
+            print("  " + _ui.paint(f"{label:<14}", "dim")
+                  + _ui.paint("not found", "yellow"))
+            return
+        print("  " + _ui.paint(f"{label:<14}", "dim")
+              + _ui.paint(str(path), "bold"))
+        if note:
+            print("  " + " " * 14 + _ui.paint(note, "dim"))
+
+    row("game files", install,
+        "def.scs, base.scs -- the game itself" if install else "")
+    if install is not None:
+        roadtrip = install / "dlc_rt_ford.scs"
+        row("road trip", roadtrip if roadtrip.is_file() else None,
+            "dlc_rt_ford.scs -- Car Mode is unlocked" if roadtrip.is_file()
+            else "")
+
+    if mod_dirs:
+        for i, d in enumerate(mod_dirs):
+            row("user data" if i == 0 else "", d,
+                "conversion profiles, game.log.txt" if i == 0 else "")
+        for i, d in enumerate(mod_dirs):
+            row("mod folder" if i == 0 else "", d / "mod",
+                "put a converted .scs in here" if i == 0 else "")
+    else:
+        row("user data", None)
+        print("  " + " " * 14
+              + _ui.paint("pass --mod-dir to say where it is", "dim"))
+    print()
+
+
 def print_install_help(out: Path, mod_dirs: list[Path] | None = None) -> None:
     """Print the output path and where to copy it, with a real mod folder if found.
 
@@ -3835,6 +3938,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--dry-run", action="store_true", help="report only, write nothing")
     ap.add_argument(
+        "--path",
+        action="store_true",
+        help="print where the game and the mod folder are, then exit. Needs no "
+             "input and converts nothing",
+    )
+    ap.add_argument(
         "--mod-dir",
         action="append",
         type=Path,
@@ -3849,6 +3958,14 @@ def main(argv: list[str] | None = None) -> int:
         help="output .scs (default: rt_<slug>.scs next to the input)",
     )
     args = ap.parse_args(argv)
+
+    # --path answers a question and stops. It must come before the banner, the
+    # ImageMagick preflight and the "no input given" refusal, or asking where
+    # your mod folder is would first demand an input and offer to install a
+    # program you did not ask about.
+    if args.path:
+        print_paths(find_mod_folders(args.mod_dir))
+        return 0
 
     if _tty() and not args.no_prompt and args.input is None:
         print()
