@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for convert_to_car.py.
+"""Tests for carutil.py.
 
 Run: python3 test_converter.py
 
@@ -31,7 +31,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-import convert_to_car as C  # noqa: E402
+import carutil as C  # noqa: E402
 import sii  # noqa: E402
 from sii import (  # noqa: E402
     get_all_indexed,
@@ -925,7 +925,7 @@ def test_type_validation() -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "x.scs"
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(REF),
+            [sys.executable, str(HERE / "carutil.py"), str(REF),
              "--type", "spaceship", "--brand", "vw", "-o", str(out)],
             capture_output=True, text=True,
         )
@@ -941,7 +941,7 @@ def test_type_validation() -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "e.scs"
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(REF),
+            [sys.executable, str(HERE / "carutil.py"), str(REF),
              "--type", "suv", "--extra-tags", "pickup,sedan", "--brand", "vw",
              "-o", str(out)],
             capture_output=True, text=True,
@@ -1965,7 +1965,7 @@ def test_mass_override() -> None:
         check("custom rear mass honoured", "kerb_weight[1]: 1200" in t)
 
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(PORCHE),
+            [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
              "--type", "suv", "--brand", "p", "--mass", "oops", "-o", str(out)],
             capture_output=True, text=True)
         check("bad --mass rejected", r.returncode != 0)
@@ -2033,7 +2033,7 @@ def test_mass_cli_forms() -> None:
         # bad inputs rejected
         for bad in ("oops", "1,2,3", "-5"):
             r = subprocess.run(
-                [sys.executable, str(HERE / "convert_to_car.py"), *base, "--mass", bad],
+                [sys.executable, str(HERE / "carutil.py"), *base, "--mass", bad],
                 capture_output=True, text=True)
             check(f"rejects {bad!r}", r.returncode != 0)
 
@@ -2060,7 +2060,7 @@ def test_scripted_mode_still_works() -> None:
         check("positional input works", out.exists())
 
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"),
+            [sys.executable, str(HERE / "carutil.py"),
              str(PORCHE), "--type", "suv", "--brand", "p", "-o", str(out)],
             capture_output=True, text=True)
         check("runs as a script", r.returncode == 0, r.stderr[-200:])
@@ -2072,11 +2072,11 @@ def test_scripted_mode_still_works() -> None:
 def test_no_args_off_terminal_fails_clearly() -> None:
     section("no args, no terminal")
     r = subprocess.run(
-        [sys.executable, str(HERE / "convert_to_car.py")],
+        [sys.executable, str(HERE / "carutil.py")],
         capture_output=True, text=True, stdin=subprocess.DEVNULL)
     check("exits non-zero", r.returncode != 0)
     check("explains how to fix",
-          "no input given" in r.stderr and "convert_to_car.py mod.scs" in r.stderr)
+          "no input given" in r.stderr and "carutil.py mod.scs" in r.stderr)
 
 
 @guard
@@ -2088,12 +2088,12 @@ def test_missing_required_off_terminal() -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "o.scs"
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(PORCHE), "-o", str(out)],
+            [sys.executable, str(HERE / "carutil.py"), str(PORCHE), "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("demands --type", r.returncode != 0 and "--type" in r.stderr)
 
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(PORCHE),
+            [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
              "--type", "suv", "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("demands --brand", r.returncode != 0 and "--brand" in r.stderr)
@@ -2127,7 +2127,7 @@ def test_dry_run_writes_nothing() -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "dry.scs"
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(PORCHE),
+            [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
              "--type", "suv", "--brand", "p", "--dry-run", "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("no file written", not out.exists())
@@ -2176,7 +2176,7 @@ def test_locked_archive_errors_cleanly() -> None:
 
         # the tool must fail with guidance, never a traceback
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(locked),
+            [sys.executable, str(HERE / "carutil.py"), str(locked),
              "--type", "suv", "--brand", "h", "-o", str(Path(td) / "o.scs")],
             capture_output=True, text=True)
         check("exits non-zero", r.returncode != 0)
@@ -2196,7 +2196,7 @@ def test_password_unlocks() -> None:
         out = Path(td) / "ok.scs"
 
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(locked),
+            [sys.executable, str(HERE / "carutil.py"), str(locked),
              "--type", "suv", "--brand", "honda", "--password", "secret123",
              "--mass", "2142", "-o", str(out)],
             capture_output=True, text=True)
@@ -2208,7 +2208,7 @@ def test_password_unlocks() -> None:
             check("tag written", 'tags[]: "suv"' in d)
 
         r2 = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(locked),
+            [sys.executable, str(HERE / "carutil.py"), str(locked),
              "--type", "suv", "--brand", "h", "--password", "wrongpw",
              "-o", str(Path(td) / "o2.scs")],
             capture_output=True, text=True)
@@ -2236,7 +2236,7 @@ def test_zip_wrapper_is_unwrapped() -> None:
 
         out = Path(td) / "out.scs"
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(wrapper),
+            [sys.executable, str(HERE / "carutil.py"), str(wrapper),
              "--type", "sedan", "--brand", "test", "--mass", "1400",
              "-o", str(out)],
             capture_output=True, text=True)
@@ -2402,7 +2402,7 @@ def test_mislabelled_encryption_is_readable() -> None:
 
         out = Path(td) / "out.scs"
         r = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(built),
+            [sys.executable, str(HERE / "carutil.py"), str(built),
              "--type", "suv", "--brand", "honda", "--mass", "2142",
              "-o", str(out)],
             capture_output=True, text=True)
@@ -2410,7 +2410,7 @@ def test_mislabelled_encryption_is_readable() -> None:
         check("reports the workaround", "data is plain" in r.stdout)
 
         r2 = subprocess.run(
-            [sys.executable, str(HERE / "convert_to_car.py"), str(built),
+            [sys.executable, str(HERE / "carutil.py"), str(built),
              "--type", "suv", "--brand", "h", "--strict-encryption",
              "-o", str(Path(td) / "o2.scs")],
             capture_output=True, text=True)
@@ -2438,7 +2438,7 @@ def _check_conversion(mod: Path, vtype: str, brand: str, mass: str,
                       expect_tags: str, tmp: Path) -> None:
     out = tmp / "out.scs"
     r = subprocess.run(
-        [sys.executable, str(HERE / "convert_to_car.py"), str(mod),
+        [sys.executable, str(HERE / "carutil.py"), str(mod),
          "--type", vtype, "--brand", brand, "--mass", mass, "-o", str(out)],
         capture_output=True, text=True)
     check(f"{mod.name[:28]}: converts", r.returncode == 0, r.stderr[-300:])
@@ -4038,7 +4038,7 @@ def test_windows_compatibility() -> None:
     # 3. A Windows ImageMagick install is invisible to the running process
     #    until PATH is refreshed, so that recovery must exist and be nt-only.
     check("_refresh_magick_path exists", hasattr(C, "_refresh_magick_path"))
-    csrc = (HERE / "convert_to_car.py").read_text(encoding="utf-8")
+    csrc = (HERE / "carutil.py").read_text(encoding="utf-8")
     check("_refresh_magick_path is gated on nt", 'os.name != "nt"' in csrc)
     check("it looks for magick.exe",
           "magick.exe" in csrc and "ImageMagick" in csrc)
@@ -4063,7 +4063,7 @@ def test_windows_compatibility() -> None:
 
     # 7. No shell=True anywhere: on Windows it selects cmd.exe, whose quoting
     #    differs from POSIX and breaks paths containing spaces.
-    for name in ("convert_to_car.py", "sii.py", "logo.py", "ui.py",
+    for name in ("carutil.py", "sii.py", "logo.py", "ui.py",
                  "brands.py"):
         text = (HERE / name).read_text(encoding="utf-8")
         check(f"{name} never uses shell=True", "shell=True" not in text)
@@ -4085,7 +4085,7 @@ def test_windows_compatibility() -> None:
 
     # 10. No hardcoded /tmp or POSIX-only path in library code. The test file
     #     may use it; the shipped modules may not.
-    for name in ("convert_to_car.py", "sii.py", "logo.py", "ui.py",
+    for name in ("carutil.py", "sii.py", "logo.py", "ui.py",
                  "brands.py"):
         text = (HERE / name).read_text(encoding="utf-8")
         check(f"{name} has no hardcoded /tmp path", '"/tmp' not in text)
@@ -4097,7 +4097,7 @@ def test_windows_compatibility() -> None:
     #     where unlinking an open file is allowed, which is exactly why it
     #     survives review. Asserted structurally because this box cannot
     #     reproduce the failure by running the code.
-    csrc = (HERE / "convert_to_car.py").read_text(encoding="utf-8")
+    csrc = (HERE / "carutil.py").read_text(encoding="utf-8")
     check("ModSource defines close()", "def close(self)" in csrc)
     check("ModSource is a context manager",
           "__enter__" in csrc and "__exit__" in csrc)
@@ -4335,6 +4335,75 @@ def test_hashfs_sibling_gets_an_honest_error() -> None:
         check("a missing file is not mistaken for HashFS",
               C._hashfs_version(root / "does-not-exist.scs") is None)
 
+def test_interrupted_write_leaves_no_broken_archive() -> None:
+    """A Ctrl-C part-way through must not leave a truncated .scs behind.
+
+    _write_scs used to open the destination directly, so interrupting a
+    200 MB conversion left a partial archive at exactly the path the user is
+    then told to look at -- right name, no way to tell it is broken, and it
+    copies straight into ATS. It now writes a sibling .part and renames it
+    into place, so the destination is never partial.
+    """
+    section("an interrupted conversion leaves nothing behind")
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "car.scs"
+        payload = {"def/vehicle/car_dealer/x/y.sii": "SiiNunit\n{\n}\n"}
+        big = {"model/" + f"m{i}.pmd": b"\x00" * 4096 for i in range(40)}
+
+        # Interrupt mid-write, exactly where the user would.
+        real = C.zipfile.ZipFile.writestr
+        state = {"n": 0}
+
+        def boom(self, *a, **kw):
+            state["n"] += 1
+            if state["n"] > 2:
+                raise KeyboardInterrupt
+            return real(self, *a, **kw)
+
+        C.zipfile.ZipFile.writestr = boom
+        try:
+            C._write_scs(payload, out, big)
+            check("the interrupt propagated", False, "it swallowed the Ctrl-C")
+        except KeyboardInterrupt:
+            check("the interrupt propagates rather than being swallowed", True)
+        finally:
+            C.zipfile.ZipFile.writestr = real
+
+        check("no archive was left at the destination", not out.exists(),
+              str(list(Path(td).iterdir())))
+        leftovers = list(Path(td).glob("*.part"))
+        check("the .part scratch file was cleaned up", not leftovers,
+              str(leftovers))
+
+        # And a normal write still lands, completely and at the right name.
+        C._write_scs(payload, out, big)
+        check("a successful write produces the archive", out.exists())
+        check("and the scratch file is gone afterwards",
+              not list(Path(td).glob("*.part")))
+        with zipfile.ZipFile(out) as z:
+            names = set(z.namelist())
+            bad = z.testzip()
+        check("the archive is complete and readable", bad is None, str(bad))
+        check("every def is present",
+              "def/vehicle/car_dealer/x/y.sii" in names, str(sorted(names)))
+        check("every asset is present", f"model/m39.pmd" in names)
+
+
+def test_carutil_is_the_entry_point() -> None:
+    """The module was renamed; these paths must keep working."""
+    section("the entry point is carutil.py")
+    check("carutil.py exists", (HERE / "carutil.py").is_file())
+    check("the old name is gone", not (HERE / "convert_to_car.py").exists())
+    leftovers = [
+        f.name for f in HERE.iterdir()
+        if f.is_file() and f.suffix in (".py", ".md") and "carutil" not in f.name
+        and f.name not in ("sii.py", "hashfs.py", "logo.py", "brands.py", "ui.py",
+                           "test_converter.py", "README.md", "AGENTS.md",
+                           "FINDINGS.md", ".gitignore")
+    ]
+    check("no unexpected new top-level modules", not leftovers, str(leftovers))
+
+
 def test_modsource_releases_its_handle() -> None:
     """A conversion must not leave the input archive open afterwards.
 
@@ -4497,7 +4566,7 @@ def test_missing_imagemagick_still_converts() -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "noimg.scs"
         script = (
-            "import sys, convert_to_car as C\n"
+            "import sys, carutil as C\n"
             "C._logo.imagemagick = lambda: None\n"
             "sys.exit(C.main(sys.argv[1:]))\n"
         )
@@ -4570,6 +4639,8 @@ def main() -> int:
     test_prompt_power_never_blocks()
     test_air_resistance_override()
     test_hashfs_sibling_gets_an_honest_error()
+    test_interrupted_write_leaves_no_broken_archive()
+    test_carutil_is_the_entry_point()
     test_modsource_releases_its_handle()
     test_dealer_price()
     test_price_keeps_the_menu_proportionate()

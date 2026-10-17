@@ -9,7 +9,7 @@ The game does not read PNGs. Every brand logo in an ATS package is a triple of
 The .dds is produced by ImageMagick, which is used here because it reads every
 format these logos arrive in (PNG, WebP, SVG -- the files in logos/ are not all
 actually PNGs despite the extension). When ImageMagick is unavailable the
-caller falls back to a flat placeholder from convert_to_car.
+caller falls back to a flat placeholder from carutil.
 """
 
 from __future__ import annotations

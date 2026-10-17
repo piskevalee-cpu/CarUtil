@@ -12,7 +12,7 @@ used only to convert brand logo images.
 
 | File | Role |
 |---|---|
-| `convert_to_car.py` | The converter and CLI. Everything of substance lives here (~4000 lines). |
+| `carutil.py` | The converter and CLI. Everything of substance lives here (~4000 lines). |
 | `sii.py` | Parsing/editing helpers for SCS's `.sii` data format. |
 | `hashfs.py` | Reader for SCS's own `SCS#` container (HashFS v1). See below. |
 | `brands.py` | 23 brands (22 named plus the `other` catch-all) and the mapping to each logo file. |
@@ -31,8 +31,8 @@ vendor with no logo. Check both lists when adding a brand.
 ```bash
 python3 test_converter.py                                        # the whole suite
 CARUTIL_FIXTURES=/path/to/mods python3 test_converter.py         # incl. fixture checks
-python3 convert_to_car.py                                       # guided walkthrough
-python3 convert_to_car.py mod.scs --type suv --brand cadillac -o out.scs
+python3 carutil.py                                               # guided walkthrough
+python3 carutil.py mod.scs --type suv --brand cadillac -o out.scs
 ```
 
 **There is no way to run a single test.** No pytest, no unittest — `main()`

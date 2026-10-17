@@ -14,7 +14,7 @@ vehicle, so it registers in the Car Dealer and drives with car physics.
 2. **Run it:**
 
    ```bash
-   python3 convert_to_car.py
+   python3 carutil.py
    ```
 
 3. **Have fun!**
@@ -57,7 +57,7 @@ mod. Most truck mods sit at 9–10 t in their own chassis file, so the preset is
 always wrong for them. For anything real, set the weight yourself:
 
 ```bash
-python3 convert_to_car.py mod.scs --type suv --mass 2069 --brand mercedes
+python3 carutil.py mod.scs --type suv --mass 2069 --brand mercedes
 ```
 
 Mass is the single most consequential value in the conversion — it drives
@@ -79,7 +79,7 @@ from those and appear only in the two premium jobs. So a muscle or classic car
 takes a narrower set of work, not none. `--extra-tags pickup` widens it:
 
 ```bash
-python3 convert_to_car.py mod.scs --type classic --extra-tags pickup --brand mercedes
+python3 carutil.py mod.scs --type classic --extra-tags pickup --brand mercedes
 ```
 
 See [Vehicle types and cargo](#vehicle-types-and-cargo) for the full picture.
@@ -94,7 +94,7 @@ no `carutil` command on your PATH — it is a script you execute directly.
 **Interactive** — start it with no arguments and it asks you everything:
 
 ```bash
-python3 convert_to_car.py
+python3 carutil.py
 ```
 
 ```
@@ -119,7 +119,7 @@ python3 convert_to_car.py
 **Scripted** — pass everything as flags, nothing is prompted:
 
 ```bash
-python3 convert_to_car.py "../mods/2021 Porsche Cayenne Coupe Def.scs" \
+python3 carutil.py "../mods/2021 Porsche Cayenne Coupe Def.scs" \
     --type suv --brand porsche --slug porsche_cayenne \
     -o out_porsche_roadtrip.scs
 ```
@@ -247,7 +247,7 @@ normalised (`off-road`→`offroad`, `crossover`→`suv`, `wagon`→`sedan`,
 `--extra-tags` adds further types so a car qualifies for more cargo:
 
 ```
-python3 convert_to_car.py mod.scs --type suv --extra-tags pickup,sedan --brand honda
+python3 carutil.py mod.scs --type suv --extra-tags pickup,sedan --brand honda
 ```
 
 ### Where the mod goes
@@ -276,7 +276,7 @@ default, so a probe that matches on NTFS can miss on a stock Linux Mint install.
 If your layout is still not found, name it:
 
 ```bash
-python3 convert_to_car.py mod.scs --mod-dir "$HOME/Documents/American Truck Simulator"
+python3 carutil.py mod.scs --mod-dir "$HOME/Documents/American Truck Simulator"
 ```
 
 Repeatable, and it takes the data directory itself, a directory containing one,
@@ -585,7 +585,7 @@ definitions, it is unpacked automatically and the inner mod is converted:
 uses. Both are read, so point the converter at the **folder** holding both:
 
 ```bash
-python3 convert_to_car.py "My Mod Folder" --type suv --brand audi
+python3 carutil.py "My Mod Folder" --type suv --brand audi
 ```
 
 Some mods are *incomplete*, though, and that is not something a converter can
@@ -789,7 +789,7 @@ it. This tool makes your vehicle *register* once you have it.
 
 ## Files
 
-- `convert_to_car.py` — the converter
+- `carutil.py` — the converter
 - `sii.py` — minimal `.sii`/`.sui` reader/writer (line-oriented, comment-preserving)
 - `test_converter.py` — test suite
 - `FINDINGS.md` — schema research and notes
