@@ -249,14 +249,35 @@ asked for bare fields, and a visible default invites the answer the walkthrough
 is trying to avoid. The hint under each question still states the unit and the
 sensible range, so guidance is preserved without being a pre-filled answer.
 
-**One palette, in both surfaces.** `ui._ACCENT` (`#458588`) carries every piece
-of chrome and `ui._YELLOW` (`#d79921`) every warning; `_RICH` maps those two
-logical names to what Rich is handed, and `_STYLES` spells the same two as
-24-bit escapes for the non-Rich path — because the terminal's own `yellow` is a
-different colour to this one. `paint(..., "accent")` and `paint(..., "yellow")`
-are the only names either surface should be given; `magenta` and `cyan` are gone
-from the palette and must not come back. A palette change has to move both
-tables, which is what `test_ui` checks.
+**One palette, in both surfaces, named for what a thing IS and never its
+colour.** Six colours, and every mark on screen is one of them:
+
+| constant | hex | carries |
+|---|---|---|
+| `ui._ACCENT` | `#6a9bcc` dusty blue | steps, rules, cursor, bullets, banner border |
+| `ui._WARN` | `#d97757` clay | every warning |
+| `ui._OK` | `#788c5d` sage | success |
+| `ui._MUTED` | `#b0aea5` cloud | hints, instructions, secondary text |
+| `ui._SURFACE` | `#141413` slate | the banner panel's background |
+| `ui._TEXT` | `#faf9f5` ivory | the banner art on that panel |
+
+`_RICH` maps the logical names (`accent`, `warn`, `ok`, `fail`) to what Rich is
+handed; `_STYLES` spells the same four as 24-bit escapes for the non-Rich path.
+**A name must resolve in both tables.** One in only one is how a marker silently
+loses its colour, and that is not hypothetical: this palette has no red, and
+`fail` was reaching for one — the fallback would have dropped it while Rich drew
+it, so the two halves of the interface disagreed only on the error path. `fail`
+is now the surface pair reversed (ivory on slate), which is legible on either
+background. `test_ui` checks every name in both tables and asserts the escapes
+are truecolour rather than one of the terminal's 8 colours.
+
+The names are `warn`/`ok`, **not** `yellow`/`green`, and a stale call site using
+an old name paints nothing at all — silently, because `paint()` ignores names it
+does not know. Six checks pin that the removed names are dead. Same for
+`magenta`/`cyan`/`blue`/`red`: gone, must not come back.
+
+Slate and Ivory are deliberately **absent from `_STYLES`**: they are a surface
+pair, and the plain-ANSI fallback has no background to put them on.
 
 **Cancelling is still an escape.** `Ctrl-C`/`Ctrl-D` return `None` and fall
 back to the default. Without that, a mandatory field would be unescapable.

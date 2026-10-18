@@ -4224,7 +4224,7 @@ def print_paths(mod_dirs: list[Path] | None = None,
     def row(label: str, path: Path | None, note: str = "") -> None:
         if path is None:
             print("  " + _ui.paint(f"{label:<14}", "dim")
-                  + _ui.paint("not found", "yellow"))
+                  + _ui.paint("not found", "warn"))
             return
         print("  " + _ui.paint(f"{label:<14}", "dim")
               + _ui.paint(str(path), "bold"))
@@ -4263,9 +4263,9 @@ def print_install_help(out: Path, mod_dirs: list[Path] | None = None) -> None:
     if mod_dirs is None:
         mod_dirs = find_mod_folders()
     print()
-    print(_ui.paint("  " + _ui.rule("=", 62), "green"))
+    print(_ui.paint("  " + _ui.rule("=", 62), "ok"))
     print()
-    print("  " + _ui.paint("DONE", "green", "bold")
+    print("  " + _ui.paint("DONE", "ok", "bold")
           + " -- your Road Trip mod is here:")
     print()
     print("      " + _ui.paint(str(out.resolve()), "bold"))
@@ -4298,7 +4298,7 @@ def print_install_help(out: Path, mod_dirs: list[Path] | None = None) -> None:
     print("  " + _ui.paint("Car Mode needs the Road Trip DLC. Once it is unlocked,",
                             "dim"))
     print("  " + _ui.paint("look for this car under Car Dealer.", "dim"))
-    print(_ui.paint("  " + _ui.rule("=", 62), "green"))
+    print(_ui.paint("  " + _ui.rule("=", 62), "ok"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -4552,7 +4552,7 @@ def main(argv: list[str] | None = None) -> int:
             print("  " + _ui.paint(
                 f"warning: tag(s) {', '.join(unknown)} are not in the base game's "
                 "car_job vehicle_types[] list, so they will match no jobs",
-                "yellow"))
+                "warn"))
 
         # ---- 3. brand --------------------------------------------------------
         if args.brand is None:
@@ -4734,7 +4734,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print("  " + _ui.paint(str(args.input), "dim") + "  ->  "
-          + _ui.paint(str(out), "bold", "green"))
+          + _ui.paint(str(out), "bold", "ok"))
     print()
     if rep.actions:
         _ui.heading("changes")
@@ -4751,7 +4751,7 @@ def main(argv: list[str] | None = None) -> int:
     if rep.gaps:
         _ui.heading("not present in source (needs manual work)")
         for g in rep.gaps:
-            print("  " + _ui.paint("?", "yellow") + " " + g)
+            print("  " + _ui.paint("?", "warn") + " " + g)
 
     if args.dry_run:
         print("\n(dry run -- nothing was written)")

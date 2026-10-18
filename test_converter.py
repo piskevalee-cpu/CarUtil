@@ -4298,29 +4298,69 @@ def test_ui() -> None:
     if saved is not None:
         _os.environ["NO_COLOR"] = saved
 
-    # One blue accent and one yellow warning, and the plain-ANSI fallback spells
-    # the same two colours rather than the terminal's own idea of "yellow". A
-    # palette change has to move both surfaces or the two halves of the
-    # interface drift apart.
+    # One palette, six colours, in both surfaces. Every mark on screen is one of
+    # them, and every logical name resolves in BOTH tables -- a name in one and not
+    # the other is how a marker silently loses its colour, which is exactly what
+    # happened when the old palette had no red for `fail` to use.
     def rgb(hexcode: str) -> tuple[int, int, int]:
         return tuple(int(hexcode[i:i + 2], 16) for i in (1, 3, 5))
 
-    check("the accent is the palette blue", U._ACCENT == "#458588", U._ACCENT)
-    check("warnings use the palette yellow", U._YELLOW == "#d79921", U._YELLOW)
-    for name, hexcode in (("accent", U._ACCENT), ("yellow", U._YELLOW)):
+    palette = {
+        "accent": U._ACCENT, "warn": U._WARN, "ok": U._OK,
+        "muted": U._MUTED, "surface": U._SURFACE, "text": U._TEXT,
+    }
+    wanted = {"accent": "#6a9bcc", "warn": "#d97757", "ok": "#788c5d",
+              "muted": "#b0aea5", "surface": "#141413", "text": "#faf9f5"}
+    for name, hexcode in palette.items():
+        check(f"the palette's {name} is the one that was chosen",
+              hexcode == wanted[name], f"{hexcode} != {wanted[name]}")
+        check(f"{name} is a real 24-bit colour, not a name Rich must resolve",
+              bool(re.fullmatch(r"#[0-9a-f]{6}", hexcode)), hexcode)
+
+    for name in ("accent", "warn", "ok", "fail"):
+        check(f"'{name}' resolves in the plain-ANSI table",
+              name in U._STYLES, str(sorted(U._STYLES)))
+        check(f"'{name}' resolves in the Rich table",
+              name in U._RICH, str(sorted(U._RICH)))
+
+    # The fallback has to spell the same colour Rich is handed, not the terminal's
+    # own idea of a colour that happens to share a name.
+    for name in ("accent", "warn", "ok", "fail"):
+        hexcode = palette.get(name, U._TEXT)
         r, g, b = rgb(hexcode)
-        check(f"the fallback spells {name} as the same colour",
-              U._STYLES[name] == f"\033[38;2;{r};{g};{b}m", U._STYLES[name])
+        check(f"the fallback spells '{name}' as the same colour",
+              U._STYLES[name] == f"\033[38;2;{r};{g};{b}m",
+              f"{U._STYLES[name]!r}")
+
+    # No escape may be a bare 8-colour code like `\033[33m`: those are the
+    # terminal's own yellow and green, which are not this palette.
+    for name in ("accent", "warn", "ok", "fail"):
+        check(f"'{name}' is truecolour, not one of the terminal's 8 colours",
+              re.fullmatch(r"\033\[38;2;\d{1,3};\d{1,3};\d{1,3}m",
+                           U._STYLES[name]) is not None,
+              repr(U._STYLES[name]))
+
+    # Slate and Ivory are a surface pair, so they must not be reachable as a
+    # foreground: the fallback has no background to put them on.
+    check("Slate is not offered as a foreground",
+          "surface" not in U._STYLES and "surface" not in U._RICH)
+    check("Ivory is not offered as a plain foreground",
+          "text" not in U._STYLES and "text" not in U._RICH)
+    check("a failure is the surface pair reversed, so it is legible either way",
+          U._SURFACE in U._RICH["fail"] and U._TEXT in U._RICH["fail"],
+          U._RICH["fail"])
+
     _os.environ["FORCE_COLOR"] = "1"
     try:
-        check("paint emits the accent when colour is on",
-              U.paint("x", "accent") ==
-              f"{U._STYLES['accent']}x{U._RESET}",
-              repr(U.paint("x", "accent")))
-        check("paint emits the warning colour when colour is on",
-              U.paint("x", "yellow") ==
-              f"{U._STYLES['yellow']}x{U._RESET}",
-              repr(U.paint("x", "yellow")))
+        for name in ("accent", "warn", "ok", "fail"):
+            check(f"paint emits the palette colour for '{name}'",
+                  U.paint("x", name) == f"{U._STYLES[name]}x{U._RESET}",
+                  repr(U.paint("x", name)))
+        # The old names must be gone, or a stale call site loses its colour
+        # silently rather than failing loudly.
+        for dead in ("yellow", "green", "red", "cyan", "magenta", "blue"):
+            check(f"the removed name '{dead}' paints nothing",
+                  U.paint("x", dead) == "x", repr(U.paint("x", dead)))
     finally:
         _os.environ.pop("FORCE_COLOR", None)
         if saved is not None:
@@ -4349,6 +4389,34 @@ def test_ui() -> None:
     finally:
         sys.stdout = real
     text = out.getvalue()
+
+    # show_banner and hint only take the Rich branch on a TTY, so nothing else in
+    # the suite calls them and a wrong keyword or a bad style reaches a real
+    # terminal before any check sees it. Drive both through a fake TTY.
+    class FakeTty(io.StringIO):
+        def isatty(self):
+            return True
+
+    tty_out = FakeTty()
+    real, sys.stdout = sys.stdout, tty_out
+    try:
+        if U._Console is not None:
+            U.show_banner()
+            U.hint("a hint")
+    finally:
+        sys.stdout = real
+    banner_text = tty_out.getvalue()
+    if U._Console is None:
+        skip("the Rich banner renders on a fake tty", "rich is not installed")
+    else:
+        check("the Rich banner renders without raising",
+              "CarUtil" in banner_text, repr(banner_text[:120]))
+        check("the banner panel is painted on the palette's slate",
+              "48;2;20;20;19" in banner_text, repr(banner_text[:200]))
+        check("the banner art is the palette's ivory on it",
+              "38;2;250;249;245" in banner_text, repr(banner_text[:200]))
+        check("the hint renders through Rich", "a hint" in banner_text,
+              repr(banner_text[-120:]))
     check("ok marker", "+ done" in text)
     check("warn marker", "! careful" in text)
     check("bullet marker", "* part" in text)

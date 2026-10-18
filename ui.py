@@ -27,27 +27,54 @@ except ImportError:
 
 _RESET = "\033[0m"
 
-# One blue accent carries every piece of chrome, and one yellow carries every
-# warning, so the Rich chrome and the Questionary menus are visibly the same
-# program. Rich and Questionary both spell colours as "#rrggbb", so a single
-# constant can drive both. The plain-ANSI fallback spells the same two in
-# 24-bit, because the terminal's own "yellow" is a different colour to this one.
-_ACCENT = "#458588"
-_YELLOW = "#d79921"
-_MUTED = "#888888"
+# The interface is one palette. Every colour below is one of its six, so nothing
+# on screen is a colour the rest of the program does not also use -- which is the
+# only reason a six-colour scheme reads as one program rather than six.
+#
+# Two are a surface pair: the banner panel is painted Slate and its art is Ivory,
+# which is the whole point of carrying a near-black and a near-white. The rest are
+# chrome: Dusty Blue carries every structural mark, Clay every warning, Sage every
+# success, Cloud everything secondary.
+#
+# Slate and Ivory are deliberately NOT given escape sequences in `_STYLES`. The
+# plain-ANSI fallback has no background to paint a panel on, and `paint()` reaches
+# `_STYLES` for foregrounds only, so a name there means "a colour we can write on
+# the terminal's own background".
+_ACCENT = "#6a9bcc"      # Claude Dusty Blue: steps, rules, menu cursor, bullets
+_WARN = "#d97757"        # Claude Clay: every warning
+_OK = "#788c5d"          # Claude Sage Green: success
+_MUTED = "#b0aea5"       # Claude Cloud: hints, instructions, secondary text
+_SURFACE = "#141413"     # Claude Slate: the banner panel's background
+_TEXT = "#faf9f5"        # Claude Ivory: the banner art on that panel
 
+# Truecolour for all four, because the terminal's own "yellow" and "green" are
+# different colours to these and the point of naming them is that they are not.
 _STYLES = {
     "bold": "\033[1m",
     "dim": "\033[2m",
-    "red": "\033[31m",
-    "green": "\033[32m",
-    "accent": "\033[38;2;69;133;136m",
-    "yellow": "\033[38;2;215;153;33m",
+    "accent": "\033[38;2;106;155;204m",
+    "warn": "\033[38;2;217;119;87m",
+    "ok": "\033[38;2;120;140;93m",
+    "fail": "\033[38;2;250;249;245m",
 }
 
-# The names above, as Rich spells them. Anything absent is a colour Rich and
-# the fallback agree on already, so it can be passed straight through.
-_RICH = {"accent": _ACCENT, "yellow": _YELLOW}
+# The names above, as Rich spells them. Anything absent is a colour Rich and the
+# fallback agree on already, so it can be passed straight through.
+#
+# A failure is the surface pair reversed -- Ivory on Slate -- because the palette
+# has no red and an unstyled marker is the one thing here that would be read as a
+# bug. It is also distinct from a warning without borrowing a second warning
+# colour, and it is legible on either background, which a mid-tone is not.
+#
+# The names are what the thing IS, never its colour: this palette has no yellow
+# and no green, so a key called either would describe a colour the interface does
+# not use and mislead the next person to grep for it.
+_RICH = {
+    "accent": _ACCENT,
+    "warn": _WARN,
+    "ok": _OK,
+    "fail": f"bold {_TEXT} on {_SURFACE}",
+}
 
 # Questionary's own `DEFAULT_STYLE` has no `highlighted` rule, but
 # prompt_toolkit's built-in style defines `selected` as `reverse` -- and the two
@@ -149,12 +176,21 @@ def banner() -> str:
 def show_banner() -> None:
     console = _console()
     if console is not None and sys.stdout.isatty():
+        # Slate behind Ivory, which is the only reason the palette carries a
+        # near-black and a near-white: the panel is a surface, not just a border.
+        # `style` paints the whole Panel, so the padding and border are inside it.
         console.print(
             _Panel(
-                BANNER.strip("\n"),
-                title="CarUtil",
+                _Text(BANNER.strip("\n"), style=_TEXT),
+                # A Text, not title_style= : Panel has no such keyword, and
+                # `title` accepting a Text is the part that is actually in the
+                # signature. show_banner only runs on a TTY, so nothing in the
+                # suite calls it and a wrong keyword here goes unseen until a
+                # real terminal does -- see test_ui.
+                title=_Text("CarUtil", style=_MUTED),
                 title_align="left",
                 border_style=_ACCENT,
+                style=f"on {_SURFACE}",
                 padding=(1, 4),
                 expand=False,
             )
@@ -212,7 +248,7 @@ def step(index: int, total: int, text: str) -> None:
 
 
 def ok(text: str) -> None:
-    _status("+", text, "green")
+    _status("+", text, "ok")
 
 
 def bullet(text: str) -> None:
@@ -220,19 +256,26 @@ def bullet(text: str) -> None:
 
 
 def warn(text: str) -> None:
-    _status("!", text, "yellow")
+    _status("!", text, "warn")
 
 
 def fail(text: str) -> None:
-    _status("x", text, "red")
+    _status("x", text, "fail")
 
 
 def _status(marker: str, text: str, color: str) -> None:
+    """A status line: two spaces, a coloured marker, then the message.
+
+    `color` is a logical name, resolved per surface -- `_RICH` for Rich, `_STYLES`
+    for the plain-ANSI fallback. A name in one and not the other is how a marker
+    quietly loses its colour, which is why both tables are checked in test_ui
+    rather than trusted.
+    """
     console = _console()
     if console is not None:
         console.print(
             _Text.assemble(("  ", ""),
-                           (marker, f"bold {_RICH.get(color, color)}"),
+                           (marker, _RICH.get(color, f"bold {color}")),
                            (" ", ""), (text, ""))
         )
     else:
