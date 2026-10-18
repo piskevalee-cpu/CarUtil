@@ -1258,6 +1258,14 @@ def _ask(prompt: str) -> str:
         raise SystemExit(1)
 
 
+# A bare field. No label, so the typed answer comes to rest on its own line
+# directly under the question -- which is exactly where a menu puts its answer.
+# A label like `Weight in kg:` puts words between the question and the answer
+# and makes the two halves of the walkthrough read as two different programs;
+# the unit and the sensible range are stated in the hint instead.
+_FIELD = "  "
+
+
 def _confirm(prompt: str) -> bool:
     """Ask a yes/no question; an empty answer accepts the default yes."""
     while True:
@@ -1271,12 +1279,10 @@ def _confirm(prompt: str) -> bool:
 
 def prompt_source() -> Path:
     """Ask where the mod is."""
-    print()
-    print("  Where is your mod?")
-    print("    Give a .scs file or an unpacked mod folder.")
-    print()
+    _ui.heading("Where is your mod?")
+    _ui.hint("a .scs archive, or an unpacked mod folder")
     while True:
-        raw = _ask("  Path: ").strip().strip('"').strip("'").strip()
+        raw = _ask(_FIELD).strip('"').strip("'").strip()
         if raw.lower() in ("q", "quit", "exit"):
             raise SystemExit("cancelled")
         if not raw:
@@ -1292,7 +1298,6 @@ def prompt_source() -> Path:
 
 def prompt_type() -> str:
     """Ask what kind of car it is."""
-    print()
     _ui.heading("What kind of car is it?")
     options = [(t.title(), TYPE_HELP[t]) for t in VEHICLE_TYPES]
     idx = _ui.arrow_menu(options, default=0)
@@ -1326,7 +1331,6 @@ def prompt_brand(slug: str) -> str:
     if _brands.logo_path(guess) is None:
         guess = "other"
 
-    print()
     _ui.heading("Which brand is it? The Car Dealer shows this name and logo.")
     have = _brands.available()
     options = [
@@ -1348,16 +1352,12 @@ def prompt_weight(vtype: str, preset: str | None) -> list[int] | None:
         return None
 
     suggestion = default_total(vtype)
-    print()
-    print("  How much do you want this car to weigh?")
-    print(f"    Enter the total in kg (a typical {vtype} is about "
-          f"{suggestion} kg),")
-    print("    or 'f,r' to set front and rear axles separately,")
-    print(f"    between {_MIN_KG} and {_MAX_KG} kg.")
-    print()
+    _ui.heading("How much should this car weigh?")
+    _ui.hint(f"{_MIN_KG}-{_MAX_KG} kg, or 'f,r' for the two axles; "
+             f"a typical {vtype} is about {suggestion} kg")
     while True:
         try:
-            raw = input("  Weight in kg: ").strip()
+            raw = input(_FIELD).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  cancelled -- using the type default.")
             return None
@@ -1562,7 +1562,6 @@ def prompt_rpm_ranges(bands: dict[str, str]) -> dict[str, str]:
         # test suite doing many conversions would trip over.
         return dict(bands)
 
-    print()
     _ui.heading("This engine declares no rev bands for the automatic")
     print("  An automatic gearbox decides when to change gear from its engine's")
     print("  rpm_range_low_gear, rpm_range_high_gear and rpm_range_power -- the")
@@ -1718,16 +1717,13 @@ def prompt_power(mass_kg: float) -> tuple[float | None, int | None]:
         return None, None
 
     default_hp = _DEFAULT_HP_PER_TONNE * mass_kg / 1000.0
-    print()
-    print("  How powerful should this car be?")
-    print("    Enter peak power in horsepower. SCS's own Road Trip cars make")
-    print("    202-398 hp, so 250-400 suits most cars.")
-    print(f"    Around {default_hp:.0f} hp suits {mass_kg:.0f} kg.")
-    print()
+    _ui.heading("How much power should this car make?")
+    _ui.hint(f"peak horsepower; SCS's own cars make 202-398, about "
+             f"{default_hp:.0f} suits {mass_kg:.0f} kg")
     hp: float | None = None
     while hp is None:
         try:
-            raw = input("  Horsepower: ").strip()
+            raw = input(_FIELD).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  cancelled -- using the measured default.")
             return None, None
@@ -1746,14 +1742,12 @@ def prompt_power(mass_kg: float) -> tuple[float | None, int | None]:
         hp = value
 
     peak = _DEFAULT_PEAK_POWER_RPM
-    print()
-    print("  Where should that power peak?")
-    print("    Higher revs give more mid-range pull and a higher top speed;")
-    print("    lower revs give a softer launch. SCS's cars peak at 4500-6000.")
-    print()
+    _ui.heading("Where should that power peak?")
+    _ui.hint(f"{_DEFAULT_PEAK_POWER_RPM}-6000 rpm on SCS's cars; lower revs "
+             "launch more gently")
     while True:
         try:
-            raw = input("  Peak power rev: ").strip()
+            raw = input(_FIELD).strip()
         except (EOFError, KeyboardInterrupt):
             return hp, None
         if not raw:
@@ -1783,15 +1777,12 @@ def prompt_acceleration(mass_kg: float) -> float | None:
         return None
 
     default = _CAL_TIME_S * (mass_kg / _CAL_MASS_KG)
-    print()
-    print("  How quick should this car be?")
-    print("    Enter the 0-60 mph time in seconds. Most cars are 4-7 s;")
-    print("    a truck-based conversion lands near 12 s otherwise.")
-    print(f"    Around {default:.1f} s suits {mass_kg:.0f} kg.")
-    print()
+    _ui.heading("How quick should this car be?")
+    _ui.hint(f"0-60 mph in seconds; most cars are 4-7 s, about "
+             f"{default:.1f} s suits {mass_kg:.0f} kg")
     while True:
         try:
-            raw = input("  0-60 seconds: ").strip()
+            raw = input(_FIELD).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  cancelled -- using the measured default.")
             return None
@@ -1824,15 +1815,12 @@ def prompt_price() -> int | None:
     if not _tty():
         return None
 
-    print()
-    print("  How much should this car cost?")
-    print("    ATS has no single price key -- the dealer adds up the price of")
-    print("    every part it lists, so this rescales those parts to reach your")
-    print("    figure. The rest of the upgrade menu keeps the mod's prices.")
-    print()
+    _ui.heading("How much should this car cost?")
+    _ui.hint("the dealer sums the parts it lists, so the whole price table "
+             "scales with it")
     while True:
         try:
-            raw = input("  Price: ").strip()
+            raw = input(_FIELD).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n  cancelled -- keeping the mod's own prices.")
             return None
@@ -4172,17 +4160,17 @@ def print_install_help(out: Path, mod_dirs: list[Path] | None = None) -> None:
     print("      " + _ui.paint(str(out.resolve()), "bold"))
     print()
     print("  " + _ui.paint("To install it:", "bold"))
-    print("    " + _ui.paint("1.", "magenta") + " Close American Truck Simulator")
+    print("    " + _ui.paint("1.", "accent") + " Close American Truck Simulator")
 
     mod_dirs = [d / "mod" for d in mod_dirs]
     if mod_dirs:
-        print("    " + _ui.paint("2.", "magenta")
+        print("    " + _ui.paint("2.", "accent")
               + " Copy that .scs into your ATS mod folder:")
         for d in mod_dirs:
             marker = "" if d.exists() else "  (will be created)"
-            print("       " + _ui.paint(str(d), "cyan") + marker)
+            print("       " + _ui.paint(str(d), "accent") + marker)
     else:
-        print("    " + _ui.paint("2.", "magenta")
+        print("    " + _ui.paint("2.", "accent")
               + " Copy that .scs into your ATS mod folder:")
         print("       Windows:  Documents\\American Truck Simulator\\mod")
         print("       Proton:   ~/.steam/steamapps/compatdata/<appid>/pfx/drive_c/")
@@ -4190,9 +4178,10 @@ def print_install_help(out: Path, mod_dirs: list[Path] | None = None) -> None:
         print("       " + _ui.paint("(I could not find one on this machine. If it is",
                                         "dim"))
         print("        " + _ui.paint("elsewhere, re-run with", "dim") + " "
-              + _ui.paint("--mod-dir /path/to/American Truck Simulator", "cyan"))
+              + _ui.paint("--mod-dir /path/to/American Truck Simulator",
+                          "accent"))
         print("        " + _ui.paint("and I will print exactly that folder)", "dim"))
-    print("    " + _ui.paint("3.", "magenta")
+    print("    " + _ui.paint("3.", "accent")
           + " Start the game, then Mod Manager -> enable -> Save & Play")
     print()
     print("  " + _ui.paint("Car Mode needs the Road Trip DLC. Once it is unlocked,",

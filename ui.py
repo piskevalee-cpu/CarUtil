@@ -26,22 +26,28 @@ except ImportError:
     _Text = None
 
 _RESET = "\033[0m"
+
+# One blue accent carries every piece of chrome, and one yellow carries every
+# warning, so the Rich chrome and the Questionary menus are visibly the same
+# program. Rich and Questionary both spell colours as "#rrggbb", so a single
+# constant can drive both. The plain-ANSI fallback spells the same two in
+# 24-bit, because the terminal's own "yellow" is a different colour to this one.
+_ACCENT = "#458588"
+_YELLOW = "#d79921"
+_MUTED = "#888888"
+
 _STYLES = {
     "bold": "\033[1m",
     "dim": "\033[2m",
     "red": "\033[31m",
     "green": "\033[32m",
-    "yellow": "\033[33m",
-    "blue": "\033[34m",
-    "magenta": "\033[35m",
-    "cyan": "\033[36m",
+    "accent": "\033[38;2;69;133;136m",
+    "yellow": "\033[38;2;215;153;33m",
 }
 
-# One accent for the whole interface, so the Rich chrome and the Questionary
-# menus are visibly the same program. Rich and Questionary both spell colours
-# as "#rrggbb", so a single constant can drive both.
-_ACCENT = "#00afff"
-_MUTED = "#888888"
+# The names above, as Rich spells them. Anything absent is a colour Rich and
+# the fallback agree on already, so it can be passed straight through.
+_RICH = {"accent": _ACCENT, "yellow": _YELLOW}
 
 # Questionary's own `DEFAULT_STYLE` has no `highlighted` rule, but
 # prompt_toolkit's built-in style defines `selected` as `reverse` -- and the two
@@ -137,7 +143,7 @@ BANNER = r"""
 
 def banner() -> str:
     """The startup banner, dimmed so it never shouts over the real output."""
-    return paint(BANNER.strip("\n"), "cyan") + "\n"
+    return paint(BANNER.strip("\n"), "accent") + "\n"
 
 
 def show_banner() -> None:
@@ -158,6 +164,12 @@ def show_banner() -> None:
 
 
 def heading(text: str) -> None:
+    """The question a prompt is asking, drawn the same way for every prompt.
+
+    A menu has always introduced itself with this: a rule with the question on
+    it, then the choices, then the answer. The typed prompts borrow the shape so
+    the walkthrough reads as one program rather than two.
+    """
     console = _console()
     if console is not None and sys.stdout.isatty():
         console.print()
@@ -168,6 +180,21 @@ def heading(text: str) -> None:
     else:
         print()
         print(paint(f"  {text}", "bold"))
+
+
+def hint(text: str) -> None:
+    """One dim line of guidance under a heading.
+
+    The range and the unit live here rather than in the field's label: a label
+    like `Weight in kg:` puts words between the question and the answer, and a
+    pre-filled default in brackets invites the answer the prompt is trying to
+    avoid. A hint states the sensible answer without being one.
+    """
+    console = _console()
+    if console is not None and sys.stdout.isatty():
+        console.print(_Text("  " + text, style=f"dim {_MUTED}"))
+    else:
+        print("  " + paint(text, "dim"))
 
 
 def step(index: int, total: int, text: str) -> None:
@@ -181,7 +208,7 @@ def step(index: int, total: int, text: str) -> None:
             )
         )
     else:
-        print(paint(f"  [{index}/{total}]", "magenta", "bold") + f" {text}")
+        print(paint(f"  [{index}/{total}]", "accent", "bold") + f" {text}")
 
 
 def ok(text: str) -> None:
@@ -189,7 +216,7 @@ def ok(text: str) -> None:
 
 
 def bullet(text: str) -> None:
-    _status("*", text, _ACCENT)
+    _status("*", text, "accent")
 
 
 def warn(text: str) -> None:
@@ -204,8 +231,9 @@ def _status(marker: str, text: str, color: str) -> None:
     console = _console()
     if console is not None:
         console.print(
-            _Text.assemble(("  ", ""), (marker, f"bold {color}"), (" ", ""),
-                           (text, ""))
+            _Text.assemble(("  ", ""),
+                           (marker, f"bold {_RICH.get(color, color)}"),
+                           (" ", ""), (text, ""))
         )
     else:
         print("  " + paint(marker, color, "bold") + " " + text)

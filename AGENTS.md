@@ -55,11 +55,16 @@ is expected, not a regression.
 how it was invoked.** Three of them used to assume the harness's stdin was not a
 terminal, so from a console the first one failed and
 `test_prompt_price_never_blocks` would have *hung* waiting for an answer. They
-set `C._tty` themselves now: `test_prompts_demand_a_value` pins it on, the other
-prompt tests pin it off. Keep it that way rather than relying on how the suite
-was invoked — and run it once with stdin closed (`python3 test_converter.py
-< /dev/null`) after touching a prompt, because that is the invocation that used
-to hang.
+set `C._tty` themselves now: `test_prompts_demand_a_value` and
+`test_prompts_look_like_the_menus` pin it on, the other prompt tests pin it off.
+Keep it that way rather than relying on how the suite was invoked — and run it
+once with stdin closed (`python3 test_converter.py < /dev/null`) after touching a
+prompt, because that is the invocation that used to hang. Then run it once under
+a real console (`script -qec "python3 test_converter.py" /dev/null`), which is
+the *other* invocation that has caught something: `test_ui`'s "paint is a no-op
+when off" read `sys.stdout` itself and so failed from a console for years, while
+passing in every piped run. It pins a non-tty proxy over `sys.stdout` now. Any
+check that touches `sys.stdin`/`sys.stdout` needs the same treatment.
 
 **`python3` and `python` may be different interpreters** (on the Windows dev
 box, 3.14 and 3.11). Pick one and use it for both the tests and the CLI.
@@ -213,13 +218,33 @@ The "skips steps 4–6" claim that used to sit in `FINDINGS.md` §31, in
 so the claim outlived the behaviour by a long way. Re-read those three places
 whenever the prompt order changes.
 
-**Every prompt demands a real value.** Empty input is an omission, not a
-request for the default: it re-asks with the same message used for a bad value.
-There are deliberately **no bracketed suggestions** in the prompt labels and
-no "Press Enter for N" lines — the user asked for bare fields, and a visible
-default invites the answer the walkthrough is trying to avoid. The explanatory
-paragraph above each prompt still states the sensible range, so guidance is
-preserved without being a pre-filled answer.
+**Every prompt is the same shape, and every prompt demands a real value.** The
+walkthrough is one shape end to end: a numbered step, a blank line, the question
+as an accent `Rule` (`_ui.heading`), one dim hint (`_ui.hint`), and the answer.
+A menu answers with the row Questionary echoes under the question; a typed field
+answers with the bare value, which is why `input()` is handed `_FIELD` (`"  "`)
+and never a label. A label like `Weight in kg:` puts words between the question
+and the answer, and two shapes in one walkthrough read as two programs — the
+typed prompts used to print a four-line paragraph each. That is also why
+`prompt_type`/`prompt_brand`/`prompt_rpm_ranges` no longer `print()` a blank
+before `heading()`: the heading owns the spacing, so every question sits exactly
+one blank line below its step.
+
+Empty input is an omission, not a request for the default: it re-asks with the
+same message used for a bad value. There are deliberately **no bracketed
+suggestions** in the prompt labels and no "Press Enter for N" lines — the user
+asked for bare fields, and a visible default invites the answer the walkthrough
+is trying to avoid. The hint under each question still states the unit and the
+sensible range, so guidance is preserved without being a pre-filled answer.
+
+**One palette, in both surfaces.** `ui._ACCENT` (`#458588`) carries every piece
+of chrome and `ui._YELLOW` (`#d79921`) every warning; `_RICH` maps those two
+logical names to what Rich is handed, and `_STYLES` spells the same two as
+24-bit escapes for the non-Rich path — because the terminal's own `yellow` is a
+different colour to this one. `paint(..., "accent")` and `paint(..., "yellow")`
+are the only names either surface should be given; `magenta` and `cyan` are gone
+from the palette and must not come back. A palette change has to move both
+tables, which is what `test_ui` checks.
 
 **Cancelling is still an escape.** `Ctrl-C`/`Ctrl-D` return `None` and fall
 back to the default. Without that, a mandatory field would be unescapable.

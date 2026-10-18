@@ -2485,6 +2485,91 @@ def test_prompts_demand_a_value() -> None:
         builtins.input = real_input
 
 
+def test_prompts_look_like_the_menus() -> None:
+    """Every prompt is one shape: question rule, one hint, then the answer.
+
+    The typed fields used to print a four-line paragraph above themselves while
+    the menus printed a question and the row they settled on, so half the
+    walkthrough read like a different program. A typed answer now comes to rest
+    on its own line under the question -- `input()` is given a bare field, never
+    a label -- and the only thing between question and answer is one dim hint
+    carrying the unit and the sensible range.
+    """
+    section("prompts share the menu shape")
+    import builtins
+    import io
+
+    real_tty = C._tty
+    real_input = builtins.input
+    real_stdout = sys.stdout
+    real_heading, real_hint = C._ui.heading, C._ui.hint
+    seen: list[tuple[str, str]] = []
+    C._tty = lambda: True
+    C._ui.heading = lambda text: seen.append(("heading", text))
+    C._ui.hint = lambda text: seen.append(("hint", text))
+    try:
+        def drive(fn, answers, *args):
+            fake, prompts = _answer(list(answers))
+            builtins.input = fake
+            buf = io.StringIO()
+            sys.stdout = buf
+            try:
+                fn(*args)
+            finally:
+                sys.stdout = real_stdout
+            return prompts, buf.getvalue()
+
+        cases = [
+            ("weight", C.prompt_weight, ("suv", None), ["1650"], 1),
+            ("power", C.prompt_power, (2200,), ["350", "4500"], 2),
+            ("acceleration", C.prompt_acceleration, (2200,), ["5.5"], 1),
+            ("price", C.prompt_price, (), ["45000"], 1),
+        ]
+        for label, fn, args, answers, headings in cases:
+            seen.clear()
+            prompts, text = drive(fn, answers, *args)
+            kinds = [kind for kind, _ in seen]
+            check(f"{label}: asks its question as a heading",
+                  kinds.count("heading") == headings and kinds[0] == "heading",
+                  str(seen))
+            check(f"{label}: every question is a question",
+                  all(q.endswith("?") for k, q in seen if k == "heading"),
+                  str(seen))
+            check(f"{label}: one hint per question, and nothing else",
+                  kinds == ["heading", "hint"] * headings, str(kinds))
+            check(f"{label}: the field itself carries no label",
+                  "".join(prompts).strip() == "", repr(prompts))
+            check(f"{label}: no paragraph above the field",
+                  "\n    " not in text, repr(text))
+
+        # The source prompt is the first thing in the walkthrough, so it has to
+        # look like the rest of it.
+        seen.clear()
+        fake, prompts = _answer([str(HERE / "carutil.py")])
+        builtins.input = fake
+        buf = io.StringIO()
+        sys.stdout = buf
+        try:
+            C.prompt_source()
+            source_text = buf.getvalue()
+        finally:
+            sys.stdout = real_stdout
+        check("source: asks its question as a heading",
+              [kind for kind, _ in seen] == ["heading", "hint"], str(seen))
+        check("source: the field itself carries no label",
+              "".join(prompts).strip() == "", repr(prompts))
+        check("source: no paragraph above the field",
+              "\n    " not in source_text, repr(source_text))
+
+        # A label is the one thing the shape forbids, so hold the rule itself.
+        check("the bare field is what the prompts pass to input()",
+              C._FIELD.strip() == "" and C._FIELD.isascii(), repr(C._FIELD))
+    finally:
+        C._tty = real_tty
+        C._ui.heading, C._ui.hint = real_heading, real_hint
+        builtins.input = real_input
+
+
 def test_prompt_price_never_blocks() -> None:
     section("price prompt never blocks")
     # Force the condition rather than assuming it. Running the suite from a
@@ -4031,7 +4116,32 @@ def test_ui() -> None:
     _os.environ.pop("FORCE_COLOR", None)
     buf = io.StringIO()          # StringIO has no isatty -> not a tty
     check("colour off when not a tty", U.colour_enabled(buf) is False)
-    check("paint is a no-op when off", U.paint("hi", "green") == "hi")
+
+    # `paint` reads sys.stdout itself, so pin it: run from a console, sys.stdout
+    # IS a tty and this check would fail for the invocation rather than for the
+    # code. Same rule as the prompt tests below. The stream still forwards to the
+    # real stdout, or the PASS line would land in the buffer instead of the log.
+    class NotATty:
+        """Reports itself as a pipe while writing where it was pointed."""
+
+        def __init__(self, stream):
+            self._stream = stream
+
+        def write(self, text: str):
+            return self._stream.write(text)
+
+        def flush(self):
+            return self._stream.flush()
+
+        def isatty(self) -> bool:
+            return False
+
+    real_stdout = sys.stdout
+    sys.stdout = NotATty(real_stdout)
+    try:
+        check("paint is a no-op when off", U.paint("hi", "green") == "hi")
+    finally:
+        sys.stdout = real_stdout
 
     # NO_COLOR wins even if FORCE_COLOR is set.
     _os.environ["NO_COLOR"] = "1"
@@ -4041,6 +4151,34 @@ def test_ui() -> None:
     _os.environ.pop("FORCE_COLOR")
     if saved is not None:
         _os.environ["NO_COLOR"] = saved
+
+    # One blue accent and one yellow warning, and the plain-ANSI fallback spells
+    # the same two colours rather than the terminal's own idea of "yellow". A
+    # palette change has to move both surfaces or the two halves of the
+    # interface drift apart.
+    def rgb(hexcode: str) -> tuple[int, int, int]:
+        return tuple(int(hexcode[i:i + 2], 16) for i in (1, 3, 5))
+
+    check("the accent is the palette blue", U._ACCENT == "#458588", U._ACCENT)
+    check("warnings use the palette yellow", U._YELLOW == "#d79921", U._YELLOW)
+    for name, hexcode in (("accent", U._ACCENT), ("yellow", U._YELLOW)):
+        r, g, b = rgb(hexcode)
+        check(f"the fallback spells {name} as the same colour",
+              U._STYLES[name] == f"\033[38;2;{r};{g};{b}m", U._STYLES[name])
+    _os.environ["FORCE_COLOR"] = "1"
+    try:
+        check("paint emits the accent when colour is on",
+              U.paint("x", "accent") ==
+              f"{U._STYLES['accent']}x{U._RESET}",
+              repr(U.paint("x", "accent")))
+        check("paint emits the warning colour when colour is on",
+              U.paint("x", "yellow") ==
+              f"{U._STYLES['yellow']}x{U._RESET}",
+              repr(U.paint("x", "yellow")))
+    finally:
+        _os.environ.pop("FORCE_COLOR", None)
+        if saved is not None:
+            _os.environ["NO_COLOR"] = saved
 
     # The banner is ASCII art mentioning the tool, with no stray escapes when
     # colour is off.
@@ -5518,6 +5656,7 @@ def main() -> int:
     test_dealer_price()
     test_price_keeps_the_menu_proportionate()
     test_prompts_demand_a_value()
+    test_prompts_look_like_the_menus()
     test_prompt_price_never_blocks()
     test_addons_bound_by_directory_not_filename()
     test_unsatisfied_require_is_reported()
