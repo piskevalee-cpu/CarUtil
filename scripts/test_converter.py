@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for carutil.py.
 
-Run: python3 test_converter.py
+Run: python3 scripts/test_converter.py
 
 Two levels:
   1. Unit tests on the SII helpers and converter internals.
@@ -28,14 +28,13 @@ import zipfile
 import zlib
 from pathlib import Path
 
-HERE = Path(__file__).parent
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 BACKEND = HERE / "backend"
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(BACKEND))
 
-# The shipped modules are in two places: carutil.py is the entry point at the
-# root and the helpers are in backend/. Several checks below assert on the
-# source text of all of them, so each one is resolved once, here.
+# The application lives under scripts/, with the helpers in backend/.
 SOURCE = {
     "carutil.py": HERE / "carutil.py",
     "sii.py": BACKEND / "sii.py",
@@ -61,7 +60,7 @@ from sii import (  # noqa: E402
 # assets and are not distributed with this repository. Point FIXTURES at a
 # directory holding them (see README) to run the full suite; without it the
 # fixture-dependent checks are reported as skipped rather than failed.
-FIXTURES = Path(os.environ.get("CARUTIL_FIXTURES", HERE.parent / "testing-covnverter"))
+FIXTURES = Path(os.environ.get("CARUTIL_FIXTURES", ROOT.parent / "testing-covnverter"))
 
 REF = FIXTURES / "Volkswagen_Parati_1994.scs"
 PILOT = FIXTURES / "Honda Pilot YG2 2025 V1.6 1.61.scs"
@@ -4477,7 +4476,7 @@ def test_ui() -> None:
     check("banner mentions CarUtil", "CarUtil" in banner)
 
     # The README quotes the banner; if the art changes, the sample must too.
-    readme = (HERE / "README.md")
+    readme = ROOT / "README.md"
     if readme.exists():
         text = readme.read_text(encoding="utf-8", errors="replace")
         missing = [ln for ln in banner.strip("\n").split("\n") if ln not in text]
@@ -4555,7 +4554,7 @@ def test_ui() -> None:
     check("numbered menu explains an invalid choice",
           "choose a number from 1 to 3" in output.getvalue())
     check("setup hint gives a copyable install command",
-          "-m pip install -r requirements.txt" in output.getvalue())
+          "-m pip install -r scripts/requirements.txt" in output.getvalue())
 
     if real_questionary is not None:
         class TTYStream(io.StringIO):
@@ -4932,7 +4931,7 @@ def test_readme_category_table_matches_code() -> None:
     documented in prose and nothing checked the two against each other.
     """
     section("README category table matches the code")
-    readme = (HERE / "README.md").read_text(encoding="utf-8", errors="replace")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8", errors="replace")
     missing = []
     for vtype in C.VEHICLE_TYPES:
         row = f"| `{vtype}` | {C.TYPE_HELP[vtype]} | {sum(C._MASS[vtype])} kg |"
@@ -5121,7 +5120,7 @@ def test_windows_compatibility() -> None:
 
     # 3. A Windows ImageMagick install is invisible to the running process
     #    until PATH is refreshed, so the batch launcher must do it.
-    batch = (HERE / "carutil.bat").read_text(encoding="utf-8")
+    batch = (ROOT / "carutil.bat").read_text(encoding="utf-8")
     check("launcher searches standard ImageMagick install folders",
           "%ProgramFiles%\\ImageMagick*" in batch
           and "%ProgramFiles(x86)%\\ImageMagick*" in batch)
@@ -5716,32 +5715,20 @@ def test_interrupted_write_leaves_no_broken_archive() -> None:
 
 
 def test_carutil_is_the_entry_point() -> None:
-    """The module was renamed; these paths must keep working."""
-    section("the entry point is carutil.py")
+    """The launchers stay at the root; the application stays under scripts/."""
+    section("the application lives under scripts/")
     check("carutil.py exists", (HERE / "carutil.py").is_file())
     check("the old name is gone", not (HERE / "convert_to_car.py").exists())
-    leftovers = [
-        f.name for f in HERE.iterdir()
-        if f.is_file() and f.suffix in (".py", ".md") and "carutil" not in f.name
-        and f.name not in ("test_converter.py", "README.md", "AGENTS.md",
-                           "FINDINGS.md", ".gitignore")
-    ]
-    check("no unexpected new top-level modules", not leftovers, str(leftovers))
-
-    # The helpers were moved into backend/ so the root holds only the things a
-    # user runs or reads. Both halves are asserted: a module left at the root
-    # would still import, which is exactly why it needs a check of its own.
     helpers = ("sii.py", "hashfs.py", "logo.py", "brands.py", "ui.py")
     check("backend/ holds every helper module",
           all((BACKEND / n).is_file() for n in helpers),
           str(sorted(p.name for p in BACKEND.iterdir())))
-    check("no helper module is stranded at the root",
-          not [(HERE / n).exists() for n in helpers if (HERE / n).exists()])
+    expected_root = {"README.md", "carutil.sh", "carutil.bat", "scripts"}
+    visible_root = {p.name for p in ROOT.iterdir() if not p.name.startswith(".")}
+    check("the root contains only the README, launchers and scripts/",
+          visible_root == expected_root, str(sorted(visible_root)))
 
-    # logos/ stayed beside the entry point, so brands has to reach up for it.
-    # A sibling logos/ is the exact mistake that silently leaves every brand
-    # without an image -- logo_path() returns None and the car ships a
-    # placeholder rather than failing.
+    # logos/ stays beside the entry point, outside backend/.
     import brands as _B
     check("brands resolves logos/ beside the entry point",
           _B._LOGO_DIR == (HERE / "logos").resolve(), str(_B._LOGO_DIR))
@@ -5820,8 +5807,8 @@ def test_modsource_releases_its_handle() -> None:
 
 def test_launcher_dependency_preflight() -> None:
     section("launchers check and offer to install ImageMagick")
-    shell = (HERE / "carutil.sh").read_text(encoding="utf-8")
-    batch = (HERE / "carutil.bat").read_text(encoding="utf-8")
+    shell = (ROOT / "carutil.sh").read_text(encoding="utf-8")
+    batch = (ROOT / "carutil.bat").read_text(encoding="utf-8")
     source = (HERE / "carutil.py").read_text(encoding="utf-8")
 
     check("shell launcher verifies the ImageMagick version banner",
@@ -5838,6 +5825,14 @@ def test_launcher_dependency_preflight() -> None:
           and "Install ImageMagick now? [Y/n]" in batch)
     check("Python CLI no longer runs a dependency installer",
           "check_dependencies" not in source)
+    check("shell launcher uses files under scripts/",
+          "scripts/.venv/bin/python" in shell
+          and "scripts/requirements.txt" in shell
+          and "scripts/carutil.py" in shell)
+    check("Windows launcher uses files under scripts/",
+          r"scripts\.venv\Scripts\python.exe" in batch
+          and r"scripts\requirements.txt" in batch
+          and r"scripts\carutil.py" in batch)
 
 
 def test_launchers_never_install_without_a_terminal() -> None:
@@ -5850,8 +5845,8 @@ def test_launchers_never_install_without_a_terminal() -> None:
     "yes" that a redirected ``< NUL`` will accept.
     """
     section("launchers install nothing when stdin is not a terminal")
-    shell = (HERE / "carutil.sh").read_text(encoding="utf-8")
-    batch = (HERE / "carutil.bat").read_text(encoding="utf-8")
+    shell = (ROOT / "carutil.sh").read_text(encoding="utf-8")
+    batch = (ROOT / "carutil.bat").read_text(encoding="utf-8")
 
     check("shell launcher detects a missing terminal",
           "! -t 0" in shell and "! -t 1" in shell)
@@ -5872,7 +5867,7 @@ def test_launchers_never_install_without_a_terminal() -> None:
 def test_launcher_line_endings_are_pinned() -> None:
     """cmd.exe wants CRLF; git must not hand it LF on a ZIP or a bare checkout."""
     section("launcher line endings are pinned")
-    ga = HERE / ".gitattributes"
+    ga = ROOT / ".gitattributes"
     check(".gitattributes exists", ga.is_file())
     if not ga.is_file():
         return
@@ -5906,7 +5901,7 @@ def test_missing_imagemagick_still_converts() -> None:
         r = subprocess.run(
             [sys.executable, "-c", script, str(REF), "--type", "sedan",
              "--brand", "bmw", "-o", str(out)],
-            capture_output=True, text=True, cwd=str(HERE))
+            capture_output=True, text=True, cwd=str(ROOT))
         check("converts without ImageMagick", r.returncode == 0,
               (r.stderr or r.stdout)[-300:])
         check("says the logo was skipped", "ImageMagick" in r.stdout)

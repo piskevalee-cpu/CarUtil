@@ -43,13 +43,13 @@ if errorlevel 1 (
 
 call :check_imagemagick
 
-if not exist ".venv\Scripts\python.exe" (
+if not exist "scripts\.venv\Scripts\python.exe" (
     echo Creating CarUtil's private Python environment...
-    %PYTHON% -m venv .venv
+    %PYTHON% -m venv scripts\.venv
     if errorlevel 1 goto :setup_failed
 )
 
-".venv\Scripts\python.exe" -c "import questionary, rich" >nul 2>nul
+"scripts\.venv\Scripts\python.exe" -c "import questionary, rich" >nul 2>nul
 if not errorlevel 1 goto :start_carutil
 echo CarUtil's enhanced menu packages are not installed.
 call :has_console
@@ -59,7 +59,7 @@ set /p "INSTALL_PACKAGES=Install them now? [Y/n] "
 if /i "%INSTALL_PACKAGES%"=="n" goto :packages_skipped
 if /i "%INSTALL_PACKAGES%"=="no" goto :packages_skipped
 echo Installing CarUtil's required packages...
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
+"scripts\.venv\Scripts\python.exe" -m pip install -r scripts\requirements.txt
 if errorlevel 1 goto :setup_failed
 goto :start_carutil
 
@@ -71,7 +71,7 @@ goto :start_carutil
 echo.
 echo Starting CarUtil...
 echo.
-".venv\Scripts\python.exe" carutil.py
+"scripts\.venv\Scripts\python.exe" scripts\carutil.py
 set "CARUTIL_EXIT=%ERRORLEVEL%"
 goto :done
 

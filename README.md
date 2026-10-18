@@ -46,11 +46,12 @@ installs may ask for your computer's administrator password. If a required
 tool is not available for automatic installation, the launcher prints the
 next step to take.
 
-For manual setup, install the packages from `requirements.txt` in a Python
-virtual environment and run `carutil.py` with that environment's Python.
+For manual setup, install the packages from `scripts/requirements.txt` in a
+Python virtual environment and run `scripts/carutil.py` with that environment's
+Python.
 The launchers also check and offer to install ImageMagick; when running
-`carutil.py` directly, ImageMagick remains optional and is not installed by
-CarUtil.
+`scripts/carutil.py` directly, ImageMagick remains optional and is not installed
+by CarUtil.
 
 It asks for the mod, vehicle type, brand, weight, engine target and price, then
 writes the converted archive next to the input. In guided mode, `--mass` does
@@ -63,7 +64,7 @@ ceiling. To avoid all prompts, pass `--no-prompt` and provide the input, `--type
 and `--brand`:
 
 ```bash
-python3 carutil.py "mods/my-car.scs" \
+python3 scripts/carutil.py "mods/my-car.scs" \
     --no-prompt --type suv --brand porsche --mass 2069 \
     --power 300 --peak-power-rpm 5000 --rev-limit 6500 \
     --price 45000 -o my-car-roadtrip.scs
@@ -128,7 +129,7 @@ Other options are available for special cases:
 - Repeat `--mod-dir DIR` to specify ATS user-data locations if automatic
   detection does not find yours.
 
-Run `python3 carutil.py --help` for the complete command-line reference.
+Run `python3 scripts/carutil.py --help` for the complete command-line reference.
 
 ## Input and output
 
@@ -137,7 +138,7 @@ CarUtil accepts a mod folder or a plain-ZIP `.scs` archive. It can also read a
 definition archive and SCS HashFS archive.
 
 The output is an `.scs` file. Copy it into the ATS `mod` folder; use
-`python3 carutil.py --path` to see the detected location. If automatic
+`python3 scripts/carutil.py --path` to see the detected location. If automatic
 detection misses your folders, use `--mod-dir`.
 
 CarUtil can bind parts that the source mod contains, but it cannot create
@@ -146,7 +147,7 @@ summary's **warnings** and **gaps** before launching the game. A complete car
 also requires access to Car Mode, which is unlocked by owning a Road Trip
 vehicle DLC.
 
-The bundled brand logos are stored in `logos/`. ImageMagick is needed to
+The bundled brand logos are stored in `scripts/logos/`. ImageMagick is needed to
 convert logos into the game's format; if it is unavailable, CarUtil skips logo
 replacement and uses the mod's logo or a placeholder. An explicitly provided
 `--brand-logo` requires ImageMagick. There are 23 listed brands, including
@@ -157,14 +158,14 @@ replacement and uses the mod's logo or a placeholder. An explicitly provided
 Run the test suite with:
 
 ```bash
-python3 test_converter.py
+python3 scripts/test_converter.py
 ```
 
 The suite runs without third-party mod files. Tests that need fixtures are
 skipped unless `CARUTIL_FIXTURES` points to a directory containing them:
 
 ```bash
-CARUTIL_FIXTURES=/path/to/mods python3 test_converter.py
+CARUTIL_FIXTURES=/path/to/mods python3 scripts/test_converter.py
 ```
 
 Fixture assets are not included in this repository.

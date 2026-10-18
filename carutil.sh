@@ -127,13 +127,13 @@ create_venv() {
     local output
 
     if [[ "$(uname -s)" == "Linux" ]] && command -v pipx >/dev/null 2>&1; then
-        if pipx run --spec virtualenv virtualenv .venv; then
+        if pipx run --spec virtualenv virtualenv scripts/.venv; then
             return 0
         fi
         echo "Pipx could not create the environment. Trying Python's built-in venv."
     fi
 
-    if output=$(python3 -m venv .venv 2>&1); then
+    if output=$(python3 -m venv scripts/.venv 2>&1); then
         [[ -z "$output" ]] || printf '%s\n' "$output"
         return 0
     fi
@@ -145,10 +145,10 @@ create_venv() {
             return 1
         fi
         if command -v virtualenv >/dev/null 2>&1; then
-            virtualenv .venv
+            virtualenv scripts/.venv
             return $?
         fi
-        if output=$(python3 -m venv .venv 2>&1); then
+        if output=$(python3 -m venv scripts/.venv 2>&1); then
             [[ -z "$output" ]] || printf '%s\n' "$output"
             return 0
         fi
@@ -209,9 +209,9 @@ if [[ "$(uname -s)" == "Linux" ]] && ! command -v pipx >/dev/null 2>&1; then
     fi
 fi
 
-if [[ ! -x ".venv/bin/python" ]]; then
+if [[ ! -x "scripts/.venv/bin/python" ]]; then
     echo "Creating CarUtil's private Python environment..."
-    if ! create_venv || [[ ! -x ".venv/bin/python" ]]; then
+    if ! create_venv || [[ ! -x "scripts/.venv/bin/python" ]]; then
         echo
         echo "Could not create the private environment."
         echo "Install your distribution's Python venv support, then run carutil.sh again."
@@ -220,10 +220,10 @@ if [[ ! -x ".venv/bin/python" ]]; then
     fi
 fi
 
-if ! .venv/bin/python -c 'import questionary, rich' >/dev/null 2>&1; then
+if ! scripts/.venv/bin/python -c 'import questionary, rich' >/dev/null 2>&1; then
     echo "CarUtil's enhanced menu packages are not installed."
     if ask_yes_no "Install them now?" yes; then
-        if ! .venv/bin/python -m pip install -r requirements.txt; then
+        if ! scripts/.venv/bin/python -m pip install -r scripts/requirements.txt; then
             echo
             echo "Package setup failed. Check your internet connection and try again."
             read -r -p "Press Enter to close..." _
@@ -237,7 +237,7 @@ fi
 echo
 echo "Starting CarUtil..."
 echo
-.venv/bin/python carutil.py
+scripts/.venv/bin/python scripts/carutil.py
 status=$?
 echo
 read -r -p "Press Enter to close..." _

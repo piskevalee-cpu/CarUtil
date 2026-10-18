@@ -140,7 +140,7 @@ def setup_hint() -> None:
     print()
     print("  The enhanced menus are not installed yet.")
     print("  To set them up, run this command from the CarUtil folder:")
-    print(f"    {executable} -m pip install -r requirements.txt")
+    print(f"    {executable} -m pip install -r scripts/requirements.txt")
     print("  CarUtil will continue with basic numbered menus for now.")
     print()
 

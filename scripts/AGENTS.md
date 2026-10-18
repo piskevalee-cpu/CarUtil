@@ -2,6 +2,8 @@
 
 Guidance for AI agents working in this repository. Read this before editing
 anything; most of it is knowledge that cost real debugging time to acquire.
+The project root contains only `README.md`, `carutil.sh`, `carutil.bat`, and
+this `scripts/` directory (apart from Git metadata and its config files).
 
 ## What this is
 
@@ -21,11 +23,12 @@ ImageMagick is optional and is used only to convert brand logo images.
 | `backend/ui.py` | Banner, colour, Rich output, Questionary menus, and basic fallbacks. |
 | `test_converter.py` | The suite (~5600 lines). Run it before every commit. It resolves the shipped modules' source through its own `SOURCE` table, because they are no longer all in one directory. |
 | `FINDINGS.md` | Research log, §1–§40. **Early sections were wrong; see Corrections.** |
-| `logos/` | 23 brand images, **at the root beside the entry point, not inside `backend/`** — that is where a user is told to drop a replacement, so `brands.py` reaches up with `parent.parent` for it. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
+| `logos/` | 23 brand images beside the entry point, not inside `backend/` — that is where a user is told to drop a replacement, so `brands.py` reaches up with `parent.parent` for it. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
 
-Both launchers are unchanged by the split and must stay that way: `carutil.bat`
-and `carutil.sh` `cd` to their own directory and reference `carutil.py`,
-`requirements.txt` and `.venv\`, all of which are still at the root.
+The launchers live in the project root. They create the private environment in
+`scripts/.venv/`, install from `scripts/requirements.txt`, and start
+`scripts/carutil.py`. The application and its assets stay together under
+`scripts/`, so module-relative logo discovery works.
 
 `ALIASES` in `brands.py` can name a brand `BRANDS` does not contain: `vw` maps
 to `volkswagen`, which has no row, so `--brand vw` resolves to the `other`
@@ -34,11 +37,11 @@ vendor with no logo. Check both lists when adding a brand.
 ## Commands
 
 ```bash
-python3 test_converter.py                                        # the whole suite
-CARUTIL_FIXTURES=/path/to/mods python3 test_converter.py         # incl. fixture checks
-python3 carutil.py                                               # guided walkthrough
-python3 carutil.py --path                                        # where are my files?
-python3 carutil.py mod.scs --type suv --brand cadillac -o out.scs
+python3 scripts/test_converter.py                                  # the whole suite
+CARUTIL_FIXTURES=/path/to/mods python3 scripts/test_converter.py   # incl. fixture checks
+python3 scripts/carutil.py                                         # guided walkthrough
+python3 scripts/carutil.py --path                                  # where are my files?
+python3 scripts/carutil.py mod.scs --type suv --brand cadillac -o out.scs
 ```
 
 **There is no way to run a single test.** No pytest, no unittest — `main()`
@@ -46,7 +49,7 @@ calls each `def test_*()` in sequence and there is no selector flag. Each test
 function is standalone, so drive one directly:
 
 ```bash
-python3 -c "import test_converter as t; t.test_stored_entry_is_not_inflated()"
+python3 -c "import sys; sys.path.insert(0, 'scripts'); import test_converter as t; t.test_stored_entry_is_not_inflated()"
 ```
 
 **The suite must exit 0 before you commit.** Do not trust a hardcoded check
@@ -63,9 +66,9 @@ terminal, so from a console the first one failed and
 set `C._tty` themselves now: `test_prompts_demand_a_value` and
 `test_prompts_look_like_the_menus` pin it on, the other prompt tests pin it off.
 Keep it that way rather than relying on how the suite was invoked — and run it
-once with stdin closed (`python3 test_converter.py < /dev/null`) after touching a
+once with stdin closed (`python3 scripts/test_converter.py < /dev/null`) after touching a
 prompt, because that is the invocation that used to hang. Then run it once under
-a real console (`script -qec "python3 test_converter.py" /dev/null`), which is
+a real console (`script -qec "python3 scripts/test_converter.py" /dev/null`), which is
 the *other* invocation that has caught something: `test_ui`'s "paint is a no-op
 when off" read `sys.stdout` itself and so failed from a console for years, while
 passing in every piped run. It pins a non-tty proxy over `sys.stdout` now. Any
@@ -861,7 +864,7 @@ Same applies to opening a PR: prepare the title and body, then ask.
 ## Before committing
 
 ```bash
-python3 test_converter.py          # must exit 0
+python3 scripts/test_converter.py  # must exit 0
 git status --short                 # only intended files
 git diff --cached --stat           # sanity-check the size
 ```

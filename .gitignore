@@ -11,10 +11,10 @@ __pycache__/
 # DN Modding's, not ours to redistribute; regenerate it locally if needed.
 reference/tool_output/
 
-# Logo sources are tracked (logos/), but anything dropped in for a one-off
+# Logo sources are tracked (scripts/logos/), but anything dropped in for a one-off
 # conversion is not.
-logos/*.tmp
-logos/*.dds
+scripts/logos/*.tmp
+scripts/logos/*.dds
 
 # Scratch
 *.log

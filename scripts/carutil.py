@@ -4466,9 +4466,9 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  python3 carutil.py                       # guided, asks everything\n"
-            "  python3 carutil.py mod.scs --type suv --brand porsche\n"
-            "  python3 carutil.py mod.scs --type sedan --brand mercedes "
+            "  python3 scripts/carutil.py                       # guided, asks everything\n"
+            "  python3 scripts/carutil.py mod.scs --type suv --brand porsche\n"
+            "  python3 scripts/carutil.py mod.scs --type sedan --brand mercedes "
             "--mass 1900\n"
         ),
     )
@@ -4671,7 +4671,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(
                 "error: no input given.\n"
                 "  Guided mode: run with no arguments and answer the prompts.\n"
-                "  Scripted: pass the path, e.g. python3 carutil.py mod.scs \\\n"
+                "  Scripted: pass the path, e.g. python3 scripts/carutil.py mod.scs \\\n"
                 "            --type suv --brand porsche"
             )
         _ui.step(1, total, "Find your mod")
