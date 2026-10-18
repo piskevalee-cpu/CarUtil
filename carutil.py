@@ -1435,8 +1435,6 @@ def prompt_type() -> str:
     """Ask what kind of car it is."""
     print()
     _ui.heading("What kind of car is it?")
-    print("  " + _ui.paint("arrow keys to move, Enter to choose", "dim"))
-    print()
     options = [(t.title(), TYPE_HELP[t]) for t in VEHICLE_TYPES]
     idx = _ui.arrow_menu(options, default=0)
     return VEHICLE_TYPES[idx]
@@ -1471,9 +1469,6 @@ def prompt_brand(slug: str) -> str:
 
     print()
     _ui.heading("Which brand is it? The Car Dealer shows this name and logo.")
-    print("  " + _ui.paint("arrow keys to move, Enter to choose", "dim"))
-    print()
-
     have = _brands.available()
     options = [
         (label, "" if name in have else "no logo")
@@ -4573,9 +4568,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if _tty() and not args.no_prompt and args.input is None:
         print()
-        print(_ui.banner())
+        _ui.show_banner()
 
     guided = _tty() and not args.no_prompt
+    if guided:
+        _ui.setup_hint()
     total = 8
 
     # Optional but wanted-by-default: offer to install ImageMagick before the

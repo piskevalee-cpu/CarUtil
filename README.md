@@ -6,15 +6,45 @@ writes a new `.scs` archive.
 
 ## Quick start
 
-You need Python 3.9 or newer. CarUtil uses only the Python standard library.
-ImageMagick is optional and is used only to convert a brand logo; without it,
-the conversion still works using the mod's logo or a placeholder.
+Download the repository ZIP from GitHub, extract it, and open the extracted
+`CarUtil` folder in PowerShell (Windows) or Terminal (macOS/Linux).
 
-Run the guided walkthrough:
+You need Python 3.9 or newer. For the guided menus and styled output, install
+the two small Python packages included in `requirements.txt`.
+
+**Windows** — open PowerShell in the CarUtil folder and run:
+
+```powershell
+py -m pip install -r requirements.txt
+```
+
+**macOS or Linux** — open a terminal in the CarUtil folder and run:
 
 ```bash
-python3 carutil.py
+python3 -m pip install -r requirements.txt
 ```
+
+Then start CarUtil with `py carutil.py` on Windows or `python3 carutil.py` on
+macOS or Linux. If Linux says it manages Python packages itself, use this
+one-time setup instead:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+Then launch with `.venv/bin/python carutil.py`.
+
+ImageMagick is optional and is only used to convert brand logos. Without it,
+CarUtil still converts the car and uses the mod's logo or a placeholder.
+
+Start the guided walkthrough:
+
+```powershell
+py carutil.py
+```
+
+On macOS or Linux, run `python3 carutil.py`.
 
 It asks for the mod, vehicle type, brand, weight, engine target, rev limit and
 price, then writes the converted archive next to the input. In guided mode,
@@ -28,14 +58,6 @@ python3 carutil.py "mods/my-car.scs" \
     --no-prompt --type suv --brand porsche --mass 2069 \
     --power 300 --peak-power-rpm 5000 --rev-limit 6500 \
     --price 45000 -o my-car-roadtrip.scs
-```
-
-You can also download the repository and run the script from its folder:
-
-```bash
-git clone https://github.com/piskevalee-cpu/CarUtil.git
-cd CarUtil
-python3 carutil.py
 ```
 
 ## Vehicle type

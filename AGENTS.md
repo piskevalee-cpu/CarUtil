@@ -7,8 +7,8 @@ anything; most of it is knowledge that cost real debugging time to acquire.
 
 A converter that turns a truck-classified American Truck Simulator mod into a
 Road Trip car so it appears in the Car Dealer and drives with car physics. One
-Python 3.9+ entry point, standard library only. ImageMagick is optional and is
-used only to convert brand logo images.
+Python 3.9+ entry point. Questionary and Rich provide the interactive TUI;
+ImageMagick is optional and is used only to convert brand logo images.
 
 | File | Role |
 |---|---|
@@ -17,7 +17,7 @@ used only to convert brand logo images.
 | `hashfs.py` | Reader for SCS's own `SCS#` container (HashFS v1). See below. |
 | `brands.py` | 23 brands (22 named plus the `other` catch-all) and the mapping to each logo file. |
 | `logo.py` | Image → 256×64 DDS conversion. Uses ImageMagick. |
-| `ui.py` | Banner, colour, arrow-key menus. Pure presentation. |
+| `ui.py` | Banner, colour, Rich output, Questionary menus, and basic fallbacks. |
 | `test_converter.py` | The suite (~4600 lines). Run it before every commit. |
 | `FINDINGS.md` | Research log, §1–§33. **Early sections were wrong; see Corrections.** |
 | `logos/` | 23 brand images. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
@@ -71,7 +71,8 @@ fixture directory is safe but silently reduces coverage — check the skip list.
 `test_windows_compatibility` is the trap. It greps the *source text* of the
 shipped modules for literal substrings (`'os.pathsep' in csrc`,
 `'read_text(encoding="utf-8"' in csrc`, `"shell=True" not in text`) and
-`ast`-parses `ui.py` to prove `termios`/`tty` are not imported at module level.
+`ast`-parses `ui.py` to prove the optional `questionary` and `rich` imports are
+guarded so the numbered-menu fallback still works if the packages are absent.
 `test_dependency_check` monkeypatches `C._logo.imagemagick`, `shutil.which`,
 `C._tty` and `C._confirm`.
 
@@ -101,7 +102,8 @@ before you touch it.
 
 **ImageMagick is the only external program**, used for exactly one thing:
 turning a shipped brand logo image into the 256×64 DDS the game reads.
-Everything else is the standard library. `main()` runs `check_dependencies()`
+Questionary and Rich are installed from `requirements.txt` for the terminal UI;
+the converter logic otherwise uses the standard library. `main()` runs `check_dependencies()`
 before the walkthrough, which reports a missing ImageMagick and offers the
 package-manager command for the platform. Two rules hold it together:
 
@@ -163,16 +165,16 @@ cause. `logo.imagemagick()` therefore **verifies** the candidate by running
 that to a bare `which()`. It prefers `magick` (ImageMagick 7) over `convert`
 (ImageMagick 6), which is what keeps Linux correct.
 
-**`termios`/`tty` are POSIX-only.** They must stay *inside* the `try` in
-`ui._raw_keys_available()`. An import above the guard raises
-`ModuleNotFoundError` on Windows and kills the guided walkthrough at its very
-first prompt, before the numbered-menu fallback can engage.
+**Questionary and Rich are Python dependencies, not operating-system tools.**
+They are listed in `requirements.txt` and must stay optional imports in
+`ui.py`, so a missing package leaves the numbered-menu fallback usable and
+prints setup instructions rather than killing the walkthrough.
 
 **A Windows ImageMagick install is invisible to the running process.** The
 installer updates the machine PATH, but the process keeps its old copy, so
 `magick` stays "not found" for the rest of the run. `_refresh_magick_path()`
 prepends the install directory to `os.environ["PATH"]` to avoid needing a
-re-login. If you add a second dependency, it needs the same treatment.
+re-login. Any second external program would need the same treatment.
 
 **CRLF is a non-issue, and that is worth knowing.** Windows translates `\n`
 only in *text mode*. Def units are handed to `zipfile` as `str` and encoded to

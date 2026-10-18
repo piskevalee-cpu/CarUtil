@@ -1,14 +1,29 @@
-"""Terminal presentation: colour, ASCII banner, and arrow-key menus.
+"""Terminal presentation: Rich output, Questionary menus, and plain fallbacks.
 
-Kept separate from the conversion logic and entirely optional. Every helper
-degrades to plain ASCII when stdout is not a terminal, when NO_COLOR is set,
-or when TERM is "dumb" -- piping the output to a file stays clean.
+The UI packages are optional. Colors respect NO_COLOR and FORCE_COLOR, piped
+output stays unstyled, and menus use numbered choices without a usable TTY.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+
+try:
+    import questionary as _questionary
+except ImportError:
+    _questionary = None
+
+try:
+    from rich.console import Console as _Console
+    from rich.panel import Panel as _Panel
+    from rich.rule import Rule as _Rule
+    from rich.text import Text as _Text
+except ImportError:
+    _Console = None
+    _Panel = None
+    _Rule = None
+    _Text = None
 
 _RESET = "\033[0m"
 _STYLES = {
@@ -43,6 +58,44 @@ def paint(text: str, *styles: str) -> str:
     return f"{prefix}{text}{_RESET}" if prefix else text
 
 
+def enhanced_tui_available() -> bool:
+    return _questionary is not None and _Console is not None
+
+
+def missing_tui_packages() -> list[str]:
+    missing = []
+    if _questionary is None:
+        missing.append("questionary")
+    if _Console is None:
+        missing.append("rich")
+    return missing
+
+
+def setup_hint() -> None:
+    if enhanced_tui_available():
+        return
+    executable = "py" if os.name == "nt" else "python3"
+    print()
+    print("  The enhanced menus are not installed yet.")
+    print("  To set them up, run this command from the CarUtil folder:")
+    print(f"    {executable} -m pip install -r requirements.txt")
+    print("  CarUtil will continue with basic numbered menus for now.")
+    print()
+
+
+def _console(stream=None):
+    if _Console is None:
+        return None
+    stream = stream or sys.stdout
+    enabled = colour_enabled(stream)
+    return _Console(
+        file=stream,
+        force_terminal=enabled,
+        no_color=not enabled,
+        highlight=False,
+    )
+
+
 def rule(char: str = "-", width: int = 62) -> str:
     return char * width
 
@@ -64,86 +117,128 @@ def banner() -> str:
     return paint(BANNER.strip("\n"), "cyan") + "\n"
 
 
+def show_banner() -> None:
+    console = _console()
+    if console is not None and sys.stdout.isatty():
+        console.print(
+            _Panel(
+                BANNER.strip("\n"),
+                title="CarUtil",
+                border_style="cyan",
+                padding=(0, 2),
+            )
+        )
+    else:
+        print(banner(), end="")
+
+
 def heading(text: str) -> None:
-    print()
-    print(paint(f"  {text}", "bold"))
+    console = _console()
+    if console is not None and sys.stdout.isatty():
+        console.print(_Rule(text, style="cyan"))
+    else:
+        print()
+        print(paint(f"  {text}", "bold"))
 
 
 def step(index: int, total: int, text: str) -> None:
     """A numbered step in the guided walkthrough."""
-    print(paint(f"  [{index}/{total}]", "magenta", "bold") + f" {text}")
+    console = _console()
+    if console is not None:
+        console.print(
+            _Text.assemble(
+                (f"  [{index}/{total}]", "bold cyan"),
+                (f" {text}", "bold"),
+            )
+        )
+    else:
+        print(paint(f"  [{index}/{total}]", "magenta", "bold") + f" {text}")
 
 
 def ok(text: str) -> None:
-    print("  " + paint("+", "green", "bold") + " " + text)
+    _status("+", text, "green")
 
 
 def bullet(text: str) -> None:
-    print("  " + paint("*", "cyan") + " " + text)
+    _status("*", text, "cyan")
 
 
 def warn(text: str) -> None:
-    print("  " + paint("!", "yellow", "bold") + " " + paint(text, "yellow"))
+    _status("!", text, "yellow")
 
 
 def fail(text: str) -> None:
-    print("  " + paint("x", "red", "bold") + " " + paint(text, "red"))
+    _status("x", text, "red")
+
+
+def _status(marker: str, text: str, color: str) -> None:
+    console = _console()
+    if console is not None:
+        console.print(
+            _Text.assemble(("  ", ""), (marker, f"bold {color}"), (" ", ""),
+                           (text, ""))
+        )
+    else:
+        print("  " + paint(marker, color, "bold") + " " + text)
 
 
 def path_line(label: str, value: str) -> None:
-    print(f"  {paint(label + ':', 'bold')} {value}")
+    console = _console()
+    if console is not None:
+        console.print(
+            _Text.assemble(("  " + label + ":", "bold"), (" " + value, ""))
+        )
+    else:
+        print(f"  {paint(label + ':', 'bold')} {value}")
 
 
 # --------------------------------------------------------------------- menus
 
-_ARROW_UP = "\x1b[A"
-_ARROW_DOWN = "\x1b[B"
-
-
 def arrow_menu(options: list[tuple[str, str]], default: int = 0) -> int:
-    """Pick one option with the arrow keys; falls back to typing a number.
-
-    `options` is a list of (label, hint). Returns the chosen index. Requires a
-    terminal that can read raw keys; anything else falls back to the numbered
-    prompt so scripted and piped runs still work.
-    """
-    if not (sys.stdin.isatty() and _raw_keys_available()):
+    """Show an arrow-key menu, with a numbered fallback for plain terminals."""
+    if (
+        _questionary is None
+        or not sys.stdin.isatty()
+        or not sys.stdout.isatty()
+        or os.environ.get("TERM") == "dumb"
+    ):
         return _numbered_menu(options, default)
 
-    cursor = default
-    redraw = 0
-    while True:
-        if redraw:
-            sys.stdout.write(f"\033[{len(options)}A")
-        # Rebuilt every frame: the marker follows the cursor.
-        for i, (label, hint) in enumerate(options):
-            sys.stdout.write("\033[2K" + _menu_label(label, hint, i == cursor) + "\n")
-        redraw = len(options)
-        key = _read_key()
-        if key in ("\r", "\n"):
-            sys.stdout.write("\n")
-            return cursor
-        if key == _ARROW_UP:
-            cursor = (cursor - 1) % len(options)
-        elif key == _ARROW_DOWN:
-            cursor = (cursor + 1) % len(options)
-        elif key in ("q", "\x03", "\x04"):
-            raise SystemExit(1)
-        elif key.isdigit():
-            n = int(key)
-            if 1 <= n <= len(options):
-                sys.stdout.write("\n")
-                return n - 1
-
-
-def _menu_label(label: str, hint: str, selected: bool) -> str:
-    marker = paint("  > ", "cyan", "bold") if selected else "    "
-    style = "bold" if selected else "dim"
-    return marker + paint(label, style) + _hint(hint)
-
-
-def _hint(hint: str) -> str:
-    return "  " + paint(hint, "dim") if hint else ""
+    choices = [
+        _questionary.Choice(title=label, value=i, description=hint or None)
+        for i, (label, hint) in enumerate(options)
+    ]
+    color_style = (
+        _questionary.Style([
+            ("qmark", "fg:#00afff bold"),
+            ("question", "bold"),
+            ("answer", "fg:#00afff bold"),
+            ("pointer", "fg:#00afff bold"),
+            ("highlighted", "fg:#00afff bold"),
+            ("selected", "fg:#00afff"),
+            ("instruction", "fg:#888888"),
+            ("text", ""),
+            ("disabled", "fg:#888888 italic"),
+            ("description", "fg:#888888"),
+        ])
+        if colour_enabled()
+        else _questionary.Style([])
+    )
+    answer = _questionary.select(
+        "",
+        choices=choices,
+        default=next((choice for choice in choices if choice.value == default),
+                     None),
+        qmark="",
+        pointer="›",
+        style=color_style,
+        use_arrow_keys=True,
+        show_description=True,
+        instruction="(Use ↑/↓ to move, Enter to select)",
+    ).ask()
+    if answer is None:
+        raise SystemExit(1)
+    return answer
 
 
 def _numbered_menu(options: list[tuple[str, str]], default: int) -> int:
@@ -161,39 +256,4 @@ def _numbered_menu(options: list[tuple[str, str]], default: int) -> int:
             return default
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return int(raw) - 1
-
-
-def _raw_keys_available() -> bool:
-    """True if we can read single keypresses without Enter.
-
-    termios/tty are POSIX-only. The imports must sit inside the try: on
-    Windows they raise ModuleNotFoundError, and an unguarded import here
-    takes down the whole guided walkthrough one prompt after the user
-    pastes their mod path -- before the numbered-menu fallback can engage.
-    """
-    try:
-        import termios
-        import tty
-
-        termios.tcgetattr(sys.stdin.fileno())
-        return True
-    except Exception:
-        return False
-
-
-def _read_key() -> str:
-    """Read one keypress, collapsing an ANSI arrow sequence into a single str."""
-    import termios
-    import tty
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":                      # escape sequence
-            nxt = sys.stdin.read(2)
-            return {"[A": _ARROW_UP, "[B": _ARROW_DOWN}.get(nxt, "\x1b")
-        return ch
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        print(f"  -> choose a number from 1 to {len(options)}")

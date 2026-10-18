@@ -3916,60 +3916,68 @@ def test_ui() -> None:
     check("fail marker", "x broken" in text)
     check("heading printed", "changes" in text)
     check("step counter", "[2/5]" in text)
+    check("styled output stays plain when piped", "\x1b" not in text)
 
-    # The numbered fallback is what non-interactive environments get.
-    check("menu options are a list of (label, hint) pairs",
-          isinstance([("a", "b")], list))
-    check("_menu_label selects the marker",
-          ">" in U._menu_label("Sedan", "saloon", True)
-          and ">" not in U._menu_label("Sedan", "saloon", False))
-
-    # termios/tty are POSIX-only. An unguarded import here raised
-    # ModuleNotFoundError on Windows, which killed the guided walkthrough one
-    # prompt after the user pasted their mod path -- the numbered-menu
-    # fallback below never got the chance to engage. The probe must degrade to
-    # False instead of propagating.
-    try:
-        raw_ok = U._raw_keys_available()
-        check("_raw_keys_available returns a bool without raising", isinstance(raw_ok, bool))
-    except BaseException as exc:                     # noqa: BLE001
-        check("_raw_keys_available returns a bool without raising", False,
-              f"{type(exc).__name__}: {exc}")
-
-    # Simulate Windows by making the termios import fail, whichever way the
-    # module tries to reach it.
-    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) \
-        else __builtins__.__import__
-
-    def _no_termios(name, *a, **kw):
-        if name in ("termios", "tty"):
-            raise ModuleNotFoundError(f"No module named {name!r}")
-        return real_import(name, *a, **kw)
-
-    if isinstance(__builtins__, dict):
-        __builtins__["__import__"] = _no_termios
-    else:
-        __builtins__.__import__ = _no_termios
-    try:
-        check("_raw_keys_available is False when termios is absent",
-              U._raw_keys_available() is False)
-    finally:
-        if isinstance(__builtins__, dict):
-            __builtins__["__import__"] = real_import
-        else:
-            __builtins__.__import__ = real_import
-
-    # And the menu must still be answerable when raw keys are unavailable.
-    real_raw = U._raw_keys_available
-    U._raw_keys_available = lambda: False
+    # Missing optional UI packages should leave a usable numbered menu and
+    # explain how to install the enhanced interface.
+    real_questionary = U._questionary
+    real_console = U._Console
     real_input = builtins.input
-    builtins.input = lambda prompt="": "2"
+    real_stdout = sys.stdout
+    U._questionary = None
+    U._Console = None
+    answers = iter(["not a number", "2"])
+    builtins.input = lambda prompt="": next(answers)
+    output = io.StringIO()
+    sys.stdout = output
     try:
-        check("arrow_menu falls back to the numbered menu", U.arrow_menu(
-            [("Sedan", ""), ("SUV", ""), ("Sports", "")], default=0) == 1)
+        fallback = U.arrow_menu(
+            [("Sedan", ""), ("SUV", ""), ("Sports", "")], default=0) == 1
+        U.setup_hint()
     finally:
-        U._raw_keys_available = real_raw
         builtins.input = real_input
+        sys.stdout = real_stdout
+        U._questionary = real_questionary
+        U._Console = real_console
+    check("menu falls back to numbered choices when Questionary is missing",
+          fallback)
+    check("numbered menu explains an invalid choice",
+          "choose a number from 1 to 3" in output.getvalue())
+    check("setup hint gives a copyable install command",
+          "-m pip install -r requirements.txt" in output.getvalue())
+
+    if real_questionary is not None:
+        class TTYStream(io.StringIO):
+            def isatty(self):
+                return True
+
+        class Answer:
+            def ask(self):
+                return 1
+
+        real_select = U._questionary.select
+        real_stdin, real_stdout = sys.stdin, sys.stdout
+        saved_no_color = _os.environ.get("NO_COLOR")
+        _os.environ["NO_COLOR"] = "1"
+        calls = []
+        U._questionary.select = lambda *a, **kw: (
+            calls.append((a, kw)) or Answer())
+        sys.stdin, sys.stdout = TTYStream(), TTYStream()
+        try:
+            selected = U.arrow_menu(
+                [("Sedan", "saloon"), ("SUV", "crossover")], default=0)
+        finally:
+            U._questionary.select = real_select
+            sys.stdin, sys.stdout = real_stdin, real_stdout
+            if saved_no_color is None:
+                _os.environ.pop("NO_COLOR", None)
+            else:
+                _os.environ["NO_COLOR"] = saved_no_color
+        check("Questionary menu returns the selected choice", selected == 1)
+        check("Questionary menu displays descriptions",
+              calls[0][1]["show_description"] is True)
+        check("Questionary style respects NO_COLOR",
+              calls[0][1]["style"].style_rules == [])
 
 
 def test_torque_for_time() -> None:
@@ -4392,29 +4400,33 @@ def test_windows_compatibility() -> None:
     """
     section("Windows 11 compatibility")
 
-    # 1. POSIX-only imports must stay inside a try/except. An import above the
-    #    guard raises ModuleNotFoundError on Windows and takes down the guided
-    #    walkthrough at step 1 of 5, before the numbered-menu fallback.
+    # 1. The optional UI packages must not prevent the basic CLI from
+    #    starting when they are absent.
     import ast as _ast
     import ui as U
 
-    tree = _ast.parse((HERE / "ui.py").read_text(encoding="utf-8"))
+    ui_src = (HERE / "ui.py").read_text(encoding="utf-8")
+    tree = _ast.parse(ui_src)
     guarded = set()
-    for node in _ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, _ast.Try):
+            names = set()
             for sub in _ast.walk(node):
                 if isinstance(sub, _ast.Import):
-                    for a in sub.names:
-                        guarded.add(a.name.split(".")[0])
-    for mod in ("termios", "tty"):
-        imported_at_module_level = False
-        for node in tree.body:
-            if isinstance(node, _ast.Import) and \
-                    any(a.name.split(".")[0] == mod for a in node.names):
-                imported_at_module_level = True
-        check(f"{mod} is not imported at module level in ui.py",
-              not imported_at_module_level)
-        check(f"{mod} import is guarded", mod in guarded)
+                    names.update(a.name.split(".")[0] for a in sub.names)
+                elif isinstance(sub, _ast.ImportFrom) and sub.module:
+                    names.add(sub.module.split(".")[0])
+            handles_import_error = any(
+                isinstance(handler.type, _ast.Name)
+                and handler.type.id == "ImportError"
+                for handler in node.handlers
+            )
+            if handles_import_error:
+                guarded.update(names)
+    for mod in ("questionary", "rich"):
+        check(f"{mod} import is optional", mod in guarded)
+    check("missing UI packages have a numbered-menu fallback",
+          "return _numbered_menu(options, default)" in ui_src)
 
     # 2. shutil.which("convert") resolves to the FAT-to-NTFS convert.exe on
     #    Windows. Every call must therefore be verified, never trusted by name.
