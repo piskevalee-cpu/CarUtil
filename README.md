@@ -13,7 +13,11 @@ Download the repository as a ZIP, **extract it**, then open the extracted
 
 ### 2. Start the launcher for your computer
 
-**Windows:** Double-click **`carutil.bat`**.
+**Windows:** Double-click:
+
+```powershell
+carutil.bat
+```
 
 **macOS or Linux:** Open Terminal in the `CarUtil` folder and run:
 
