@@ -12,15 +12,20 @@ ImageMagick is optional and is used only to convert brand logo images.
 
 | File | Role |
 |---|---|
-| `carutil.py` | The converter and CLI. Everything of substance lives here (~4700 lines). |
-| `sii.py` | Parsing/editing helpers for SCS's `.sii` data format. |
-| `hashfs.py` | Reader for SCS's own `SCS#` container (HashFS v1). See below. |
-| `brands.py` | 23 brands (22 named plus the `other` catch-all) and the mapping to each logo file. |
-| `logo.py` | Image → 256×64 DDS conversion. Uses ImageMagick. |
-| `ui.py` | Banner, colour, Rich output, Questionary menus, and basic fallbacks. |
-| `test_converter.py` | The suite (~5600 lines). Run it before every commit. |
+| `carutil.py` | The converter and CLI, and the entry point. Everything of substance lives here (~4700 lines). |
+| `backend/` | The five helper modules. **It is a `sys.path` entry, not a package** — no `__init__.py`, and every import stays flat (`import brands as _brands`), so a module is still testable on its own with a one-line import. `carutil.py` and the suite each insert it themselves; a new top-level module has to be added to both. |
+| `backend/sii.py` | Parsing/editing helpers for SCS's `.sii` data format. |
+| `backend/hashfs.py` | Reader for SCS's own `SCS#` container (HashFS v1). See below. |
+| `backend/brands.py` | 23 brands (22 named plus the `other` catch-all) and the mapping to each logo file. |
+| `backend/logo.py` | Image → 256×64 DDS conversion. Uses ImageMagick. |
+| `backend/ui.py` | Banner, colour, Rich output, Questionary menus, and basic fallbacks. |
+| `test_converter.py` | The suite (~5600 lines). Run it before every commit. It resolves the shipped modules' source through its own `SOURCE` table, because they are no longer all in one directory. |
 | `FINDINGS.md` | Research log, §1–§40. **Early sections were wrong; see Corrections.** |
-| `logos/` | 23 brand images. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
+| `logos/` | 23 brand images, **at the root beside the entry point, not inside `backend/`** — that is where a user is told to drop a replacement, so `brands.py` reaches up with `parent.parent` for it. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
+
+Both launchers are unchanged by the split and must stay that way: `carutil.bat`
+and `carutil.sh` `cd` to their own directory and reference `carutil.py`,
+`requirements.txt` and `.venv\`, all of which are still at the root.
 
 `ALIASES` in `brands.py` can name a brand `BRANDS` does not contain: `vw` maps
 to `volkswagen`, which has no row, so `--brand vw` resolves to the `other`
@@ -296,6 +301,20 @@ it, so the two halves of the interface disagreed only on the error path. `fail`
 is now the surface pair reversed (ivory on slate), which is legible on either
 background. `test_ui` checks every name in both tables and asserts the escapes
 are truecolour rather than one of the terminal's 8 colours.
+
+**Both halves are handed truecolour explicitly, and only when colour is on.**
+Two Windows-only traps, both silent because a name still "paints" either way.
+Rich sniffs the host and resolves to its 4-bit `windows` system even for a
+terminal that handles 24-bit, so `_console()` pins `color_system="truecolor"`
+and `legacy_windows=False`; without the second one the legacy renderer
+approximates slate and ivory back onto 16 colours. Pinning the system
+*unconditionally* is its own bug: naming it makes Rich treat the stream as
+colour-capable, so a piped run keeps attributes it should drop and output that
+must be plain grows a stray `ESC[1m`. **`colour_enabled()` refuses `dumb`, not an
+absent `TERM`** — Windows never sets one, so demanding it switched colour off for
+every console user on the platform the launcher ships on, and left the two
+halves disagreeing, since Rich only ever refused `dumb`/`unknown`.
+`test_ui` pins all three.
 
 The names are `warn`/`ok`, **not** `yellow`/`green`, and a stale call site using
 an old name paints nothing at all — silently, because `paint()` ignores names it
@@ -822,6 +841,11 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   art, update both.
 - `ui.py` output must stay clean when piped: no ANSI when stdout is not a tty,
   and `NO_COLOR` must beat `FORCE_COLOR`.
+- The suite's own `check()` prints arbitrary output as a failure `detail`, and a
+  Windows console defaults to cp1252, which cannot encode box-drawing
+  characters. Printing such a detail raw raised `UnicodeEncodeError` *inside a
+  check* and killed the run partway through, so every later check was silently
+  unreported. It goes through `_say()`, which falls back to `backslashreplace`.
 
 ## Talking to GitHub
 

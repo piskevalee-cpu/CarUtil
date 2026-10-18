@@ -103,7 +103,13 @@ def colour_enabled(stream=None) -> bool:
         return True
     if not hasattr(stream, "isatty") or not stream.isatty():
         return False
-    return os.environ.get("TERM", "") not in ("dumb", "")
+    # `dumb` is a Unix convention and Rich refuses it, so this must too. An
+    # absent TERM is not a refusal: Windows never sets one, so demanding it
+    # switched colour off for every console user on the platform that ships the
+    # launcher, and left the two halves of the interface disagreeing -- Rich,
+    # which asks for `dumb`/`unknown` only, would have coloured a terminal this
+    # function called plain.
+    return os.environ.get("TERM", "") not in ("dumb", "unknown")
 
 
 def paint(text: str, *styles: str) -> str:
@@ -148,6 +154,18 @@ def _console(stream=None):
         file=stream,
         force_terminal=enabled,
         no_color=not enabled,
+        # Pinned, but only when colour is on. Rich otherwise sniffs the host
+        # and on Windows resolves to its 4-bit `windows` system even for a
+        # terminal that handles 24-bit, which collapses the palette onto 16
+        # colours -- slate and ivory arrive as black and bright white, and the
+        # downgrade is invisible because a name still "paints". Left unset when
+        # colour is off, because naming a system makes Rich treat the stream as
+        # colour-capable: a piped run then keeps attributes it should drop, and
+        # output that must be plain grows a stray `ESC[1m`.
+        color_system="truecolor" if enabled else None,
+        # Rich's Windows path otherwise routes output through the legacy
+        # console renderer, which approximates every colour to 16 again.
+        legacy_windows=False,
         highlight=False,
     )
 

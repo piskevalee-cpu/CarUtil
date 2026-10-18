@@ -55,7 +55,9 @@ ALIASES = {
     "none": "other",
 }
 
-_LOGO_DIR = Path(__file__).resolve().parent / "logos"
+# logos/ stays beside the entry point, not next to this file, so a user can drop
+# a replacement image where the launcher and the README already say it goes.
+_LOGO_DIR = Path(__file__).resolve().parent.parent / "logos"
 
 
 def normalise(raw: str) -> str:

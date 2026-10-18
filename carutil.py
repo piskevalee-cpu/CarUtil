@@ -27,7 +27,10 @@ import zlib
 import zipfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+# The helper modules live in backend/, so the import can be made from anywhere.
+# backend/ is a path entry rather than a package on purpose: the names stay
+# flat, so a module is testable on its own with a one-line import.
+sys.path.insert(0, str(Path(__file__).parent / "backend"))
 from sii import (  # noqa: E402
     count_indexed,
     append_key,

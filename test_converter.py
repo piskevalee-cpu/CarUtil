@@ -29,7 +29,21 @@ import zlib
 from pathlib import Path
 
 HERE = Path(__file__).parent
+BACKEND = HERE / "backend"
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(BACKEND))
+
+# The shipped modules are in two places: carutil.py is the entry point at the
+# root and the helpers are in backend/. Several checks below assert on the
+# source text of all of them, so each one is resolved once, here.
+SOURCE = {
+    "carutil.py": HERE / "carutil.py",
+    "sii.py": BACKEND / "sii.py",
+    "hashfs.py": BACKEND / "hashfs.py",
+    "logo.py": BACKEND / "logo.py",
+    "ui.py": BACKEND / "ui.py",
+    "brands.py": BACKEND / "brands.py",
+}
 
 import carutil as C  # noqa: E402
 import hashfs  # noqa: E402
@@ -58,18 +72,47 @@ FAILURES: list[str] = []
 SKIPS: list[str] = []
 
 
+def _say(line: str) -> None:
+    """Print a line that a narrow console can actually encode.
+
+    Windows consoles default to cp1252, and a `detail` built from rendered
+    output carries box-drawing characters. Letting that raise inside a check
+    aborts the whole run partway through, so the remaining checks are never
+    reported -- a broken check then looks like a broken suite.
+    """
+    try:
+        print(line)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+        print(line.encode(encoding, "backslashreplace").decode(encoding))
+
+
 def check(name: str, cond: bool, detail: str = "") -> None:
     if cond:
-        print(f"  PASS  {name}")
+        _say(f"  PASS  {name}")
     else:
-        print(f"  FAIL  {name}" + (f" -- {detail}" if detail else ""))
+        _say(f"  FAIL  {name}" + (f" -- {detail}" if detail else ""))
         FAILURES.append(name)
 
 
 def skip(name: str, detail: str = "") -> None:
     """Record a check that could not run because a fixture is missing."""
-    print(f"  SKIP  {name}" + (f" -- {detail}" if detail else ""))
+    _say(f"  SKIP  {name}" + (f" -- {detail}" if detail else ""))
     SKIPS.append(name)
+
+
+def _probe_failure(detail: str) -> None:
+    """Drive a deliberately failing check, then forget it.
+
+    It runs against the real stdout on purpose: that is the stream whose narrow
+    encoding is the thing under test. The recorded failure is removed again so
+    a green run still reports none.
+    """
+    before = len(FAILURES)
+    try:
+        check("(self-test) a detail this console may not encode", False, detail)
+    finally:
+        del FAILURES[before:]
 
 
 def need(path: Path, name: str) -> bool:
@@ -4315,6 +4358,50 @@ def test_ui() -> None:
     if saved is not None:
         _os.environ["NO_COLOR"] = saved
 
+    # An absent TERM is not a refusal, because Windows never sets one and every
+    # console user there was getting plain output while Rich -- which only
+    # refuses `dumb` -- was ready to paint. `dumb` still means no colour.
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    term_saved = _os.environ.pop("TERM", None)
+    try:
+        check("an absent TERM does not switch colour off",
+              U.colour_enabled(Tty()) is True)
+        for term in ("dumb", "unknown"):
+            _os.environ["TERM"] = term
+            check(f"TERM={term} means no colour",
+                  U.colour_enabled(Tty()) is False, term)
+        _os.environ["TERM"] = "xterm-256color"
+        check("a real TERM keeps colour on", U.colour_enabled(Tty()) is True)
+    finally:
+        _os.environ.pop("TERM", None)
+        if term_saved is not None:
+            _os.environ["TERM"] = term_saved
+
+    # Rich is handed the palette, so it must be told the palette's own colour
+    # system rather than left to sniff the host: on Windows it resolves to a
+    # 4-bit system and approximates slate and ivory onto 16 colours. Named only
+    # when colour is on, because naming it makes Rich treat the stream as
+    # colour-capable and a piped run would keep attributes it must drop.
+    if U._Console is not None:
+        pinned = U._console(Tty())
+        check("Rich is told the palette is truecolour",
+              pinned.color_system == "truecolor", str(pinned.color_system))
+        check("Rich is kept off the legacy Windows renderer",
+              pinned.legacy_windows is False, str(pinned.legacy_windows))
+        off = U._console(io.StringIO())
+        check("Rich names no colour system when colour is off",
+              off.color_system is None, str(off.color_system))
+    else:
+        skip("Rich is told the palette is truecolour", "rich is not installed")
+
+    # A failure detail is arbitrary output, and a narrow console cannot encode
+    # box-drawing characters. Printing it raw killed the run partway through,
+    # so the remaining checks were never reported at all.
+    _probe_failure("┌─┐")
+
     # One palette, six colours, in both surfaces. Every mark on screen is one of
     # them, and every logical name resolves in BOTH tables -- a name in one and not
     # the other is how a marker silently loses its colour, which is exactly what
@@ -4994,7 +5081,7 @@ def test_windows_compatibility() -> None:
     import ast as _ast
     import ui as U
 
-    ui_src = (HERE / "ui.py").read_text(encoding="utf-8")
+    ui_src = (BACKEND / "ui.py").read_text(encoding="utf-8")
     tree = _ast.parse(ui_src)
     guarded = set()
     for node in tree.body:
@@ -5020,7 +5107,7 @@ def test_windows_compatibility() -> None:
     # 2. shutil.which("convert") resolves to the FAT-to-NTFS convert.exe on
     #    Windows. Every call must therefore be verified, never trusted by name.
     import logo as L
-    src = (HERE / "logo.py").read_text(encoding="utf-8")
+    src = (BACKEND / "logo.py").read_text(encoding="utf-8")
     check("logo.py verifies the binary by running -version",
           "_is_imagemagick" in src and "-version" in src)
     real_which = shutil.which
@@ -5062,13 +5149,12 @@ def test_windows_compatibility() -> None:
 
     # 7. No shell=True anywhere: on Windows it selects cmd.exe, whose quoting
     #    differs from POSIX and breaks paths containing spaces.
-    for name in ("carutil.py", "sii.py", "logo.py", "ui.py",
-                 "brands.py"):
-        text = (HERE / name).read_text(encoding="utf-8")
+    for name, path in SOURCE.items():
+        text = path.read_text(encoding="utf-8")
         check(f"{name} never uses shell=True", "shell=True" not in text)
 
     # 8. subprocess invocations pass an argument list, never a string.
-    lsrc = (HERE / "logo.py").read_text(encoding="utf-8")
+    lsrc = (BACKEND / "logo.py").read_text(encoding="utf-8")
     check("logo.py passes argv lists to subprocess",
           "[exe, \"-version\"]" in lsrc)
 
@@ -5079,9 +5165,8 @@ def test_windows_compatibility() -> None:
 
     # 10. No hardcoded /tmp or POSIX-only path in library code. The test file
     #     may use it; the shipped modules may not.
-    for name in ("carutil.py", "sii.py", "logo.py", "ui.py",
-                 "brands.py"):
-        text = (HERE / name).read_text(encoding="utf-8")
+    for name, path in SOURCE.items():
+        text = path.read_text(encoding="utf-8")
         check(f"{name} has no hardcoded /tmp path", '"/tmp' not in text)
 
     # 11. ModSource must release its archive handle. Windows cannot delete a
@@ -5638,11 +5723,30 @@ def test_carutil_is_the_entry_point() -> None:
     leftovers = [
         f.name for f in HERE.iterdir()
         if f.is_file() and f.suffix in (".py", ".md") and "carutil" not in f.name
-        and f.name not in ("sii.py", "hashfs.py", "logo.py", "brands.py", "ui.py",
-                           "test_converter.py", "README.md", "AGENTS.md",
+        and f.name not in ("test_converter.py", "README.md", "AGENTS.md",
                            "FINDINGS.md", ".gitignore")
     ]
     check("no unexpected new top-level modules", not leftovers, str(leftovers))
+
+    # The helpers were moved into backend/ so the root holds only the things a
+    # user runs or reads. Both halves are asserted: a module left at the root
+    # would still import, which is exactly why it needs a check of its own.
+    helpers = ("sii.py", "hashfs.py", "logo.py", "brands.py", "ui.py")
+    check("backend/ holds every helper module",
+          all((BACKEND / n).is_file() for n in helpers),
+          str(sorted(p.name for p in BACKEND.iterdir())))
+    check("no helper module is stranded at the root",
+          not [(HERE / n).exists() for n in helpers if (HERE / n).exists()])
+
+    # logos/ stayed beside the entry point, so brands has to reach up for it.
+    # A sibling logos/ is the exact mistake that silently leaves every brand
+    # without an image -- logo_path() returns None and the car ships a
+    # placeholder rather than failing.
+    import brands as _B
+    check("brands resolves logos/ beside the entry point",
+          _B._LOGO_DIR == (HERE / "logos").resolve(), str(_B._LOGO_DIR))
+    check("every brand still finds its logo",
+          all(_B.logo_path(b) is not None for b in _B.available()))
 
 
 def test_modsource_releases_its_handle() -> None:
