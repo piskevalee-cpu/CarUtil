@@ -13,7 +13,7 @@ Download the repository as a ZIP, **extract it**, then open the extracted
 
 ### 2. Start the launcher for your computer
 
-**Windows:** Double-click:
+**Windows:** excecute the .bat file
 
 ```powershell
 carutil.bat
