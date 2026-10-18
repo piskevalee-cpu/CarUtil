@@ -1260,12 +1260,12 @@ def _ask(prompt: str) -> str:
 
 
 def _confirm(prompt: str) -> bool:
-    """Ask a yes/no question; only an explicit y/yes continues."""
+    """Ask a yes/no question; an empty answer accepts the default yes."""
     while True:
-        raw = _ask(f"  {prompt} [y/N] ").lower()
-        if raw in ("y", "yes"):
+        raw = _ask(f"  {prompt} [Y/n] ").lower()
+        if raw in ("", "y", "yes"):
             return True
-        if raw in ("", "n", "no"):
+        if raw in ("n", "no"):
             return False
         print("  -> please answer y or n")
 

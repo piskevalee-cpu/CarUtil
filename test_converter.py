@@ -5124,8 +5124,16 @@ def test_dependency_check() -> None:
     real_which = shutil.which
     real_tty = C._tty
     real_confirm = C._confirm
+    real_ask = C._ask
 
     try:
+        C._ask = lambda prompt: ""
+        check("empty install answer accepts the default",
+              C._confirm("Install it now?") is True)
+        C._ask = lambda prompt: "n"
+        check("explicit no declines the install",
+              C._confirm("Install it now?") is False)
+
         # Nothing missing -> the check is silent and fast.
         C._logo.imagemagick = lambda: "/usr/bin/magick"
         check("no missing dependencies when ImageMagick is present",
@@ -5191,6 +5199,7 @@ def test_dependency_check() -> None:
         shutil.which = real_which
         C._tty = real_tty
         C._confirm = real_confirm
+        C._ask = real_ask
 
 
 @guard
