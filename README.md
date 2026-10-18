@@ -6,29 +6,35 @@ writes a new `.scs` archive.
 
 ## Quick start
 
-1. Download the repository as a ZIP and extract it.
-2. Open the extracted `CarUtil` folder.
-3. Start the launcher for your computer:
-   - **Windows:** double-click `carutil.bat`.
-   - **macOS:** open Terminal in the folder and run `bash carutil.sh`.
-   - **Linux:** open Terminal in the folder and run `bash carutil.sh`.
+### 1. Download and open CarUtil
 
-The launcher checks for Python and the required menu packages, sets up
-CarUtil's private environment the first time, then starts the guided
-walkthrough. If the menu packages are missing, it asks before installing them;
-press Enter to accept the default. Declining still starts CarUtil with its
-built-in numbered menus. Later runs skip setup when everything is already
-installed. If Python is missing, the launcher offers to install it where a
-supported installer is available. On Linux, it can also offer to install
-Pipx; if you decline or Pipx is unavailable, it uses Python's built-in virtual
-environment instead.
+Download the repository as a ZIP, **extract it**, then open the extracted
+`CarUtil` folder.
 
-Before starting CarUtil, both launchers check for ImageMagick and offer to
-install it (press Enter to accept). It is optional: declining or an
-unavailable installer does not stop conversion; CarUtil keeps the mod's logo
-or uses a placeholder. On Linux, automatic package installation supports
+### 2. Start the launcher for your computer
+
+**Windows:** Double-click **`carutil.bat`**.
+
+**macOS or Linux:** Open Terminal in the `CarUtil` folder and run:
+
+```bash
+bash carutil.sh
+```
+
+### 3. Follow the setup prompts
+
+On first run, the launcher checks for **Python** and sets up CarUtil's private
+environment. If a dependency is missing, it explains what it needs and asks
+before installing. **Press Enter to accept the default**; you can decline the
+optional menu packages and still use the built-in numbered menus. On Linux,
+the launcher may also offer to install **Pipx**; if you decline or Pipx is
+unavailable, it uses Python's built-in virtual environment instead.
+
+Before starting the walkthrough, the launcher also checks for **ImageMagick**.
+Press Enter to accept the install prompt, or decline and CarUtil will continue
+without replacing the logo. On Linux, automatic installation supports
 Debian/Ubuntu (`apt`), Fedora (`dnf`/`yum`), Arch (`pacman`), openSUSE
-(`zypper`), and Alpine (`apk`). macOS uses Homebrew, and Windows uses `winget`.
+(`zypper`), and Alpine (`apk`); macOS uses Homebrew and Windows uses `winget`.
 
 Installing Python, Pipx, ImageMagick, or the menu packages needs an internet
 connection. Install prompts show what will be installed; system-package
