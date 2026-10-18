@@ -103,15 +103,17 @@ before you touch it.
 **ImageMagick is the only external program**, used for exactly one thing:
 turning a shipped brand logo image into the 256×64 DDS the game reads.
 Questionary and Rich are installed from `requirements.txt` for the terminal UI;
-the converter logic otherwise uses the standard library. `main()` runs `check_dependencies()`
-before the walkthrough, which reports a missing ImageMagick and offers the
-package-manager command for the platform. Two rules hold it together:
+the converter logic otherwise uses the standard library. `carutil.sh` and
+`carutil.bat` check for ImageMagick and offer installation before launching
+CarUtil; the Python converter itself does not install operating-system tools.
+The shell launcher supports apt, dnf/yum, pacman, zypper and apk; macOS uses
+Homebrew, and Windows uses winget. Two rules hold it together:
 
 - **Declining the install must never abort the conversion.** A missing
   ImageMagick downgrades the *logo* only — the mod falls back to its own
   texture or the flat placeholder and the car is still written.
-- **The preflight must never block when stdin is not a terminal**, or scripted
-  runs and CI hang. It prints the command and returns instead.
+- **The launcher must never run a package installer without a terminal.**
+  Scripted runs skip the offer and continue without ImageMagick.
 
 An explicitly passed `--brand-logo` is the exception: that image was asked for
 by name, so failing loudly is correct. A missing ImageMagick is a **skip**, not
@@ -172,9 +174,9 @@ prints setup instructions rather than killing the walkthrough.
 
 **A Windows ImageMagick install is invisible to the running process.** The
 installer updates the machine PATH, but the process keeps its old copy, so
-`magick` stays "not found" for the rest of the run. `_refresh_magick_path()`
-prepends the install directory to `os.environ["PATH"]` to avoid needing a
-re-login. Any second external program would need the same treatment.
+`magick` stays "not found" for the rest of the run. `carutil.bat` prepends the
+usual Program Files install directory to its PATH before starting Python, so
+the logo converter can use ImageMagick immediately.
 
 **CRLF is a non-issue, and that is worth knowing.** Windows translates `\n`
 only in *text mode*. Def units are handed to `zipfile` as `str` and encoded to
@@ -376,9 +378,8 @@ that looks like an install and has no `def.scs` in it. The install is
 identified by `def.scs` **and** `base.scs` together, so a Steam library or
 prefix named `American Truck Simulator` is rejected and a renamed install still
 resolves. `--path` prints both; it short-circuits before the banner, the
-ImageMagick preflight and the "no input given" refusal, because asking where
-your mod folder is must not first demand an input or offer to install a program
-you did not ask about.
+the "no input given" refusal, because asking where your mod folder is must not
+first demand an input.
 
 **Enumerate Steam *roots*, not finished `compatdata` paths.** Steam's layout is
 not one thing: `~/.steam` is normally a symlink farm whose `root` and `steam`

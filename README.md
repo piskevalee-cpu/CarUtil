@@ -6,45 +6,41 @@ writes a new `.scs` archive.
 
 ## Quick start
 
-Download the repository ZIP from GitHub, extract it, and open the extracted
-`CarUtil` folder in PowerShell (Windows) or Terminal (macOS/Linux).
+1. Download the repository as a ZIP and extract it.
+2. Open the extracted `CarUtil` folder.
+3. Start the launcher for your computer:
+   - **Windows:** double-click `carutil.bat`.
+   - **macOS:** open Terminal in the folder and run `bash carutil.sh`.
+   - **Linux:** open Terminal in the folder and run `bash carutil.sh`.
 
-You need Python 3.9 or newer. For the guided menus and styled output, install
-the two small Python packages included in `requirements.txt`.
+The launcher checks for Python and the required menu packages, sets up
+CarUtil's private environment the first time, then starts the guided
+walkthrough. If the menu packages are missing, it asks before installing them;
+press Enter to accept the default. Declining still starts CarUtil with its
+built-in numbered menus. Later runs skip setup when everything is already
+installed. If Python is missing, the launcher offers to install it where a
+supported installer is available. On Linux, it can also offer to install
+Pipx; if you decline or Pipx is unavailable, it uses Python's built-in virtual
+environment instead.
 
-**Windows** — open PowerShell in the CarUtil folder and run:
+Before starting CarUtil, both launchers check for ImageMagick and offer to
+install it (press Enter to accept). It is optional: declining or an
+unavailable installer does not stop conversion; CarUtil keeps the mod's logo
+or uses a placeholder. On Linux, automatic package installation supports
+Debian/Ubuntu (`apt`), Fedora (`dnf`/`yum`), Arch (`pacman`), openSUSE
+(`zypper`), and Alpine (`apk`). macOS uses Homebrew, and Windows uses `winget`.
 
-```powershell
-py -m pip install -r requirements.txt
-```
+Installing Python, Pipx, ImageMagick, or the menu packages needs an internet
+connection. Install prompts show what will be installed; system-package
+installs may ask for your computer's administrator password. If a required
+tool is not available for automatic installation, the launcher prints the
+next step to take.
 
-**macOS or Linux** — open a terminal in the CarUtil folder and run:
-
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-Then start CarUtil with `py carutil.py` on Windows or `python3 carutil.py` on
-macOS or Linux. If Linux says it manages Python packages itself, use this
-one-time setup instead:
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-```
-
-Then launch with `.venv/bin/python carutil.py`.
-
-ImageMagick is optional and is only used to convert brand logos. Without it,
-CarUtil still converts the car and uses the mod's logo or a placeholder.
-
-Start the guided walkthrough:
-
-```powershell
-py carutil.py
-```
-
-On macOS or Linux, run `python3 carutil.py`.
+For manual setup, install the packages from `requirements.txt` in a Python
+virtual environment and run `carutil.py` with that environment's Python.
+The launchers also check and offer to install ImageMagick; when running
+`carutil.py` directly, ImageMagick remains optional and is not installed by
+CarUtil.
 
 It asks for the mod, vehicle type, brand, weight, engine target, rev limit and
 price, then writes the converted archive next to the input. In guided mode,

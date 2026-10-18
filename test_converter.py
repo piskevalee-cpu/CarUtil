@@ -303,8 +303,13 @@ def test_collapsed_keys_survive_a_real_tune() -> None:
 def _data_sii(mod: Path, out: Path, *extra: str) -> str:
     """Convert a synthetic mod and return its finished data.sii."""
     import zipfile as _z
-    C.main([str(mod), "--type", "sedan", "--brand", "test", "--no-prompt",
-            *extra, "-o", str(out)])
+    real_tty = C._tty
+    C._tty = lambda: False
+    try:
+        C.main([str(mod), "--type", "sedan", "--brand", "test", "--no-prompt",
+                *extra, "-o", str(out)])
+    finally:
+        C._tty = real_tty
     with _z.ZipFile(out) as z:
         name = next(n for n in z.namelist()
                     if n.endswith("/data.sii") and "truck" in n)
@@ -491,6 +496,8 @@ def test_an_engine_with_no_rev_bands_gets_them() -> None:
     is filled.
     """
     section("an engine with no rev bands is given measured ones")
+    real_tty = C._tty
+    C._tty = lambda: False
     with_bands = "\n".join(f"\t{k}: {C._RPM_RANGE_DEFAULTS[k]}"
                        for k in C._RPM_RANGE_ORDER) + "\n"
 
@@ -539,6 +546,7 @@ def test_an_engine_with_no_rev_bands_gets_them() -> None:
     check("the --power path writes them too",
           get_key(edit_lines(hp), "rpm_range_power")
           == C._RPM_RANGE_DEFAULTS["rpm_range_power"], hp)
+    C._tty = real_tty
 
 
 def test_rpm_bands_scale_to_where_the_engine_peaks() -> None:
@@ -554,6 +562,8 @@ def test_rpm_bands_scale_to_where_the_engine_peaks() -> None:
     reproduces the measured median exactly.
     """
     section("the rev bands follow the engine's own power peak")
+    real_tty = C._tty
+    C._tty = lambda: False
     at_ref = C._rpm_range_bands(5000)
     check("the reference peak reproduces the measured median exactly",
           at_ref == C._RPM_RANGE_DEFAULTS, str(at_ref))
@@ -585,6 +595,7 @@ def test_rpm_bands_scale_to_where_the_engine_peaks() -> None:
         eng, C.Report(), target_hp=300, peak_power_rpm=6000)), "rpm_range_power")
     check("the power band never exceeds the rev limit",
           int(re.findall(r"\d+", clamped)[1]) <= 6100, clamped)
+    C._tty = real_tty
 
 
 _ENGINE_CURVE = ("SiiNunit\n{\naccessory_engine_data : e\n{\n\ttorque: 503\n"
@@ -605,6 +616,8 @@ def test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak() -> None:
     past the limiter that is supposed to stop it.
     """
     section("the rev limit cuts the curve, and is asked after the peak")
+    real_tty = C._tty
+    C._tty = lambda: False
     C._rpm_ranges = None
     out = C.tune_engine(_ENGINE_CURVE, C.Report(), target_hp=300,
                         peak_power_rpm=5000, rev_limit=5600)
@@ -647,6 +660,7 @@ def test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak() -> None:
         want = round(C._DEFAULT_REV_LIMIT_FACTOR * round(0.75 * prm))
         check(f"default ceiling for a {prm} rpm power peak is {want}",
               want == round(1.5 * round(0.75 * prm)))
+    C._tty = real_tty
 
 
 def test_clipping_the_ceiling_costs_torque_and_says_so() -> None:
@@ -665,6 +679,8 @@ def test_clipping_the_ceiling_costs_torque_and_says_so() -> None:
     it needed catching rather than absorbing.
     """
     section("a ceiling below the shape's rev range costs torque, and warns")
+    real_tty = C._tty
+    C._tty = lambda: False
     def build(limit):
         C._rpm_ranges = None
         rep = C.Report()
@@ -697,6 +713,7 @@ def test_clipping_the_ceiling_costs_torque_and_says_so() -> None:
           any("runs out at about" in w for w in rep_air.warnings)
           and not any("costs this engine torque" in w for w in rep_air.warnings),
           str(rep_air.warnings))
+    C._tty = real_tty
 
 
 def test_the_shift_point_is_the_band_that_governs_upshifts() -> None:
@@ -718,6 +735,8 @@ def test_the_shift_point_is_the_band_that_governs_upshifts() -> None:
     back down, and moving it too would change how it hunts between gears.
     """
     section("the shift point is the band's upper bound, and it is a choice")
+    real_tty = C._tty
+    C._tty = lambda: False
     eng = ("SiiNunit\n{\naccessory_engine_data : e\n{\n\ttorque: 503\n"
            "\trpm_idle: 750\n\trpm_limit: 6100\n"
            "\ttorque_curve[]: (1500, 0.51)\n\ttorque_curve[]: (3750, 0.57)\n"
@@ -761,6 +780,7 @@ def test_the_shift_point_is_the_band_that_governs_upshifts() -> None:
           get_key(kept, "rpm_range_high_gear") == "(1350, 1950)"
           and get_key(kept, "rpm_range_power") == "(1800, 6000)",
           str([get_key(kept, k) for k in C._RPM_RANGE_ORDER]))
+    C._tty = real_tty
 
 
 def test_rpm_band_input_is_validated() -> None:
@@ -972,6 +992,8 @@ def test_resistance_torque_is_rescaled_with_the_engine() -> None:
     why lifting off at 50 mph dropped the car to about 30 immediately.
     """
     section("resistance_torque follows torque")
+    real_tty = C._tty
+    C._tty = lambda: False
     engine = _engine_unit(
         "torque: 4900",
         "resistance_torque: 320",
@@ -1016,6 +1038,7 @@ def test_resistance_torque_is_rescaled_with_the_engine() -> None:
           "# peak, per the tuner" in out2, out2)
     check("a comment on resistance_torque survives too",
           "# measured on the dyno" in out2, out2)
+    C._tty = real_tty
 
 
 def test_secondary_torque_is_dropped_for_a_car() -> None:
@@ -1026,6 +1049,8 @@ def test_secondary_torque_is_dropped_for_a_car() -> None:
     car has one, and all 181 SCS engines leave it alone.
     """
     section("secondary_torque* is dropped on a car")
+    real_tty = C._tty
+    C._tty = lambda: False
     engine = _engine_unit(
         "torque: 1400",
         "secondary_torque: 2250",
@@ -1050,6 +1075,7 @@ def test_secondary_torque_is_dropped_for_a_car() -> None:
                            tonnes=1.5)
     check("dropped on the torque-rescale path too",
           get_key(edit_lines(scaled), "secondary_torque") is None, scaled)
+    C._tty = real_tty
 
 
 def test_truck_fuel_keys_are_dropped_for_a_car() -> None:
@@ -1068,6 +1094,8 @@ def test_truck_fuel_keys_are_dropped_for_a_car() -> None:
     the Mustang and the Bronco, which take the base game's consumption.
     """
     section("truck fuel keys are dropped, not retuned")
+    real_tty = C._tty
+    C._tty = lambda: False
     engine = _engine_unit(
         "torque: 1400",
         "consumption_coef: 0.42",
@@ -1116,6 +1144,7 @@ def test_truck_fuel_keys_are_dropped_for_a_car() -> None:
     new_tq = float(get_key(edit_lines(out), "torque"))
     check("and the torque was still retargeted, so only fuel changed",
           new_tq < 1400 and new_tq > 50, f"{new_tq} Nm from 1400")
+    C._tty = real_tty
 
 
 def test_tank_size_is_still_left_to_the_mod() -> None:
@@ -4444,17 +4473,19 @@ def test_windows_compatibility() -> None:
         shutil.which = real_which
 
     # 3. A Windows ImageMagick install is invisible to the running process
-    #    until PATH is refreshed, so that recovery must exist and be nt-only.
-    check("_refresh_magick_path exists", hasattr(C, "_refresh_magick_path"))
-    csrc = (HERE / "carutil.py").read_text(encoding="utf-8")
-    check("_refresh_magick_path is gated on nt", 'os.name != "nt"' in csrc)
-    check("it looks for magick.exe",
-          "magick.exe" in csrc and "ImageMagick" in csrc)
+    #    until PATH is refreshed, so the batch launcher must do it.
+    batch = (HERE / "carutil.bat").read_text(encoding="utf-8")
+    check("launcher searches standard ImageMagick install folders",
+          "%ProgramFiles%\\ImageMagick*" in batch
+          and "%ProgramFiles(x86)%\\ImageMagick*" in batch)
+    check("launcher prepends the installed directory to PATH",
+          'set "PATH=%%~D;%PATH%"' in batch)
 
-    # 4. PATH is joined with os.pathsep, never a bare ":". The latter
-    #    silently truncates PATH on Windows.
-    check("PATH is joined with os.pathsep", "os.pathsep" in csrc)
-    check('no hardcoded ":" PATH join', '":" + os.environ' not in csrc)
+    # 4. PATH is joined with Windows's semicolon separator, not a POSIX colon.
+    check("batch PATH update uses the Windows separator",
+          'set "PATH=%%~D;%PATH%"' in batch
+          and 'set "PATH=%%~D:%PATH%"' not in batch)
+    csrc = (HERE / "carutil.py").read_text(encoding="utf-8")
 
     # 5. Directory walks normalise to forward slashes for archive paths, or
     #    Windows backslashes end up as zip entry names the game cannot read.
@@ -4481,15 +4512,10 @@ def test_windows_compatibility() -> None:
     check("logo.py passes argv lists to subprocess",
           "[exe, \"-version\"]" in lsrc)
 
-    # 9. The installer must be winget-first on Windows: apt/pacman/brew do not
-    #    exist there, and offering them would produce a useless suggestion.
-    import os as _os
-    if _os.name == "nt":
-        check("winget is the first installer offered",
-              C._INSTALLERS[0][0] == "winget")
-    else:
-        check("winget is present in the installer list",
-              any(m == "winget" for m, _ in C._INSTALLERS))
+    # 9. The Windows launcher uses winget and does not route OS installs
+    #    through the Python converter.
+    check("ImageMagick installation is handled by the Windows launcher",
+          "ImageMagick.ImageMagick" in batch and "winget install" in batch)
 
     # 10. No hardcoded /tmp or POSIX-only path in library code. The test file
     #     may use it; the shipped modules may not.
@@ -5128,90 +5154,26 @@ def test_modsource_releases_its_handle() -> None:
                   f"{type(exc).__name__}: {exc}")
 
 
-def test_dependency_check() -> None:
-    section("dependency preflight")
-    import io
+def test_launcher_dependency_preflight() -> None:
+    section("launchers check and offer to install ImageMagick")
+    shell = (HERE / "carutil.sh").read_text(encoding="utf-8")
+    batch = (HERE / "carutil.bat").read_text(encoding="utf-8")
+    source = (HERE / "carutil.py").read_text(encoding="utf-8")
 
-    real_magick = C._logo.imagemagick
-    real_which = shutil.which
-    real_tty = C._tty
-    real_confirm = C._confirm
-    real_ask = C._ask
-
-    try:
-        C._ask = lambda prompt: ""
-        check("empty install answer accepts the default",
-              C._confirm("Install it now?") is True)
-        C._ask = lambda prompt: "n"
-        check("explicit no declines the install",
-              C._confirm("Install it now?") is False)
-
-        # Nothing missing -> the check is silent and fast.
-        C._logo.imagemagick = lambda: "/usr/bin/magick"
-        check("no missing dependencies when ImageMagick is present",
-              C.missing_dependencies() == [])
-        out = io.StringIO()
-        real, sys.stdout = sys.stdout, out
-        try:
-            C.check_dependencies()
-        finally:
-            sys.stdout = real
-        check("preflight is silent when nothing is missing", out.getvalue() == "")
-
-        # Missing -> reported, with an install command, and no prompt when
-        # stdin is not a terminal (scripted runs and CI must never block).
-        C._logo.imagemagick = lambda: None
-        check("reports a missing ImageMagick",
-              C.missing_dependencies() == ["ImageMagick"])
-
-        C._tty = lambda: False
-        C._confirm = lambda prompt: (_ for _ in ()).throw(
-            AssertionError("preflight must not prompt without a terminal"))
-        out = io.StringIO()
-        real, sys.stdout = sys.stdout, out
-        try:
-            C.check_dependencies()
-        finally:
-            sys.stdout = real
-        text = out.getvalue()
-        check("explains what ImageMagick is for",
-              C.IMAGEMAGICK_WHY in text)
-        check("offers an install command without prompting",
-              any(m in text for m in ("winget", "brew", "apt-get", "dnf",
-                                      "yum", "pacman", "apk")),
-              text)
-
-        # With a terminal it must ask, and declining must not raise.
-        C._tty = lambda: True
-        asked = []
-        C._confirm = lambda prompt: (asked.append(prompt), False)[1]
-        out = io.StringIO()
-        real, sys.stdout = sys.stdout, out
-        try:
-            C.check_dependencies()
-        finally:
-            sys.stdout = real
-        check("offers to install on a terminal", len(asked) == 1, str(asked))
-        check("declining carries on without an error",
-              "Skipped" in out.getvalue())
-
-        # No package manager at all must still be non-fatal.
-        shutil.which = lambda name: None
-        check("no package manager -> no suggestion", C._suggest_install() is None)
-        out = io.StringIO()
-        real, sys.stdout = sys.stdout, out
-        try:
-            C.check_dependencies()
-        finally:
-            sys.stdout = real
-        check("no package manager still exits cleanly",
-              "nothing to offer" in out.getvalue())
-    finally:
-        C._logo.imagemagick = real_magick
-        shutil.which = real_which
-        C._tty = real_tty
-        C._confirm = real_confirm
-        C._ask = real_ask
+    check("shell launcher verifies the ImageMagick version banner",
+          "imagemagick_available" in shell and "ImageMagick" in shell)
+    check("ImageMagick is offered with Enter as the default",
+          'ask_yes_no "Install ImageMagick now?" yes' in shell)
+    for manager in ("apt-get", "dnf", "yum", "pacman", "zypper", "apk", "brew"):
+        check(f"shell launcher supports {manager}",
+              manager in shell)
+    check("Windows launcher verifies ImageMagick",
+          "magick -version" in batch and "findstr /i" in batch)
+    check("Windows launcher offers winget installation",
+          "ImageMagick.ImageMagick" in batch
+          and "Install ImageMagick now? [Y/n]" in batch)
+    check("Python CLI no longer runs a dependency installer",
+          "check_dependencies" not in source)
 
 
 @guard
@@ -5325,7 +5287,7 @@ def main() -> int:
     test_addons_bound_by_directory_not_filename()
     test_unsatisfied_require_is_reported()
     test_windows_compatibility()
-    test_dependency_check()
+    test_launcher_dependency_preflight()
     test_hashfs_city_hash_matches_upstream()
     test_hashfs_reads_a_whole_mod()
     test_hashfs_refuses_junk_rather_than_returning_it()
