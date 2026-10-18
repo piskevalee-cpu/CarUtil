@@ -52,15 +52,15 @@ The launchers also check and offer to install ImageMagick; when running
 `carutil.py` directly, ImageMagick remains optional and is not installed by
 CarUtil.
 
-It asks for the mod, vehicle type, brand, weight, engine target, rev limit and
-price, then writes the converted archive next to the input. In guided mode,
-`--mass` does not skip the weight prompt; `--power` changes the engine question to
-a 0–60 target. `--acceleration`, `--rev-limit` and `--price` skip their
-respective prompts. The rev limit is asked for only when the mod declares a
-limiter of its own, and the only values accepted are between that engine's idle
-and its limiter — otherwise it is derived as 1.5x peak torque, which is inside
-the 1.44–2.29x SCS's own cars reach. To avoid all prompts, pass `--no-prompt` and
-provide the input, `--type` and `--brand`:
+It asks for the mod, vehicle type, brand, weight, engine target and price, then
+writes the converted archive next to the input. In guided mode, `--mass` does
+not skip the weight prompt; `--power` changes the engine question to a 0–60
+target. `--acceleration` and `--price` skip their respective prompts. The engine
+keeps the mod's own rev limit, as SCS's own cars keep theirs; the one rev
+question is where the power peak goes, and the answer is held between that
+engine's idle and its own limiter. `--rev-limit` is the only way to change the
+ceiling. To avoid all prompts, pass `--no-prompt` and provide the input, `--type`
+and `--brand`:
 
 ```bash
 python3 carutil.py "mods/my-car.scs" \
@@ -104,7 +104,7 @@ control which cargo jobs your car can take.
 | `--power HP` | Set target peak engine power. |
 | `--acceleration SECONDS` | Set the target 0–60 mph time. |
 | `--peak-power-rpm RPM` | Set the engine's peak-power RPM. |
-| `--rev-limit RPM` | Set the maximum engine RPM and skip its prompt. You are otherwise asked, between the engine's own idle and limiter, when the mod declares one; without a declared limiter it is derived as 1.5x peak torque. |
+| `--rev-limit RPM` | Set the maximum engine RPM. The engine otherwise keeps the mod's own, as SCS's own cars keep theirs — 1.44 to 2.29 times their torque peak. |
 | `--shift-up-rpm RPM` | Set the automatic transmission's upshift RPM. |
 | `--air-resistance COEFF` | Adjust drag to affect top speed and high-speed acceleration. |
 | `--price DOLLARS` | Scale the mod's full accessory price table to the requested dealer price. |

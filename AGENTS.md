@@ -195,35 +195,61 @@ UTF-8 internally, so generated files stay LF-only on every platform. Defs that
 
 ## Prompts
 
-The guided walkthrough is **8 steps** (`total = 8` in `main()`): source, type,
-brand, weight, power *or* acceleration, rev limit, price, convert. Only `--price`
-and `--acceleration` suppress their own step, and `--rev-limit` suppresses the rev
-limit step.
+The guided walkthrough is **7 steps** (`total = 7` in `main()`): source, type,
+brand, weight, power *or* acceleration, price, convert. Only `--price` and
+`--acceleration` suppress their own step.
 
-**The rev limit step exists only when the mod declares a limiter.** This has been
-reversed twice and the second reason is the one that holds. It was removed for
-asking for a figure the program computes (`default_rev_limit()`, 1.5x peak
-torque). But that figure lands *below* 4/3 of the power peak, which is the zone
-where clipping the curve costs real torque — 8% at a 5000 rpm peak — while the
-mod's own `rpm_limit` cannot clip it at all and is not computable from anything.
-So `main()` calls `engine_rev_bounds(src)` and prompts only when it returns
-`(idle, ceiling)`; `None` means no engine declares a limiter and the derived
-figure is used silently. Both bounds are the mod's own numbers, so the prompt is
-never asking the user to supply something we know. See `FINDINGS.md` §39 and
-`prompt_rev_limit`'s docstring.
+**There is no rev-limit prompt and no derived ceiling.** The engine keeps the mod's
+own `rpm_limit`, which is what SCS's own cars do — their four Road Trip engines
+all sit 1.44–2.29× their torque peak. `--rev-limit` is the only way to move it.
+The *only* rev question asked is where the power peak goes, and `prompt_power`
+holds that answer between the engine's own idle and its own limiter
+(`engine_rev_bounds`, None when no engine declares both, falling back to the wide
+1000–9000 rpm the prompt always accepted).
+
+This went through **three** wrong answers before the right one, and the right one
+was not a better bound:
+
+1. *Derived silently* — it asked for a computable number, so the prompt went. The
+   derivation clipped our own curve below the rev where the shape runs out and
+   cost 8% of the engine (§39).
+2. *Asked, bounded by the mod's limiter* — a limiter is **permission, not
+   usefulness**. The CTS-V peaks torque at 3750 and is permitted to 6100, and the
+   2350 rpm between make *less* torque than those below.
+3. *Asked, bounded by the mod's torque peak* — better, and still a second
+   question about the same engine, asked one step after the first.
+
+The actual insight is that the ceiling **was never ours to choose**. Do not
+reintroduce a "sensible default" for it: `default_rev_limit()` is deleted, and
+adding it back would clip a curve we just built.
 
 `_idle_rpm` reads an `idle_rpm` key if a mod ever declares one, and otherwise the
-first point of `torque_curve` — the lowest rev the engine works at. It must not
-route through `get_key`: this mod's limiter is `6100 # max of 6.2 L V8 is 6100
-RPM`, the §18 comment trap again.
+**first non-zero** point of `torque_curve` — a `(0, 0)` origin must be skipped,
+or the range opens at 0 rpm and accepts it. Neither bound may be read through
+`get_key`: this mod's limiter is `6100 # max of 6.2 L V8 is 6100 RPM`, the §18
+comment trap again.
+
+**The air warning is judged against the ceiling the engine will carry**, not only
+one the user named. The mod's own limiter is often above the rev where our shape
+runs out (the CTS-V's 6100 against 5333 at a 4000 rpm power peak), and warning
+only for an explicit `--rev-limit` hid it on every default conversion.
+
+**A test that reaches a prompt without pinning `_tty` will hang the console
+run.** This is not hypothetical: it cost a 900-second timeout, because the suite
+looks completely healthy when it is piped (stdin is `/dev/null`, so `input()`
+returns at once) and only blocks when stdin is a real terminal. Two separate
+call sites did it — a guided `main()` run that let a prompt read stdin, and a
+`tune_engine` call that reached the rev-band *arrow menu*. Any `tune_engine` in a
+test therefore pins `C._tty = lambda: False` **and** pre-answers
+`C._rpm_ranges`: the fixture declaring the bands is not the same thing as the
+prompt not running.
 
 **Flags do not remove the guided prompts.** On a terminal the prompts are
 mandatory: step 4 always asks for the weight and its answer replaces whatever
 `--mass` was parsed to, and step 5 runs unless `--acceleration` was given
 (`--power` alone switches the step-5 prompt from power to acceleration).
-`--price`, `--acceleration` and `--rev-limit` are the only flags that suppress
-their own prompt, and step 6 additionally requires that the mod declare a
-limiter at all.
+`--price` and `--acceleration` are the only flags that suppress their own
+prompt.
 The "skips steps 4–6" claim that used to sit in `FINDINGS.md` §31, in
 `README.md` and in the comment above `if guided:` is gone from all three now:
 `d0b8f28` changed `elif guided:` to `if guided:` and nothing updated the prose,
@@ -539,6 +565,20 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   peak, so after the torque rescale they carry ~800 Nm at idle and walk off the
   line when Drive is selected. `tune_engine` supplies the missing origin; the
   peak and shift points are untouched. See `FINDINGS.md` §25.
+- **The `(0, 0)` origin does not stop the creep on its own**, so the idle torque
+  is halved as well, at the engine's *own* idle rev (`_IDLE_TORQUE_CUT`). The
+  origin only helps while idle falls below the curve's first sample; stretching
+  the axis far enough puts that sample at idle carrying 0.6-0.66 of peak, which
+  is where the measured 577-761 Nm came from against 118-217 Nm for SCS's own
+  cars. The cut is a **sample placed at the idle rev**, not a rescale of the
+  shape: everything above idle keeps its torque, because the launch is the reason
+  the engine was chosen. It runs on both engine paths — `build_power_curve` for
+  the horsepower rebuild, `_cut_idle_torque_lines` for the rescale, which keeps
+  the mod's own curve and would otherwise creep exactly as before. Two traps that
+  cost a wrong number each: the sample *below* idle is the `(0, 0)` origin, so
+  capping the new value at "no more than the lower neighbour" pins it to **zero**;
+  and the fraction is written with three decimals, so rounding to nearest left one
+  build at **49.95%** — it must round down. See `FINDINGS.md` §28.
 - **When a value can be read off the reference, do not infer it.**
   `torque_converter_crawl` was removed on the sound-looking inference that a key
   called "crawl" causes crawling — when all four SCS transmissions declare it. A
@@ -612,10 +652,18 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   at a 5000 rpm power peak, ceiling 6000+ gives torque peak 3750 / 503 Nm,
   ceiling 5625 gives 4500 / 464 Nm. **Our own 1.5x default lands in that
   losing zone**, which is why the cost is now measured against the engine's
-  original ceiling and reported. Three ordering rules: the ceiling is written
+  original ceiling and reported. Four ordering rules: the ceiling is written
   **before** the curve is built; the air warning is judged against 4/3 of the
   peak, **never** against the written curve (always clipped, so always true);
-  the torque-loss warning is judged against a second, unclipped build.
+  the torque-loss warning is judged against a second, unclipped build; and the
+  rev bands are computed from the ceiling that is **about to be written**, not
+  the one the unit currently carries. That last one bit: `_ensure_rpm_ranges` runs
+  before `_set_rev_limit`, so reading the unit clamped `rpm_range_power` to the
+  mod's original 6100 and then wrote a 3750 ceiling under it — a band claiming
+  full power at 4800 on an engine that cuts at 3750. Both
+  `_ensure_rpm_ranges` and `_requested_power_peak` now take `rev_limit` for this
+  reason, and a check reads a converted engine back to prove no band exceeds the
+  ceiling written beside it.
   `FINDINGS.md` §39.
 - **`rpm_range_power` does not change gear; the band that does is
   `rpm_range_high_gear`, and only its UPPER bound is the shift point.** The

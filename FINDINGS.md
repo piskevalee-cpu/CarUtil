@@ -1468,6 +1468,48 @@ real sample above idle:
 
 So 6000 rpm is the creep answer as well as the top-speed one.
 
+### The idle torque is now halved at the engine's own idle
+
+The table above reads as a reason to always ask for a 6000 rpm power peak, which
+is a false trade: it also decides the launch, and the curve it produces at 4500
+still creeps. So the creep is cut directly instead, by `_cut_idle_torque`.
+
+The cut is a **sample placed at the idle rev**, carrying half of whatever the
+curve read there. Not a rescale of the shape, because everything above idle has
+to keep its torque — the launch is the reason this engine was chosen. Measured on
+the CTS-V Sport Wagon at a 4000 rpm power peak:
+
+| | peak Nm | fraction at 750 | idle torque |
+|---|---|---|---|
+| before | 1081 | 0.637 | 689 Nm |
+| after | 1081 | 0.319 | **345 Nm** |
+
+Peak torque and the power-peak rev are both unchanged, so the horsepower request
+is still honoured exactly: the cut cannot cost the engine anything above idle.
+
+Three things this got wrong on the way, all of them quiet:
+
+- **A cap at the lower neighbouring sample pinned it to zero.** The sample below
+  idle is normally the `(0, 0)` origin, so "never raise torque at this rev"
+  became "take all of it" — a 5000 rpm build got 100% instead of 50%. `factor < 1`
+  already guarantees the result is lower; the cap only ever subtracted more.
+- **Rounding to three decimals is not rounding.** 0.33733 → 0.337 left a 4000 rpm
+  engine at **49.95%** of its old idle torque. The curve is written with three
+  decimals, so a rounding artefact was deciding whether the requirement was met.
+  It now rounds **down**.
+- **A length comparison cannot detect the cut.** When a sample already sits on
+  the idle rev — the common case — the cut replaces it, so the curve has the same
+  number of samples afterwards and "did the count change?" reported *nothing to
+  do*.
+
+The cut is applied on **both** engine paths. `_build_power_curve` does it for the
+horsepower rebuild, and `_cut_idle_torque_lines` does it for the rescale, which
+keeps the mod's own curve and never goes near `build_power_curve` — without which
+`--acceleration` and `--engine-torque` would have left the car walking away
+exactly as before. That twin edits **surgically**: it replaces one number and
+leaves the author's bytes alone. An earlier version re-emitted every sample from
+parsed floats and turned the mod's `(0, 0)` origin into `(0, 0.0)`.
+
 ### The trade-off is now explicit
 
 `--acceleration` is kept as the older proxy. It targets a 0-60 time, which
@@ -2082,7 +2124,7 @@ that says so is more useful than either of our readings.
 "Ask the user for the rpm limit after the peak rpm, or default to 1.5x the
 peak." Asked because the CTS peaks its torque right at its own limiter.
 
-### The 1.5 is measured, not chosen
+### The 1.5 was measured, not chosen — and it is gone anyway
 
 Ceiling as a multiple of peak **torque**, across the four engines SCS ships for
 its own Road Trip cars:
@@ -2094,9 +2136,15 @@ its own Road Trip cars:
 | `ch289v8` | 5500 | 2400 | **2.29** |
 | `v8_46l` | 6000 | 4100 | 1.46 |
 
-They sit between **1.44 and 2.29**, so 1.5 is inside their range. It is a
-multiple of peak *torque*, not of peak power: with this shape torque peaks at
-0.75x the power peak, so a power peak of 5000 gives a default ceiling of 5625.
+They sit between **1.44 and 2.29**, so 1.5 is inside their range, which is what
+made it look like the reference speaking. It is a multiple of peak *torque*, not
+of peak power: with this shape torque peaks at 0.75x the power peak, so a power
+peak of 5000 gives a default ceiling of 5625.
+
+The table is still the reason the engine **keeps its own** limiter — SCS's own
+cars run to 1.44-2.29x their torque peak and so should a converted one. What it is
+no longer the reason for is a `default_rev_limit()`, which is deleted; see the
+next section for the three answers that led to it.
 
 ### It does NOT merely cut revs off — and our own default lands in the trap
 
@@ -2142,52 +2190,65 @@ Two things that had to be got right:
   point, which fires on *every* value: the curve is always clipped to the limit,
   so the last point is always the limit and the test is true by construction.
 
-### The walkthrough is 8 steps, conditionally
+### There is no rev-limit prompt, and there is no derived ceiling
 
-`total = 8`, with the rev limit as step 6, asked **after** the power step —
-because the useful answer depends on where the engine makes its torque, which is
-not known until then. Price is 7 and Convert is 8.
+The walkthrough is 7 steps: source, type, brand, weight, power *or* acceleration,
+price, convert. The only rev question is **where the power peak goes**, and that
+answer is held between the engine's idle and its own `rpm_limit` -- both read off
+the mod, neither invented. On the CTS-V Sport Wagon that is 750 to 6100.
 
-**Reversed, then reversed back — for a measured reason.** The prompt was removed
-because it asked for a number the program derives (1.5x peak torque,
-`default_rev_limit()`). That reasoning was half right, and the half that was wrong
-is the half that mattered: 1.5x peak torque lands **below** 4/3 of the power peak,
-which is the losing zone two sections up. The mod's own ceiling cannot clip the
-shape at all, and it is not computable from anything — it is a fact about the
-engine, in the engine's own file.
+The engine keeps the mod's own `rpm_limit`. That is not a simplification, it is
+what SCS does: their four Road Trip engines all sit **1.44 to 2.29 times** their
+torque peak, and this converter used to derive 1.5x precisely because that
+figure looked like the reference speaking. It was the reference being misread.
 
-So the prompt is back, and it is **gated on the mod declaring a limiter**
-(`engine_rev_bounds`, None when no engine has `rpm_limit`):
+**`default_rev_limit()` is deleted, and three answers led to it.** In order:
 
-| | CTS-V Sport Wagon (measured) | Escalade / W223 / Pilot |
-|---|---|---|
-| declared `rpm_limit` | **6100** | declared |
-| first curve point (the idle) | **750** | declared |
-| derived default at a 4000 rpm peak | 4500 | 4500 |
-| torque at a 5000 rpm peak | 503 Nm unclipped, 464 Nm at 4500 | same shape |
+1. *Derived silently* -- the walkthrough asked, so the prompt was removed on the
+   grounds that it asked for a computable number. The derivation then clipped our
+   own curve below the rev where the shape runs out and cost 8% of the engine at a
+   5000 rpm power peak, exactly as the table above predicts.
+2. *Asked, bounded by the mod's limiter* -- reasoning that a ceiling the engine
+   already carries is a fact about it. But a limiter is permission, not
+   usefulness: the CTS-V peaks torque at 3750 and is permitted to 6100, and the
+   2350 rpm between make **less** torque than those below.
+4. *Asked, bounded by the mod's torque peak* -- better, and still wrong, because
+   the ceiling was not the thing that needed asking. It was a second question
+   about the same engine, asked one step after the first.
 
-The bounds are the mod's own two numbers, and they are the only two the user could
-not work out for themselves: below the idle the engine makes nothing, above the
-limiter it runs past what the author declared. Engines that disagree are answered
-by the intersection — highest idle, lowest ceiling — so one answer is legal for
-all of them rather than for whichever was read first.
+The fix is not a better bound. It is noticing that the ceiling **was never ours
+to choose**: the mod declares one, SCS declares one, and the only thing that
+needed a prompt was where the rebuilt curve peaks. `--rev-limit` remains the only
+way to move it, and a converted Cadillac keeps
+`rpm_limit: 6100 # max of 6.2 L V8 is 6100 RPM` -- the author's own line, comment
+and all.
 
-Two details the numbers forced:
+This is the fifth time in this investigation that a claim written into a comment
+turned out to be wrong when measured, and the third time the default proposed
+here was itself the problem.
 
-- **`rpm_limit` carries a trailing comment** on this mod — `6100 # max of 6.2 L V8
-  is 6100 RPM` — which is the `get_key` trap from §18 again. The regex takes the
-  digits directly and never routes through `get_key`.
-- **There is no `idle_rpm` key**, here or in any of the three mods measured. The
-  idle is the first point of `torque_curve`, which for a 6.2 litre V8 is 750 rpm
-  and so is a plausible idle rather than an artefact. `_idle_rpm` prefers a
-  declared `idle_rpm` if a mod ever has one, and this converter writes none.
+### What the air warning is now judged against
 
-**Asking still cannot rescue the air.** Choosing 6100 here is *worse* than
-choosing 5333: the curve runs out at 5333, so the 767 rpm above it make nothing,
-and `_warn_airy_limit` says so in the report. The prompt does not hide that — it
-names 5333 in the hint, before the answer, because a user cannot derive "this
-ceiling is air" from the ceiling alone. It is a choice made with the number in
-front of them, which is what makes it a choice rather than a mistake.
+Judged against the ceiling the engine will actually **carry**, not only one the
+user named. The mod's own limiter is frequently above the rev where our shape
+runs out -- the CTS-V's 6100 against 5333 for a 4000 rpm power peak -- and a
+warning that only fires for an explicit `--rev-limit` made the air invisible on
+exactly the default conversion that most needs saying. Two rules unchanged: the
+ceiling is written **before** the curve is built, and the warning is judged
+against 4/3 of the power peak, never against the written curve (always clipped,
+so the test would be true by construction).
+
+### The rev bands were being clamped to a ceiling about to be replaced
+
+Found by converting the real mod and reading the archive back. `_ensure_rpm_ranges`
+runs *before* `_set_rev_limit`, so it read the unit's own 6100 and scaled
+`rpm_range_power` to `(2800, 4800)`; a `--rev-limit 3750` then went out
+underneath. A band telling the gearbox the engine is at full power at 4800 rpm on
+one that cuts at 3750 is the box being told to use revs that do not exist. Both
+`_ensure_rpm_ranges` and `_requested_power_peak` now take the ceiling that is
+about to be written, and a check reads a converted engine back to prove no band
+exceeds the ceiling written beside it. This is the fourth ordering rule in this
+section and the only one that was not written down before it was measured.
 
 ### A latent fixture bug this exposed
 
