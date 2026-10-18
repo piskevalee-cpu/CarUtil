@@ -37,6 +37,29 @@ _STYLES = {
     "cyan": "\033[36m",
 }
 
+# One accent for the whole interface, so the Rich chrome and the Questionary
+# menus are visibly the same program. Rich and Questionary both spell colours
+# as "#rrggbb", so a single constant can drive both.
+_ACCENT = "#00afff"
+_MUTED = "#888888"
+
+# Questionary's own `DEFAULT_STYLE` has no `highlighted` rule, but
+# prompt_toolkit's built-in style defines `selected` as `reverse` -- and the two
+# are merged attribute-wise rather than replaced, so a `selected` rule that only
+# sets a colour keeps the reverse video. `noreverse` is what cancels it.
+_QUESTIONARY_STYLE = [
+    ("qmark", f"fg:{_ACCENT} bold"),
+    ("question", "bold"),
+    ("answer", f"fg:{_ACCENT} bold"),
+    ("pointer", f"fg:{_ACCENT} bold"),
+    ("highlighted", f"fg:{_ACCENT} bold"),
+    ("selected", f"fg:{_ACCENT} bold noreverse"),
+    ("instruction", f"fg:{_MUTED}"),
+    ("text", ""),
+    ("separator", f"fg:{_MUTED}"),
+    ("disabled", f"fg:{_MUTED} italic"),
+]
+
 
 def colour_enabled(stream=None) -> bool:
     """True when it is safe to emit ANSI escapes to `stream`."""
@@ -124,8 +147,10 @@ def show_banner() -> None:
             _Panel(
                 BANNER.strip("\n"),
                 title="CarUtil",
-                border_style="cyan",
-                padding=(0, 2),
+                title_align="left",
+                border_style=_ACCENT,
+                padding=(1, 4),
+                expand=False,
             )
         )
     else:
@@ -135,7 +160,11 @@ def show_banner() -> None:
 def heading(text: str) -> None:
     console = _console()
     if console is not None and sys.stdout.isatty():
-        console.print(_Rule(text, style="cyan"))
+        console.print()
+        console.print(
+            _Rule(_Text(text, style=f"bold {_ACCENT}"), align="left",
+                  style=_ACCENT)
+        )
     else:
         print()
         print(paint(f"  {text}", "bold"))
@@ -147,7 +176,7 @@ def step(index: int, total: int, text: str) -> None:
     if console is not None:
         console.print(
             _Text.assemble(
-                (f"  [{index}/{total}]", "bold cyan"),
+                (f"  [{index}/{total}]", f"bold {_ACCENT}"),
                 (f" {text}", "bold"),
             )
         )
@@ -160,7 +189,7 @@ def ok(text: str) -> None:
 
 
 def bullet(text: str) -> None:
-    _status("*", text, "cyan")
+    _status("*", text, _ACCENT)
 
 
 def warn(text: str) -> None:
@@ -209,22 +238,11 @@ def arrow_menu(options: list[tuple[str, str]], default: int = 0) -> int:
         for i, (label, hint) in enumerate(options)
     ]
     color_style = (
-        _questionary.Style([
-            ("qmark", "fg:#00afff bold"),
-            ("question", "bold"),
-            ("answer", "fg:#00afff bold"),
-            ("pointer", "fg:#00afff bold"),
-            ("highlighted", "fg:#00afff bold"),
-            ("selected", "fg:#00afff"),
-            ("instruction", "fg:#888888"),
-            ("text", ""),
-            ("disabled", "fg:#888888 italic"),
-            ("description", "fg:#888888"),
-        ])
+        _questionary.Style(_QUESTIONARY_STYLE)
         if colour_enabled()
         else _questionary.Style([])
     )
-    answer = _questionary.select(
+    question = _questionary.select(
         "",
         choices=choices,
         default=next((choice for choice in choices if choice.value == default),
@@ -235,10 +253,36 @@ def arrow_menu(options: list[tuple[str, str]], default: int = 0) -> int:
         use_arrow_keys=True,
         show_description=True,
         instruction="(Use ↑/↓ to move, Enter to select)",
-    ).ask()
+    )
+    _only_the_cursor_is_lit(question)
+    answer = question.ask()
     if answer is None:
         raise SystemExit(1)
     return answer
+
+
+def _only_the_cursor_is_lit(question) -> None:
+    """Stop Questionary lighting the starting row *as well as* the cursor row.
+
+    `select(default=...)` records the default in the control's
+    `selected_options`, and a row in that list is drawn with `class:selected`
+    for as long as the menu is open -- moving the pointer away does not clear
+    it. So the default row and the row under the cursor are both drawn lit, in
+    two different styles. The starting row is really `pointed_at`, a separate
+    field the pointer moves, so emptying the list moves nothing and leaves
+    `class:highlighted` as the only lit style.
+
+    The control has to be found by walking the layout, because Questionary
+    builds it inside `select()` and hands back only a `Question`. Nothing here
+    is load-bearing: if a future Questionary stops exposing it, the menu still
+    runs and `selected` is styled to match `highlighted` so the worst case is
+    two rows lit in the same colour.
+    """
+    layout = getattr(getattr(question, "application", None), "layout", None)
+    for container in getattr(layout, "walk", list)():
+        control = getattr(container, "content", None)
+        if isinstance(getattr(control, "selected_options", None), list):
+            control.selected_options = []
 
 
 def _numbered_menu(options: list[tuple[str, str]], default: int) -> int:

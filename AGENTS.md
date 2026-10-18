@@ -12,14 +12,14 @@ ImageMagick is optional and is used only to convert brand logo images.
 
 | File | Role |
 |---|---|
-| `carutil.py` | The converter and CLI. Everything of substance lives here (~4000 lines). |
+| `carutil.py` | The converter and CLI. Everything of substance lives here (~4700 lines). |
 | `sii.py` | Parsing/editing helpers for SCS's `.sii` data format. |
 | `hashfs.py` | Reader for SCS's own `SCS#` container (HashFS v1). See below. |
 | `brands.py` | 23 brands (22 named plus the `other` catch-all) and the mapping to each logo file. |
 | `logo.py` | Image → 256×64 DDS conversion. Uses ImageMagick. |
 | `ui.py` | Banner, colour, Rich output, Questionary menus, and basic fallbacks. |
-| `test_converter.py` | The suite (~4600 lines). Run it before every commit. |
-| `FINDINGS.md` | Research log, §1–§33. **Early sections were wrong; see Corrections.** |
+| `test_converter.py` | The suite (~5600 lines). Run it before every commit. |
+| `FINDINGS.md` | Research log, §1–§40. **Early sections were wrong; see Corrections.** |
 | `logos/` | 23 brand images. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
 
 `ALIASES` in `brands.py` can name a brand `BRANDS` does not contain: `vw` maps
@@ -51,11 +51,15 @@ README deliberately does not quote a number either — read the exit code. A
 fresh clone reports skips, not failures, when the fixtures are absent — that
 is expected, not a regression.
 
-**The suite must also be run somewhere with a TTY on stdin.** Three prompt
-tests used to assume the harness's stdin was not a terminal, so from a console
-the first one failed and `test_prompt_price_never_blocks` would have *hung*
-waiting for an answer. They now pin `C._tty` off themselves; keep it that way
-rather than relying on how the suite was invoked.
+**The prompt tests pin their own terminal state, so the suite does not depend on
+how it was invoked.** Three of them used to assume the harness's stdin was not a
+terminal, so from a console the first one failed and
+`test_prompt_price_never_blocks` would have *hung* waiting for an answer. They
+set `C._tty` themselves now: `test_prompts_demand_a_value` pins it on, the other
+prompt tests pin it off. Keep it that way rather than relying on how the suite
+was invoked — and run it once with stdin closed (`python3 test_converter.py
+< /dev/null`) after touching a prompt, because that is the invocation that used
+to hang.
 
 **`python3` and `python` may be different interpreters** (on the Windows dev
 box, 3.14 and 3.11). Pick one and use it for both the tests and the CLI.
@@ -186,21 +190,28 @@ UTF-8 internally, so generated files stay LF-only on every platform. Defs that
 
 ## Prompts
 
-The guided walkthrough is **8 steps** (`total = 8` in `main()`): source, type,
-brand, weight, power *or* acceleration, rev limit, price, convert. The rev
-limit is step 6 and is asked **after** the power, because the useful answer is
-a multiple of where the engine makes its torque, which is not known until then.
-Default 1.5x peak torque: SCS's own cars measure 1.44-2.29x, so it is inside
-their range. Only `--price` and `--acceleration` suppress their own step.
+The guided walkthrough is **7 steps** (`total = 7` in `main()`): source, type,
+brand, weight, power *or* acceleration, price, convert. Only `--price` and
+`--acceleration` suppress their own step.
+
+**The rev limit is not asked for, and is not a step.** It is derived by
+`default_rev_limit()` as 1.5x peak torque — a multiple of where the engine makes
+its torque, which the power step has just settled — so step 6 is the price and
+step 7 is the convert. SCS's own cars measure 1.44-2.29x, so 1.5 sits inside
+their range. `--rev-limit` is the override, and the only way to get another
+number. This was step 6 of an 8-step walkthrough until the prompt was removed:
+asking for a figure the program computes is worse than printing it.
 
 **Flags do not remove the guided prompts.** On a terminal the prompts are
 mandatory: step 4 always asks for the weight and its answer replaces whatever
 `--mass` was parsed to, and step 5 runs unless `--acceleration` was given
 (`--power` alone switches the step-5 prompt from power to acceleration).
 `--price` and `--acceleration` are the only two that suppress their own prompt.
-The "skips steps 4–6" claim in `FINDINGS.md` §31, in `README.md` and in the
-comment above `if guided:` is stale: `d0b8f28` changed `elif guided:` to
-`if guided:` and nothing updated the prose.
+The "skips steps 4–6" claim that used to sit in `FINDINGS.md` §31, in
+`README.md` and in the comment above `if guided:` is gone from all three now:
+`d0b8f28` changed `elif guided:` to `if guided:` and nothing updated the prose,
+so the claim outlived the behaviour by a long way. Re-read those three places
+whenever the prompt order changes.
 
 **Every prompt demands a real value.** Empty input is an omission, not a
 request for the default: it re-asks with the same message used for a bad value.
@@ -398,11 +409,12 @@ tests cover the shapes; `--mod-dir` covers anything they miss.
 
 **The test fixtures are third-party assets and must never be committed.** Real
 car mods live in `../testing-covnverter/` — the typo is in the real directory
-name — and are not in the repo. `*.scs` is gitignored, so a mod dropped in the
-working directory is safe, but do not widen that. Everything the fixtures are
-needed for should *also* be expressible against `synthetic_mod()` in
-`test_converter.py`, which builds a minimal but complete mod folder on disk —
-prefer that, so the behaviour is covered without the assets.
+name — and are not in the repo. `*.scs` and `*.zip` are both gitignored, so a
+mod dropped in the working directory is safe, but do not widen that. Everything
+the fixtures are needed for should *also* be expressible against
+`synthetic_mod()` in `test_converter.py`, which builds a minimal but complete
+mod folder on disk — prefer that, so the behaviour is covered without the
+assets.
 
 **When you pick a file out of a generated archive, filter on `.sii`.** An
 archive carries a `def/vehicle/car_desktop/` **directory entry** alongside the

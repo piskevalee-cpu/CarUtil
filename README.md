@@ -52,12 +52,14 @@ The launchers also check and offer to install ImageMagick; when running
 `carutil.py` directly, ImageMagick remains optional and is not installed by
 CarUtil.
 
-It asks for the mod, vehicle type, brand, weight, engine target, rev limit and
-price, then writes the converted archive next to the input. In guided mode,
-`--mass` does not skip the weight prompt; `--power` changes the engine question
-to a 0–60 target. `--acceleration`, `--rev-limit` and `--price` skip their
-respective prompts. To avoid all prompts, pass `--no-prompt` and provide the
-input, `--type` and `--brand`:
+It asks for the mod, vehicle type, brand, weight, engine target and price, then
+writes the converted archive next to the input. In guided mode, `--mass` does
+not skip the weight prompt; `--power` changes the engine question to a 0–60
+target. `--acceleration` and `--price` skip their respective prompts. The rev
+limit is not asked for at all: it is derived as 1.5x peak torque, which is
+inside the 1.44–2.29x SCS's own cars reach, and `--rev-limit` overrides it. To
+avoid all prompts, pass `--no-prompt` and provide the input, `--type` and
+`--brand`:
 
 ```bash
 python3 carutil.py "mods/my-car.scs" \
@@ -101,7 +103,7 @@ control which cargo jobs your car can take.
 | `--power HP` | Set target peak engine power. |
 | `--acceleration SECONDS` | Set the target 0–60 mph time. |
 | `--peak-power-rpm RPM` | Set the engine's peak-power RPM. |
-| `--rev-limit RPM` | Set the maximum engine RPM. |
+| `--rev-limit RPM` | Override the maximum engine RPM. By default it is derived as 1.5x peak torque. |
 | `--shift-up-rpm RPM` | Set the automatic transmission's upshift RPM. |
 | `--air-resistance COEFF` | Adjust drag to affect top speed and high-speed acceleration. |
 | `--price DOLLARS` | Scale the mod's full accessory price table to the requested dealer price. |

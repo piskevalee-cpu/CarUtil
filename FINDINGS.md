@@ -2148,6 +2148,11 @@ Two things that had to be got right:
 because the useful answer is a multiple of where the engine makes its torque,
 which is not known until then. Price moves to 7 and Convert to 8.
 
+**Reversed.** The rev limit prompt was removed: it asked for a number the
+program derives (1.5x peak torque, `default_rev_limit()`), and the walkthrough is
+7 steps again with the price at 6 and Convert at 7. `--rev-limit` survives as the
+override. Asking is only worth a step when the answer is not computable.
+
 ### A latent fixture bug this exposed
 
 `synthetic_mod` wrote its engine's curve as `torque_curve[0]: 0.43` — indexed, and

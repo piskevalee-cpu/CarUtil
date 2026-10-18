@@ -1496,49 +1496,20 @@ def _power_peak_rpm(text: str) -> int | None:
 _rpm_ranges: dict[str, str] | None = None
 
 
-def prompt_rev_limit(peak_power_rpm: int | None) -> int | None:
-    """Ask how high the revs go, once the peak is known.
+def default_rev_limit(peak_power_rpm: int | None) -> int:
+    """The ceiling a converted engine is given when none was asked for.
 
-    Asked after the power step so the answer can be expressed against the peak
-    rather than as a bare number. Returns None to take the measured default.
-    Off a terminal, or on Ctrl-C, the default is used -- as everywhere else.
+    Expressed against where the engine makes its torque rather than as a bare
+    number, because that is the only figure that means anything across engines:
+    SCS's own four Road Trip engines reach 1.44 to 2.29 times their torque peak,
+    so 1.5 sits inside their range rather than beside it. Our own shape peaks
+    torque at 0.75x the power peak; see build_power_curve.
+
+    Derived rather than asked for -- there was a prompt here, and it made the
+    user supply a number the program already knew.
     """
-    if not _tty():
-        return None
-    # Our shape peaks torque at 0.75x the power peak; see build_power_curve.
     tq_peak = round(0.75 * (peak_power_rpm or _DEFAULT_PEAK_POWER_RPM))
-    suggestion = round(_DEFAULT_REV_LIMIT_FACTOR * tq_peak)
-    ceiling = round(tq_peak / 0.75 * 4 / 3)      # where the curve reaches zero
-
-    print()
-    print("  How high do the revs go before it stops?")
-    print("    This is the redline, not the peak. SCS's own cars reach 1.44 to")
-    print(f"    2.29 times their peak torque, so about {suggestion} rpm for an")
-    print(f"    engine peaking at {tq_peak}.")
-    print("    Above the peak it just revs; the curve runs out of torque at")
-    print(f"    about {ceiling} rpm either way.")
-    print()
-    while True:
-        try:
-            raw = input("  Rev limit in rpm: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n  cancelled -- keeping the engine's own limit.")
-            return None
-        if not raw:
-            print(f"  -> enter a number in rpm, e.g. {suggestion}")
-            continue
-        try:
-            value = int(float(raw.rstrip("k.")))
-        except ValueError:
-            print(f"  -> enter a number in rpm, e.g. {suggestion}")
-            continue
-        if value < 2000:
-            print(f"  -> {value} rpm is below idle for a car engine")
-            continue
-        if value > 12000:
-            print("  -> no car engine goes that high; check the number")
-            continue
-        return value
+    return round(_DEFAULT_REV_LIMIT_FACTOR * tq_peak)
 
 
 def _parse_band(raw: str) -> str | None:
@@ -2714,6 +2685,10 @@ def _tune_engine_to_hp(text: str, rep: Report, hp: float,
     rep.action(
         f"engine rebuilt to {hp:.0f} hp peaking at {peak} rpm: "
         f"{peak_torque} Nm peak over {len(curve)} curve points, on SCS's shape"
+        # The ceiling is derived when no --rev-limit was given, so say which one
+        # was used: the prompt used to print it, and removing the prompt must
+        # not remove the only place the figure was ever visible.
+        + (f", rev limit {rpm_limit} rpm" if rev_limit is not None else "")
         + (f" ({target_source})" if target_source else "")
     )
     out = "\n".join(kept) + "\n"
@@ -4320,9 +4295,9 @@ def main(argv: list[str] | None = None) -> int:
         "--rev-limit",
         type=int,
         metavar="RPM",
-        help=f"highest rev the engine reaches, e.g. 5600. Defaults to "
-             f"{_DEFAULT_REV_LIMIT_FACTOR:g}x peak torque; SCS's own cars "
-             f"measure 1.44-2.29x",
+        help=f"highest rev the engine reaches, e.g. 5600. Only needed to "
+             f"override the derived {_DEFAULT_REV_LIMIT_FACTOR:g}x peak torque, "
+             f"which SCS's own cars bracket at 1.44-2.29x",
     )
     ap.add_argument(
         "--price",
@@ -4432,7 +4407,7 @@ def main(argv: list[str] | None = None) -> int:
     guided = _tty() and not args.no_prompt
     if guided:
         _ui.setup_hint()
-    total = 8
+    total = 7
 
     # ---- 1. source -------------------------------------------------------
     if args.input is None:
@@ -4561,17 +4536,18 @@ def main(argv: list[str] | None = None) -> int:
             elif wanted is None:
                 _ui.step(5, total, "Set the acceleration")
                 wanted = prompt_acceleration(kerb)
-            # Asked after the peak, never before: the useful answer is a multiple
-            # of where the engine makes its torque, so it is only meaningful once
-            # that is known. Skipped when --rev-limit was given.
-            if args.rev_limit is None:
-                _ui.step(6, total, "Set the rev limit")
-                rev_limit = prompt_rev_limit(peak_rpm)
             if args.price is None:
-                _ui.step(7, total, "Set the price")
+                _ui.step(6, total, "Set the price")
                 price = prompt_price()
 
         kerb = sum(mass) if mass else default_total(args.vtype)
+
+        # The rev ceiling is derived, never asked for: it is a multiple of where
+        # the engine makes its torque, which the power step may only have just
+        # established, so there was nothing to answer anyway. --rev-limit is the
+        # override, and it is the only way to get a number other than this one.
+        if rev_limit is None:
+            rev_limit = default_rev_limit(peak_rpm)
 
         # A target 0-60 supersedes the fitted Nm/t constant: it is measured from
         # the user's own two numbers instead of extrapolated from one car. Seeded
@@ -4591,7 +4567,7 @@ def main(argv: list[str] | None = None) -> int:
             target_source = (f"{_DEFAULT_HP_PER_TONNE:g} hp/tonne default "
                              f"({kerb:.0f} kg)")
 
-        # ---- 6. output -------------------------------------------------------
+        # ---- 7. output -------------------------------------------------------
         if args.output is not None:
             out = args.output
         elif args.input.is_file():
@@ -4605,7 +4581,7 @@ def main(argv: list[str] | None = None) -> int:
             out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
 
         if guided:
-            _ui.step(8, total, "Convert")
+            _ui.step(7, total, "Convert")
             print()
 
         rep = convert(

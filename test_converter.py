@@ -604,18 +604,20 @@ _ENGINE_CURVE = ("SiiNunit\n{\naccessory_engine_data : e\n{\n\ttorque: 503\n"
                  "\ttorque_curve[]: (3750, 0.57)\n}\n}\n")
 
 
-def test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak() -> None:
+def test_the_rev_limit_cuts_the_curve_and_is_no_longer_asked() -> None:
     """The redline is a separate question from where the peak is.
 
-    Asked after the power step, because the useful answer is a multiple of where
-    the engine makes its torque -- SCS's own cars reach 1.44 to 2.29 times their
-    peak torque, so 1.5 sits inside their range rather than beside it.
+    Derived rather than asked for, because the useful figure is a multiple of
+    where the engine makes its torque -- SCS's own cars reach 1.44 to 2.29 times
+    their peak torque, so 1.5 sits inside their range rather than beside it --
+    and the program knows the peak by the time the ceiling is needed. The
+    walkthrough used to stop and ask; `default_rev_limit` answers instead.
 
     The ceiling is applied BEFORE the curve is built, never after: the curve is
     clipped to the limit, so writing it afterwards would leave a curve reaching
     past the limiter that is supposed to stop it.
     """
-    section("the rev limit cuts the curve, and is asked after the peak")
+    section("the rev limit cuts the curve, and is no longer asked for")
     real_tty = C._tty
     C._tty = lambda: False
     C._rpm_ranges = None
@@ -628,9 +630,12 @@ def test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak() -> None:
     check("and it falls to zero there",
           pts[-1][1] == "0.0", out)
 
-    # No flag: the mod's own ceiling stands.
+    # No flag, at the library level: `tune_engine(rev_limit=None)` leaves the
+    # mod's own ceiling standing. The CLI is what derives one -- see
+    # test_the_rev_ceiling_is_derived_from_the_peak -- so this stays the
+    # behaviour of the function rather than of the walkthrough.
     C._rpm_ranges = None
-    check("without --rev-limit the mod's own limit is untouched",
+    check("tune_engine(None) leaves the mod's own limit untouched",
           get_key(edit_lines(C.tune_engine(_ENGINE_CURVE, C.Report(), target_hp=300,
                                            peak_power_rpm=5000)), "rpm_limit")
           == "6100")
@@ -659,8 +664,129 @@ def test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak() -> None:
     for prm in (4000, 5000, 6000):
         want = round(C._DEFAULT_REV_LIMIT_FACTOR * round(0.75 * prm))
         check(f"default ceiling for a {prm} rpm power peak is {want}",
-              want == round(1.5 * round(0.75 * prm)))
+              C.default_rev_limit(prm) == want
+              == round(1.5 * round(0.75 * prm)),
+              str(C.default_rev_limit(prm)))
+    # An engine whose peak is not known yet -- a scripted run with bare --power
+    # and no --peak-power-rpm -- must still get a ceiling, not None.
+    check("an unknown peak falls back to the measured default peak",
+          C.default_rev_limit(None) == C.default_rev_limit(
+              C._DEFAULT_PEAK_POWER_RPM),
+          str(C.default_rev_limit(None)))
     C._tty = real_tty
+
+
+def test_the_rev_ceiling_is_derived_from_the_peak() -> None:
+    """Nothing asks for the redline any more; a conversion still writes one.
+
+    The walkthrough's step 6 was a prompt for a number the program can compute:
+    1.5x the torque peak, and the torque peak follows from the requested power
+    peak. So the ceiling must appear in the converted engine without a flag and
+    without an answer, and `--rev-limit` must still override it.
+    """
+    section("the rev ceiling is derived, not asked for")
+    csrc = (HERE / "carutil.py").read_text(encoding="utf-8", errors="replace")
+    check("the rev limit prompt is gone",
+          not hasattr(C, "prompt_rev_limit"))
+    check("the walkthrough is seven steps, not eight",
+          "    total = 7" in csrc and 'step(7, total, "Convert")' in csrc)
+
+    real_tty = C._tty
+    C._tty = lambda: False
+    C._rpm_ranges = None
+    # tune_engine keys on `accessory_engine_data`; the folder's own truck-spelled
+    # engine would be left alone and the check would measure nothing.
+    engine = {"engine/v8.sii": _engine_unit(
+        "torque: 1400", "rpm_limit: 6100",
+        "torque_curve[]: (1500, 0.43)", "torque_curve[]: (3750, 1.0)")}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "derived.scs"
+            mod = synthetic_mod(Path(td) / "mod", extra_defs=engine)
+            # The ceiling is chosen for the user now, so the report has to say
+            # which one it chose -- the prompt used to be where it was visible.
+            real_stdout, sys.stdout = sys.stdout, io.StringIO()
+            try:
+                C.main([str(mod), "--type", "sedan", "--brand", "test",
+                        "--no-prompt", "-o", str(out)])
+            finally:
+                shown, sys.stdout = sys.stdout.getvalue(), real_stdout
+            with zipfile.ZipFile(out) as z:
+                eng = [n for n in z.namelist()
+                       if re.search(r"/engine/.*\.sii$", n)][0]
+                text = z.read(eng).decode()
+
+            want = C.default_rev_limit(C._DEFAULT_PEAK_POWER_RPM)
+            written = get_key(edit_lines(text), "rpm_limit")
+            check(f"a conversion with no --rev-limit writes {want}",
+                  written == str(want), str(written))
+            check("and the report says which ceiling it derived",
+                  f"rev limit {want} rpm" in shown,
+                  str([ln for ln in shown.splitlines() if "engine rebuilt" in ln]))
+            check("and that is inside what SCS's own cars reach",
+                  1.44 <= want / round(0.75 * C._DEFAULT_PEAK_POWER_RPM) <= 2.29,
+                  f"{want} rpm")
+
+            # ...and the flag still wins.
+            C._rpm_ranges = None
+            out2 = Path(td) / "override.scs"
+            C.main([str(mod), "--type", "sedan", "--brand", "test",
+                    "--no-prompt", "--rev-limit", "7000", "-o", str(out2)])
+            with zipfile.ZipFile(out2) as z:
+                eng2 = [n for n in z.namelist()
+                        if re.search(r"/engine/.*\.sii$", n)][0]
+                check("--rev-limit still overrides the derived ceiling",
+                      get_key(edit_lines(z.read(eng2).decode()), "rpm_limit")
+                      == "7000")
+
+            # The numbering, driven for real: seven steps in order, with no hole
+            # where the rev-limit prompt used to be. Guided mode goes through
+            # main() nowhere else in this suite, so this is the only thing that
+            # would catch a step left pointing at a prompt that no longer runs.
+            C._rpm_ranges = C._rpm_range_bands(5000, 5625)
+            seen = []
+            stubs = {
+                "prompt_source": lambda: mod,
+                "prompt_type": lambda: "sedan",
+                "prompt_brand": lambda slug: "test",
+                "prompt_weight": lambda vtype, preset: [1150, 1050],
+                "prompt_power": lambda kerb: (350.0, 5000),
+                "prompt_price": lambda: 45000,
+            }
+            real_step, real_tty_guided = C._ui.step, C._tty
+            saved = {name: getattr(C, name) for name in stubs}
+            try:
+                C.__dict__.update(stubs)
+                C._ui.step = lambda index, total, text: seen.append((index, total))
+                C._tty = lambda: True
+                sys.stdout = io.StringIO()
+                C.main(["-o", str(Path(td) / "guided.scs")])
+                guided_out = sys.stdout.getvalue()
+            finally:
+                sys.stdout = real_stdout
+                for name, fn in saved.items():
+                    setattr(C, name, fn)
+                C._ui.step = real_step
+                C._tty = real_tty_guided
+            check("the walkthrough numbers its steps 1 to 7 with no gap",
+                  [i for i, _ in seen] == [1, 2, 3, 4, 5, 6, 7], str(seen))
+            check("and every step counts to 7",
+                  {t for _, t in seen} == {7}, str(seen))
+            guided_want = C.default_rev_limit(5000)
+            check("the guided run derives the ceiling from the peak it asked for",
+                  f"rev limit {guided_want} rpm" in guided_out,
+                  str([ln for ln in guided_out.splitlines()
+                       if "rev limit" in ln]))
+            # 5625 is below this engine's own 6100 ceiling, so the derived
+            # default lands in the zone where clipping costs torque. That is
+            # measured and reported, not silent -- see §39.
+            check("...and reports what that ceiling cost the engine",
+                  "costs this engine torque" in guided_out,
+                  str([ln for ln in guided_out.splitlines()
+                       if "costs this engine" in ln]))
+    finally:
+        C._tty = real_tty
+        C._rpm_ranges = None
 
 
 def test_clipping_the_ceiling_costs_torque_and_says_so() -> None:
@@ -4008,6 +4134,71 @@ def test_ui() -> None:
         check("Questionary style respects NO_COLOR",
               calls[0][1]["style"].style_rules == [])
 
+        # Exactly one row may be lit. `select(default=...)` records that value
+        # in the control's `selected_options`, and Questionary draws any row in
+        # that list with `class:selected` for the whole life of the menu --
+        # moving the pointer away does not clear it, so the suggested row and
+        # the row under the cursor were both lit. This is what
+        # ui._only_the_cursor_is_lit clears, and every check below fails on the
+        # pre-fix code.
+        class Silent:
+            """A Question whose `.ask()` answers without needing a terminal."""
+
+            def __init__(self, question):
+                self._question = question
+
+            def __getattr__(self, name):
+                return getattr(self._question, name)
+
+            def ask(self):
+                return 1
+
+        built = []
+
+        def capture(*args, **kwargs):
+            real_stderr, sys.stderr = sys.stderr, io.StringIO()
+            try:
+                question = real_select(*args, **kwargs)
+            finally:
+                sys.stderr = real_stderr
+            built.append(question)
+            return Silent(question)
+
+        control = None
+        U._questionary.select = capture
+        sys.stdin, sys.stdout = TTYStream(), TTYStream()
+        try:
+            U.arrow_menu([("Sedan", "saloon"), ("SUV", "crossover"),
+                          ("Pickup", "truck bed")], default=2)
+            for container in built[0].application.layout.walk():
+                candidate = getattr(container, "content", None)
+                if isinstance(getattr(candidate, "selected_options", None),
+                              list):
+                    control = candidate
+        finally:
+            U._questionary.select = real_select
+            sys.stdin, sys.stdout = real_stdin, real_stdout
+
+        if control is None:
+            skip("a menu lights only the row under the cursor",
+                 "Questionary's control is not reachable in this version")
+        else:
+            def lit_rows():
+                return [text.strip() for cls, text in
+                        (token[:2] for token in control._get_choice_tokens()
+                         if len(token) == 2)
+                        if cls in ("class:selected", "class:highlighted")
+                        and text.strip()]
+
+            check("the cursor still starts on the suggested row",
+                  control.pointed_at == 2, str(control.pointed_at))
+            check("nothing marks the suggested row before it is chosen",
+                  control.selected_options == [],
+                  str(control.selected_options))
+            control.select_next()          # move off the suggested row
+            check("one lit row, and it is the row under the cursor",
+                  lit_rows() == ["Sedan"], str(lit_rows()))
+
 
 def test_torque_for_time() -> None:
     section("a target 0-60 determines the engine")
@@ -5269,7 +5460,8 @@ def main() -> int:
     test_fallback_appends_every_slot_when_the_mod_declares_none()
     test_an_engine_with_no_rev_bands_gets_them()
     test_rpm_bands_scale_to_where_the_engine_peaks()
-    test_the_rev_limit_cuts_the_curve_and_is_asked_after_the_peak()
+    test_the_rev_limit_cuts_the_curve_and_is_no_longer_asked()
+    test_the_rev_ceiling_is_derived_from_the_peak()
     test_clipping_the_ceiling_costs_torque_and_says_so()
     test_the_shift_point_is_the_band_that_governs_upshifts()
     test_rpm_band_input_is_validated()
