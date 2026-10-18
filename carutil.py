@@ -1496,6 +1496,59 @@ def _power_peak_rpm(text: str) -> int | None:
 _rpm_ranges: dict[str, str] | None = None
 
 
+def _idle_rpm(text: str) -> int | None:
+    """The rev an engine first makes torque at, which is what idle means here.
+
+    An `idle_rpm` key wins if a mod declares one -- this converter does not write
+    or read it anywhere else, and none of the mods measured here has it. Failing
+    that it is read off the curve, whose first sample is the lowest rev the engine
+    works at: the CTS-V Sport Wagon's is 750 rpm, which is a plausible idle for a
+    6.2 litre V8 rather than an artefact.
+    """
+    declared = re.search(r"^\s*idle_rpm\s*:\s*(\d+)", text, re.M)
+    if declared:
+        return int(declared.group(1))
+    first = re.search(r"^\s*torque_curve\[\]\s*:\s*\((\d+)", text, re.M)
+    return int(first.group(1)) if first else None
+
+
+def engine_rev_bounds(src: ModSource) -> tuple[int, int] | None:
+    """The mod's own (idle, ceiling) for its engines, or None if it declares none.
+
+    Both numbers are the author's, not a formula's, which is the whole point: a
+    ceiling the engine already carries is a fact about it, and asking for one is
+    not asking the user to supply something the program knows. There is nothing
+    to ask when no engine declares `rpm_limit`, so the caller derives instead.
+
+    Engines that disagree are answered by the intersection -- the highest idle and
+    the lowest ceiling -- so a single answer is legal for all of them rather than
+    legal for whichever was read first. The measured CTS-V Sport Wagon declares
+    750 and 6100 on both of its units.
+    """
+    idles: list[int] = []
+    ceilings: list[int] = []
+    for name in src.readable_defs():
+        if not name.endswith(".sii") or "engine" not in name.lower():
+            continue
+        # read(), not read_def(): this is a scan for a number to bound a prompt
+        # with, and read_def's refusal is meant for bytes about to be written
+        # back out. A def that will not read is skipped, not fatal.
+        try:
+            text = src.read(name)
+        except (KeyError, RuntimeError, OSError, hashfs.HashFsDamaged):
+            continue
+        if "accessory_engine_data" not in text:
+            continue
+        limit = re.search(r"^\s*rpm_limit\s*:\s*(\d+)", text, re.M)
+        idle = _idle_rpm(text)
+        if limit and idle:
+            ceilings.append(int(limit.group(1)))
+            idles.append(idle)
+    if not ceilings:
+        return None
+    return max(idles), min(ceilings)
+
+
 def default_rev_limit(peak_power_rpm: int | None) -> int:
     """The ceiling a converted engine is given when none was asked for.
 
@@ -1505,8 +1558,10 @@ def default_rev_limit(peak_power_rpm: int | None) -> int:
     so 1.5 sits inside their range rather than beside it. Our own shape peaks
     torque at 0.75x the power peak; see build_power_curve.
 
-    Derived rather than asked for -- there was a prompt here, and it made the
-    user supply a number the program already knew.
+    This is the fallback, not the answer: where the mod declares a ceiling of its
+    own it is asked for instead, bounded by the mod's own idle and ceiling, which
+    is the one value this formula cannot reach (FINDINGS 39 -- the default lands
+    below 4/3 of the power peak, which clips the shape and costs torque).
     """
     tq_peak = round(0.75 * (peak_power_rpm or _DEFAULT_PEAK_POWER_RPM))
     return round(_DEFAULT_REV_LIMIT_FACTOR * tq_peak)
@@ -1799,6 +1854,62 @@ def prompt_acceleration(mass_kg: float) -> float | None:
             print("  -> between 1 and 30 seconds is a car, not a spaceship")
             continue
         return value
+
+
+def prompt_rev_limit(bounds: tuple[int, int],
+                     peak_power_rpm: int | None) -> int | None:
+    """Ask for the rev ceiling, inside the range the engine itself declares.
+
+    This prompt was removed once because it asked for a number the program could
+    derive, and that is true of `default_rev_limit`. It is not true of the mod's
+    own ceiling: `rpm_limit` is a fact about the engine, and the derived figure
+    cannot reach it, because 1.5x peak torque lands below 4/3 of the power peak,
+    which clips our curve shape and costs real torque (FINDINGS 39). So where the
+    mod states a ceiling it is asked for, bounded by what the mod says.
+
+    `bounds` is (idle, ceiling): below the idle the engine makes nothing, above
+    the ceiling it is running past the limiter the author declared. Both are the
+    mod's, so neither is a bound we invented.
+
+    The hint gives all three numbers that bear on the choice, because on their own
+    they do not: the ceiling the mod declares, the one we would pick, and the rev
+    at which our rebuilt curve runs out of torque. Anything above that last figure
+    is air (`_warn_airy_limit`), which is the one thing about a ceiling a user
+    cannot work out from the number alone.
+
+    An empty field is an omission and re-asks; Ctrl-C falls back to the derived
+    figure, which is what every non-guided path uses too.
+    """
+    if not _tty():
+        return None
+
+    idle, ceiling = bounds
+    peak = peak_power_rpm or _DEFAULT_PEAK_POWER_RPM
+    derived = default_rev_limit(peak)
+    zero_at = round(peak * _CURVE_ZERO_PER_PEAK)
+    _ui.heading("How high should the revs go?")
+    _ui.hint(f"{idle}-{ceiling} rpm, which is this engine's own idle and "
+             f"limiter; we would pick {derived}, and above {zero_at} is air")
+    while True:
+        try:
+            raw = input(_FIELD).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  cancelled -- using {derived} rpm.")
+            return None
+        if not raw:
+            print(f"  -> enter a number, e.g. {ceiling} ({idle} to {ceiling})")
+            continue
+        try:
+            value = int(float(raw.lower().rstrip("rpm ").rstrip()))
+        except ValueError:
+            print(f"  -> enter a number of revs, e.g. {ceiling}")
+            continue
+        if not (idle <= value <= ceiling):
+            print(f"  -> between {idle} and {ceiling} rpm, the range this "
+                  f"engine declares")
+            continue
+        return value
+
 
 def prompt_price() -> int | None:
     """Ask what the Car Dealer should charge, or None to keep the mod's own.
@@ -4284,8 +4395,10 @@ def main(argv: list[str] | None = None) -> int:
         "--rev-limit",
         type=int,
         metavar="RPM",
-        help=f"highest rev the engine reaches, e.g. 5600. Only needed to "
-             f"override the derived {_DEFAULT_REV_LIMIT_FACTOR:g}x peak torque, "
+        help=f"highest rev the engine reaches, e.g. 5600. Skips the rev limit "
+             f"prompt; without it you are asked, inside the engine's own idle "
+             f"and limiter, whenever the mod declares one. A mod that does not "
+             f"gets the derived {_DEFAULT_REV_LIMIT_FACTOR:g}x peak torque, "
              f"which SCS's own cars bracket at 1.44-2.29x",
     )
     ap.add_argument(
@@ -4396,7 +4509,7 @@ def main(argv: list[str] | None = None) -> int:
     guided = _tty() and not args.no_prompt
     if guided:
         _ui.setup_hint()
-    total = 7
+    total = 8
 
     # ---- 1. source -------------------------------------------------------
     if args.input is None:
@@ -4525,16 +4638,24 @@ def main(argv: list[str] | None = None) -> int:
             elif wanted is None:
                 _ui.step(5, total, "Set the acceleration")
                 wanted = prompt_acceleration(kerb)
+            # A ceiling the mod already declares is a fact about the engine, so
+            # it is asked for rather than derived -- bounded by the engine's own
+            # idle and its own limiter. Nothing to ask when no engine declares
+            # one, and then it is derived below.
+            if rev_limit is None:
+                bounds = engine_rev_bounds(src)
+                if bounds is not None:
+                    _ui.step(6, total, "Set the rev limit")
+                    rev_limit = prompt_rev_limit(bounds, peak_rpm)
             if args.price is None:
-                _ui.step(6, total, "Set the price")
+                _ui.step(7, total, "Set the price")
                 price = prompt_price()
 
         kerb = sum(mass) if mass else default_total(args.vtype)
 
-        # The rev ceiling is derived, never asked for: it is a multiple of where
-        # the engine makes its torque, which the power step may only have just
-        # established, so there was nothing to answer anyway. --rev-limit is the
-        # override, and it is the only way to get a number other than this one.
+        # The fallback ceiling, 1.5x peak torque, for the paths that do not ask:
+        # a mod that declares no limiter of its own, a script, and Ctrl-C at the
+        # prompt. --rev-limit is the override, and it is the only way past it.
         if rev_limit is None:
             rev_limit = default_rev_limit(peak_rpm)
 
@@ -4556,7 +4677,7 @@ def main(argv: list[str] | None = None) -> int:
             target_source = (f"{_DEFAULT_HP_PER_TONNE:g} hp/tonne default "
                              f"({kerb:.0f} kg)")
 
-        # ---- 7. output -------------------------------------------------------
+        # ---- 8. output -------------------------------------------------------
         if args.output is not None:
             out = args.output
         elif args.input.is_file():
@@ -4570,7 +4691,7 @@ def main(argv: list[str] | None = None) -> int:
             out = args.input.parent / f"{RT_PREFIX}_{slug}.scs"
 
         if guided:
-            _ui.step(7, total, "Convert")
+            _ui.step(8, total, "Convert")
             print()
 
         rep = convert(

@@ -2142,16 +2142,52 @@ Two things that had to be got right:
   point, which fires on *every* value: the curve is always clipped to the limit,
   so the last point is always the limit and the test is true by construction.
 
-### The walkthrough is 8 steps now
+### The walkthrough is 8 steps, conditionally
 
 `total = 8`, with the rev limit as step 6, asked **after** the power step —
-because the useful answer is a multiple of where the engine makes its torque,
-which is not known until then. Price moves to 7 and Convert to 8.
+because the useful answer depends on where the engine makes its torque, which is
+not known until then. Price is 7 and Convert is 8.
 
-**Reversed.** The rev limit prompt was removed: it asked for a number the
-program derives (1.5x peak torque, `default_rev_limit()`), and the walkthrough is
-7 steps again with the price at 6 and Convert at 7. `--rev-limit` survives as the
-override. Asking is only worth a step when the answer is not computable.
+**Reversed, then reversed back — for a measured reason.** The prompt was removed
+because it asked for a number the program derives (1.5x peak torque,
+`default_rev_limit()`). That reasoning was half right, and the half that was wrong
+is the half that mattered: 1.5x peak torque lands **below** 4/3 of the power peak,
+which is the losing zone two sections up. The mod's own ceiling cannot clip the
+shape at all, and it is not computable from anything — it is a fact about the
+engine, in the engine's own file.
+
+So the prompt is back, and it is **gated on the mod declaring a limiter**
+(`engine_rev_bounds`, None when no engine has `rpm_limit`):
+
+| | CTS-V Sport Wagon (measured) | Escalade / W223 / Pilot |
+|---|---|---|
+| declared `rpm_limit` | **6100** | declared |
+| first curve point (the idle) | **750** | declared |
+| derived default at a 4000 rpm peak | 4500 | 4500 |
+| torque at a 5000 rpm peak | 503 Nm unclipped, 464 Nm at 4500 | same shape |
+
+The bounds are the mod's own two numbers, and they are the only two the user could
+not work out for themselves: below the idle the engine makes nothing, above the
+limiter it runs past what the author declared. Engines that disagree are answered
+by the intersection — highest idle, lowest ceiling — so one answer is legal for
+all of them rather than for whichever was read first.
+
+Two details the numbers forced:
+
+- **`rpm_limit` carries a trailing comment** on this mod — `6100 # max of 6.2 L V8
+  is 6100 RPM` — which is the `get_key` trap from §18 again. The regex takes the
+  digits directly and never routes through `get_key`.
+- **There is no `idle_rpm` key**, here or in any of the three mods measured. The
+  idle is the first point of `torque_curve`, which for a 6.2 litre V8 is 750 rpm
+  and so is a plausible idle rather than an artefact. `_idle_rpm` prefers a
+  declared `idle_rpm` if a mod ever has one, and this converter writes none.
+
+**Asking still cannot rescue the air.** Choosing 6100 here is *worse* than
+choosing 5333: the curve runs out at 5333, so the 767 rpm above it make nothing,
+and `_warn_airy_limit` says so in the report. The prompt does not hide that — it
+names 5333 in the hint, before the answer, because a user cannot derive "this
+ceiling is air" from the ceiling alone. It is a choice made with the number in
+front of them, which is what makes it a choice rather than a mistake.
 
 ### A latent fixture bug this exposed
 

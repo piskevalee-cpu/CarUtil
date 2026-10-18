@@ -677,19 +677,20 @@ def test_the_rev_limit_cuts_the_curve_and_is_no_longer_asked() -> None:
 
 
 def test_the_rev_ceiling_is_derived_from_the_peak() -> None:
-    """Nothing asks for the redline any more; a conversion still writes one.
+    """A scripted run still writes a ceiling nobody asked for.
 
-    The walkthrough's step 6 was a prompt for a number the program can compute:
-    1.5x the torque peak, and the torque peak follows from the requested power
-    peak. So the ceiling must appear in the converted engine without a flag and
-    without an answer, and `--rev-limit` must still override it.
+    The derived figure is the fallback: the guided run asks when the mod
+    declares a limiter of its own (see
+    `test_the_rev_ceiling_asks_inside_the_range_the_mod_declares`), but
+    `--no-prompt`, CI and a mod with no `rpm_limit` all take this path. So the
+    ceiling must appear in the converted engine without a flag and without an
+    answer, and `--rev-limit` must still override it.
     """
-    section("the rev ceiling is derived, not asked for")
+    section("the rev ceiling is derived when nothing asks for it")
     csrc = (HERE / "carutil.py").read_text(encoding="utf-8", errors="replace")
-    check("the rev limit prompt is gone",
-          not hasattr(C, "prompt_rev_limit"))
-    check("the walkthrough is seven steps, not eight",
-          "    total = 7" in csrc and 'step(7, total, "Convert")' in csrc)
+    check("the rev limit prompt is still gated on what the mod declares",
+          "if bounds is not None:" in csrc
+          and 'step(6, total, "Set the rev limit")' in csrc)
 
     real_tty = C._tty
     C._tty = lambda: False
@@ -739,10 +740,15 @@ def test_the_rev_ceiling_is_derived_from_the_peak() -> None:
                       get_key(edit_lines(z.read(eng2).decode()), "rpm_limit")
                       == "7000")
 
-            # The numbering, driven for real: seven steps in order, with no hole
-            # where the rev-limit prompt used to be. Guided mode goes through
-            # main() nowhere else in this suite, so this is the only thing that
-            # would catch a step left pointing at a prompt that no longer runs.
+            # The numbering, driven for real. Guided mode goes through main()
+            # nowhere else in this suite, so this is the only thing that would
+            # catch a step left pointing at a prompt that does not run.
+            #
+            # Two runs, because the rev-limit step is conditional: this engine
+            # declares `rpm_limit: 6100`, so the guided run asks for a ceiling
+            # and the numbering runs 1 to 8. Stubbing the prompt to Ctrl-C --
+            # which is what `prompt_rev_limit` does with no answer -- proves the
+            # fallback and the numbering without a tty of its own.
             C._rpm_ranges = C._rpm_range_bands(5000, 5625)
             seen = []
             stubs = {
@@ -768,10 +774,15 @@ def test_the_rev_ceiling_is_derived_from_the_peak() -> None:
                     setattr(C, name, fn)
                 C._ui.step = real_step
                 C._tty = real_tty_guided
-            check("the walkthrough numbers its steps 1 to 7 with no gap",
-                  [i for i, _ in seen] == [1, 2, 3, 4, 5, 6, 7], str(seen))
-            check("and every step counts to 7",
-                  {t for _, t in seen} == {7}, str(seen))
+
+            with C.ModSource(mod) as probe:
+                check("the mod's own limiter is what makes the prompt reachable",
+                      C.engine_rev_bounds(probe) == (1500, 6100),
+                      str(C.engine_rev_bounds(probe)))
+            check("the walkthrough numbers its steps 1 to 8 with no gap",
+                  [i for i, _ in seen] == [1, 2, 3, 4, 5, 6, 7, 8], str(seen))
+            check("and every step counts to 8",
+                  {t for _, t in seen} == {8}, str(seen))
             guided_want = C.default_rev_limit(5000)
             check("the guided run derives the ceiling from the peak it asked for",
                   f"rev limit {guided_want} rpm" in guided_out,
@@ -779,11 +790,41 @@ def test_the_rev_ceiling_is_derived_from_the_peak() -> None:
                        if "rev limit" in ln]))
             # 5625 is below this engine's own 6100 ceiling, so the derived
             # default lands in the zone where clipping costs torque. That is
-            # measured and reported, not silent -- see §39.
+            # measured and reported, not silent -- see §39. It is also the whole
+            # reason the guided run asks: 6100, the author's own figure, is the
+            # one value that cannot clip the shape.
             check("...and reports what that ceiling cost the engine",
                   "costs this engine torque" in guided_out,
                   str([ln for ln in guided_out.splitlines()
                        if "costs this engine" in ln]))
+
+            # The answer is honoured, which is the point of asking. Same mod, a
+            # ceiling inside its declared range, written through to the engine.
+            # The rev bands are pre-answered as above: this engine declares none
+            # of them, and that prompt is not what is under test here.
+            C._rpm_ranges = C._rpm_range_bands(5000, 6100)
+            asked_out = Path(td) / "asked.scs"
+            seen.clear()
+            saved_ask = C.prompt_rev_limit
+            try:
+                C.prompt_rev_limit = lambda bounds, peak: 6100
+                C._ui.step = lambda index, total, text: seen.append((index, total))
+                C._tty = lambda: True
+                C.__dict__.update(stubs)
+                C.main(["-o", str(asked_out)])
+            finally:
+                C.prompt_rev_limit = saved_ask
+                for name, fn in saved.items():
+                    setattr(C, name, fn)
+                C._ui.step = real_step
+                C._tty = real_tty_guided
+                C._rpm_ranges = None
+            with zipfile.ZipFile(asked_out) as z:
+                eng3 = [n for n in z.namelist()
+                        if re.search(r"/engine/.*\.sii$", n)][0]
+                check("the ceiling the user chose is the one written",
+                      get_key(edit_lines(z.read(eng3).decode()), "rpm_limit")
+                      == "6100")
     finally:
         C._tty = real_tty
         C._rpm_ranges = None
@@ -2568,6 +2609,111 @@ def test_prompts_look_like_the_menus() -> None:
         C._tty = real_tty
         C._ui.heading, C._ui.hint = real_heading, real_hint
         builtins.input = real_input
+
+
+def test_the_rev_ceiling_asks_inside_the_range_the_mod_declares() -> None:
+    """Where the mod declares a limiter, the ceiling is asked for inside it.
+
+    1.5x peak torque is the fallback and lands below 4/3 of the power peak, which
+    clips the curve shape and costs real torque (FINDINGS 39). A mod that states
+    its own `rpm_limit` knows a ceiling the formula cannot reach, so the user is
+    asked -- between the engine's idle and the limiter it already declares, which
+    on the measured CTS-V Sport Wagon is 750 to 6100.
+    """
+    section("rev ceiling prompt follows the mod's own numbers")
+    import builtins
+    import io
+
+    real_tty = C._tty
+    real_input = builtins.input
+    real_stdout = sys.stdout
+    C._tty = lambda: True
+    try:
+        peak = 4000
+        derived = C.default_rev_limit(peak)
+
+        def drive(answers):
+            fake, prompts = _answer(list(answers))
+            builtins.input = fake
+            buf = io.StringIO()
+            sys.stdout = buf
+            try:
+                got = C.prompt_rev_limit((750, 6100), peak)
+            finally:
+                sys.stdout = real_stdout
+            return got, prompts, buf.getvalue()
+
+        got, prompts, text = drive(["6100"])
+        check("the mod's own ceiling is accepted", got == 6100, str(got))
+        check("the hint states the range the engine declares",
+              "750-6100" in text, text)
+        check("the hint also states what we would have picked",
+              str(derived) in text, text)
+        # The one thing about a ceiling that cannot be read off the number: our
+        # rebuilt curve makes nothing above 4/3 of the power peak, so a choice at
+        # the top of the mod's own range is air. Stated here, not discovered later.
+        check("the hint states where the curve runs out of torque",
+              str(round(peak * 4 / 3)) in text, text)
+        check("the field carries no label", "".join(prompts).strip() == "",
+              repr(prompts))
+
+        # A rejected answer re-asks, so each of these is offered a good one after
+        # the bad: `None` here would mean the prompt accepted a value it should
+        # not have, and a wrong number would mean it took the bad one.
+        for bad, why in (("700", "below the idle"),
+                         ("7000", "above the declared limiter"),
+                         ("fast", "not a number at all"),
+                         ("", "empty")):
+            got, _prompts, text = drive([bad, "5000"])
+            check(f"{why} is re-asked, not accepted", got == 5000, str(got))
+            check(f"{why}: the re-ask names the engine's own range",
+                  "750" in text and "6100" in text, text)
+
+        def cancel() -> int | None:
+            def boom(prompt: str = "") -> str:
+                raise KeyboardInterrupt
+            builtins.input = boom
+            buf = io.StringIO()
+            sys.stdout = buf
+            try:
+                return C.prompt_rev_limit((750, 6100), peak)
+            finally:
+                sys.stdout = real_stdout
+
+        check("Ctrl-C falls back to the derived figure", cancel() is None)
+    finally:
+        C._tty = real_tty
+        builtins.input = real_input
+
+    # The reader, against a real unit: the mod's limiter is taken from its own
+    # `rpm_limit` (which carries a trailing comment) and the idle from the first
+    # point of its curve.
+    engine = _engine_unit(
+        "torque: 3500",
+        "rpm_limit: 6100 # max of 6.2 L V8 is 6100 RPM",
+        "torque_curve[]: (750, 0.55)",
+        "torque_curve[]: (3750, 1.0)",
+        "torque_curve[]: (6100, 0.74)",
+    )
+    check("idle comes from the first curve point, not from the limiter",
+          C._idle_rpm(engine) == 750, str(C._idle_rpm(engine)))
+    check("an explicit idle_rpm key wins over the curve",
+          C._idle_rpm("idle_rpm: 800\ntorque_curve[]: (750, 0.55)") == 800)
+    check("no idle at all is reported as None",
+          C._idle_rpm("torque: 3500") is None)
+
+    # Nothing to ask about when the mod states no limiter, so the caller derives.
+    silent = _engine_unit("torque: 3500", "torque_curve[]: (750, 0.55)")
+    with tempfile.TemporaryDirectory() as td:
+        mod = Path(td) / "no_engine.sii"
+        mod.write_text(silent, encoding="utf-8")
+        src = C.ModSource(Path(td))
+        try:
+            src.local = {"def/vehicle/truck/x/engine/e.sii": mod.read_bytes()}
+            check("a mod that declares no limiter offers no range",
+                  C.engine_rev_bounds(src) is None)
+        finally:
+            src.close()
 
 
 def test_prompt_price_never_blocks() -> None:
@@ -5600,6 +5746,7 @@ def main() -> int:
     test_rpm_bands_scale_to_where_the_engine_peaks()
     test_the_rev_limit_cuts_the_curve_and_is_no_longer_asked()
     test_the_rev_ceiling_is_derived_from_the_peak()
+    test_the_rev_ceiling_asks_inside_the_range_the_mod_declares()
     test_clipping_the_ceiling_costs_torque_and_says_so()
     test_the_shift_point_is_the_band_that_governs_upshifts()
     test_rpm_band_input_is_validated()

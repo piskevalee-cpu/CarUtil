@@ -195,23 +195,35 @@ UTF-8 internally, so generated files stay LF-only on every platform. Defs that
 
 ## Prompts
 
-The guided walkthrough is **7 steps** (`total = 7` in `main()`): source, type,
-brand, weight, power *or* acceleration, price, convert. Only `--price` and
-`--acceleration` suppress their own step.
+The guided walkthrough is **8 steps** (`total = 8` in `main()`): source, type,
+brand, weight, power *or* acceleration, rev limit, price, convert. Only `--price`
+and `--acceleration` suppress their own step, and `--rev-limit` suppresses the rev
+limit step.
 
-**The rev limit is not asked for, and is not a step.** It is derived by
-`default_rev_limit()` as 1.5x peak torque — a multiple of where the engine makes
-its torque, which the power step has just settled — so step 6 is the price and
-step 7 is the convert. SCS's own cars measure 1.44-2.29x, so 1.5 sits inside
-their range. `--rev-limit` is the override, and the only way to get another
-number. This was step 6 of an 8-step walkthrough until the prompt was removed:
-asking for a figure the program computes is worse than printing it.
+**The rev limit step exists only when the mod declares a limiter.** This has been
+reversed twice and the second reason is the one that holds. It was removed for
+asking for a figure the program computes (`default_rev_limit()`, 1.5x peak
+torque). But that figure lands *below* 4/3 of the power peak, which is the zone
+where clipping the curve costs real torque — 8% at a 5000 rpm peak — while the
+mod's own `rpm_limit` cannot clip it at all and is not computable from anything.
+So `main()` calls `engine_rev_bounds(src)` and prompts only when it returns
+`(idle, ceiling)`; `None` means no engine declares a limiter and the derived
+figure is used silently. Both bounds are the mod's own numbers, so the prompt is
+never asking the user to supply something we know. See `FINDINGS.md` §39 and
+`prompt_rev_limit`'s docstring.
+
+`_idle_rpm` reads an `idle_rpm` key if a mod ever declares one, and otherwise the
+first point of `torque_curve` — the lowest rev the engine works at. It must not
+route through `get_key`: this mod's limiter is `6100 # max of 6.2 L V8 is 6100
+RPM`, the §18 comment trap again.
 
 **Flags do not remove the guided prompts.** On a terminal the prompts are
 mandatory: step 4 always asks for the weight and its answer replaces whatever
 `--mass` was parsed to, and step 5 runs unless `--acceleration` was given
 (`--power` alone switches the step-5 prompt from power to acceleration).
-`--price` and `--acceleration` are the only two that suppress their own prompt.
+`--price`, `--acceleration` and `--rev-limit` are the only flags that suppress
+their own prompt, and step 6 additionally requires that the mod declare a
+limiter at all.
 The "skips steps 4–6" claim that used to sit in `FINDINGS.md` §31, in
 `README.md` and in the comment above `if guided:` is gone from all three now:
 `d0b8f28` changed `elif guided:` to `if guided:` and nothing updated the prose,
