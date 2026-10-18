@@ -8,7 +8,7 @@ writes a new `.scs` archive.
 
 ### 1. Download and open CarUtil
 
-Download the repository as a ZIP, **extract it**, then open the extracted
+Git clone or download the repository as a ZIP, **extract it**, then open the extracted
 `CarUtil` folder.
 
 ### 2. Start the launcher for your computer
