@@ -13,7 +13,7 @@ Git clone or download the repository as a ZIP, **extract it**, then open the ext
 
 ### 2. Start the launcher for your computer
 
-**Windows:** excecute the .bat file
+**Windows:** execute the .bat file (or double-click it)
 
 ```powershell
 carutil.bat

@@ -5176,6 +5176,49 @@ def test_launcher_dependency_preflight() -> None:
           "check_dependencies" not in source)
 
 
+def test_launchers_never_install_without_a_terminal() -> None:
+    """A scripted run must never install anything by itself.
+
+    ``set /p`` cannot tell an empty answer (Enter) from the end of the input:
+    it leaves the variable unchanged in both cases, so an unattended run reads
+    its own default as consent. The batch launcher therefore probes for an
+    attached console before it offers to install anything, and never seeds a
+    "yes" that a redirected ``< NUL`` will accept.
+    """
+    section("launchers install nothing when stdin is not a terminal")
+    shell = (HERE / "carutil.sh").read_text(encoding="utf-8")
+    batch = (HERE / "carutil.bat").read_text(encoding="utf-8")
+
+    check("shell launcher detects a missing terminal",
+          "! -t 0" in shell and "! -t 1" in shell)
+    check("shell launcher says it is skipping without a terminal",
+          "No terminal is available" in shell)
+
+    check("Windows launcher probes for a console",
+          ":has_console" in batch and "timeout.exe" in batch)
+    check("Windows launcher consults the probe before offering installs",
+          batch.count("call :has_console") >= 3)
+    check("Windows launcher skips the ImageMagick offer without a console",
+          ":imagemagick_skipped" in batch)
+    # The bug: a pre-seeded "y" survives end-of-input and installs.
+    check("Windows launcher does not pre-seed a 'yes' answer",
+          'set "INSTALL_MAGICK=y"' not in batch)
+
+
+def test_launcher_line_endings_are_pinned() -> None:
+    """cmd.exe wants CRLF; git must not hand it LF on a ZIP or a bare checkout."""
+    section("launcher line endings are pinned")
+    ga = HERE / ".gitattributes"
+    check(".gitattributes exists", ga.is_file())
+    if not ga.is_file():
+        return
+    text = ga.read_text(encoding="utf-8")
+    check("batch files check out with CRLF",
+          "*.bat" in text and "eol=crlf" in text)
+    check("shell scripts check out with LF",
+          "*.sh" in text and "eol=lf" in text)
+
+
 @guard
 def test_missing_imagemagick_still_converts() -> None:
     """Declining the install must not turn into a failed conversion.
@@ -5288,6 +5331,8 @@ def main() -> int:
     test_unsatisfied_require_is_reported()
     test_windows_compatibility()
     test_launcher_dependency_preflight()
+    test_launchers_never_install_without_a_terminal()
+    test_launcher_line_endings_are_pinned()
     test_hashfs_city_hash_matches_upstream()
     test_hashfs_reads_a_whole_mod()
     test_hashfs_refuses_junk_rather_than_returning_it()

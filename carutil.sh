@@ -215,7 +215,6 @@ if [[ ! -x ".venv/bin/python" ]]; then
         echo
         echo "Could not create the private environment."
         echo "Install your distribution's Python venv support, then run carutil.sh again."
-        echo "Then run carutil.sh again."
         read -r -p "Press Enter to close..." _
         exit 1
     fi

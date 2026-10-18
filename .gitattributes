@@ -1,0 +1,5 @@
+# cmd.exe expects CRLF, and gets confused by LF-only labels and parenthesised
+# blocks; a ZIP download or a checkout with core.autocrlf=false would otherwise
+# ship the launcher with LF. Shell scripts must never gain a carriage return.
+*.bat text eol=crlf
+*.sh  text eol=lf
