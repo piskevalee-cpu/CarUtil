@@ -32,6 +32,7 @@ from pathlib import Path
 # flat, so a module is testable on its own with a one-line import.
 sys.path.insert(0, str(Path(__file__).parent / "backend"))
 from sii import (  # noqa: E402
+    KEY_RE,
     count_indexed,
     append_key,
     edit_lines,
@@ -1218,6 +1219,21 @@ TYPE_HELP = {
     "offroad": "off-road / 4x4",
 }
 
+# The body type as the game should show it. This is the third info[] line of
+# the vehicle unit -- brand, series, description -- and the game asks for it by
+# name: a converted car whose data unit carries only the mod's two lines is
+# logged as "Missing required accessory information - unit 'vehicle.g63',
+# attribute 'info[2]'".
+_TYPE_DESCRIPTIONS = {
+    "sedan":   "Sedan",
+    "suv":     "SUV",
+    "muscle":  "Muscle",
+    "classic": "Classic",
+    "sports":  "Sports",
+    "pickup":  "Pickup",
+    "offroad": "Off-road",
+}
+
 RT_PREFIX = "rt"
 
 # The converted car is filed under def/vehicle/car_dealer/<vendor>/, and the
@@ -1560,6 +1576,287 @@ def engine_rev_bounds(src: ModSource) -> tuple[int, int] | None:
     if not limits:
         return None
     return max(idles), min(limits)
+
+
+def _ui_units(text: str) -> list[tuple[str, str, list[str]]]:
+    """Every unit a ui file defines, as (name, type, body lines).
+
+    Parsed line by line rather than by one regex over the whole file: a ui file
+    is a list of unit blocks at the top level, and a unit's body is what carries
+    the attributes that point at other units.
+    """
+    out: list[tuple[str, str, list[str]]] = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        # "ui::text_template : txt.w463_g63.odo {" -- the TYPE is namespaced
+        # and the NAME is what follows it, so the separator is the spaced colon
+        # and not the colons inside the type.
+        m = re.match(r"^\s*(\S+)\s+:\s+(\S+)\s*\{\s*$", lines[i])
+        if not m:
+            i += 1
+            continue
+        body: list[str] = []
+        j = i + 1
+        while j < len(lines) and not re.match(r"^\s*\}\s*$", lines[j]):
+            body.append(lines[j])
+            j += 1
+        out.append((m.group(2), m.group(1), body))
+        i = j + 1
+    return out
+
+
+def _ui_template_texts(text: str) -> dict[str, str]:
+    """The `text:` line of every ui::text_template a file defines."""
+    out: dict[str, str] = {}
+    for name, kind, body in _ui_units(text):
+        if kind != "ui::text_template":
+            continue
+        for line in body:
+            m = re.match(r'^\s*text\s*:\s*"(.*)"\s*$', line)
+            if m:
+                out[name] = m.group(1)
+                break
+    return out
+
+
+# The text a synthesised template uses when the mod has nothing to copy: a
+# centred value in the dashboard's own colour, which is what a text template is
+# for -- it formats the value the caller passes it.
+_DEFAULT_TEMPLATE_TEXT = (
+    "<align hstyle=center><color value=FFF8F3E3>"
+    "<font face=/font/big.font xscale=4 yscale=4>%0</font></align>"
+)
+
+# Which of the mod's own templates stands in for a missing one, by the word in
+# the missing unit's name. A mod's templates are named after what they show
+# (odo, clock, speed), and a borrowed unit keeps the name of the unit it was
+# copied from -- `gpstime` is a clock, `gpsspdlimit` is a speed -- so the word
+# is the clue to which of the mod's templates has the same job.
+_TEMPLATE_ROLE_WORDS = (
+    ("time", "clock"),
+    ("spd", "speed"),
+    ("speed", "speed"),
+    ("odo", "odo"),
+    ("fuel", "fuelr"),
+    ("gear", "gear"),
+    ("compass", "compass"),
+)
+
+
+def _stand_in_template(unit: str, templates: dict[str, str]) -> tuple[str, str]:
+    """The template text for a missing unit, and the template it came from.
+
+    The mod's own template of the same job, so the view looks like the rest of
+    the dashboard rather than like something bolted on. The fallback is the
+    mod's odometer template -- a plain centred value -- and then a built-in one.
+    """
+    tail = unit.rsplit(".", 1)[-1].lower()
+    wanted = None
+    for word, role in _TEMPLATE_ROLE_WORDS:
+        if word in tail:
+            wanted = role
+            break
+    for role in ([wanted] if wanted else []) + ["odo"]:
+        for name, text in sorted(templates.items()):
+            if name.rsplit(".", 1)[-1].lower() == role:
+                return text, name
+    return _DEFAULT_TEMPLATE_TEXT, ""
+
+
+def _fix_dangling_ui_templates(files: dict[str, str], rep: Report) -> None:
+    """Write the template units a dashboard points at but the mod never ships.
+
+    The game loads a dashboard's templates from
+    `ui/template/dashboard_text.<dashboard name>.sii`, and every unit that
+    script points at has to exist or the whole script fails to load and the game
+    dies. A mod that copies another truck's dashboard and renames the file -- but
+    not the template names inside it -- leaves the game with pointers to
+    nothing.
+
+    The measured case: the Mercedes-Benz G63 (W463 2022) carries the DAF XF's
+    GPS dashboard, so it points at `txt.daf_2021.gpstime` and
+    `txt.daf_2021.gpsspdlimit`. The mod ships no DAF, the base game has no DAF
+    either -- the DAF's templates ship with the DAF, and this install has no
+    DAF archive -- and the game died with "load_unit_tree() - Failed to load
+    unit tree from file (/ui/dashboard/w463_g63_gps.sii)".
+
+    The dashboard is the mod's own bytes and stays that way. What is missing is
+    the template file for it, so that is what gets written, with the missing
+    units named as the dashboard names them and their text taken from the mod's
+    own templates so the view looks like the rest of the dashboard.
+
+    A unit the base game defines cannot be told apart from one nobody defines,
+    so this may write a stand-in for a base-game unit. That costs the game's own
+    styling of that one element; the alternative is the game dying, and a
+    converted car is no use if it takes the game with it.
+    """
+    dashboards = {n: t for n, t in files.items()
+                  if n.startswith("ui/dashboard/") and n.endswith(".sii")}
+    if not dashboards:
+        return
+
+    defined: set[str] = set()
+    templates: dict[str, str] = {}
+    for text in list(dashboards.values()) + [
+            t for n, t in files.items()
+            if n.startswith("ui/template/") and n.endswith(".sii")]:
+        for name, _kind, _body in _ui_units(text):
+            defined.add(name)
+        templates.update(_ui_template_texts(text))
+
+    for name, text in sorted(dashboards.items()):
+        # The value may be quoted or bare; the mod's own dashboards use bare.
+        missing = sorted({m.group(1) for m in
+                          re.finditer(r'^\s*look_template\s*:\s*"?([\w.]+)"?',
+                                     text, re.M)
+                          if m.group(1) not in defined})
+        if not missing:
+            continue
+        stem = name[len("ui/dashboard/"):-len(".sii")]
+        target = f"ui/template/dashboard_text.{stem}.sii"
+        blocks = []
+        for unit in missing:
+            body, origin = _stand_in_template(unit, templates)
+            blocks.append(
+                f"ui::text_template : {unit} {{\n\ttext: \"{body}\"\n}}\n"
+            )
+            rep.action(
+                f"{unit}: the mod's {name} points at it and the mod never ships "
+                f"it, so it was written into {target}"
+                + (f", using the mod's own {origin} template" if origin else "")
+            )
+        if target in files:
+            # The mod has a template file for this dashboard and it is missing
+            # units: add them to it rather than replacing the author's bytes.
+            existing = files[target]
+            close = existing.rfind("}")
+            files[target] = (existing[:close] + "\n" + "\n".join(blocks)
+                             + existing[close:])
+        else:
+            files[target] = "SiiNunit\n{\n" + "\n".join(blocks) + "}\n"
+        rep.warn(
+            f"the mod's {name} points at {len(missing)} template unit(s) the "
+            f"mod "
+            f"never ships ({', '.join(missing)}); the game dies loading that "
+            f"dashboard, so they were written into {target}. The view shows the "
+            f"mod's own text, not the original vehicle's."
+        )
+
+
+def _fix_dangling_ui_paths(files: dict[str, str], rep: Report) -> None:
+    """Repoint, or drop, a dashboard path that points at a file nobody ships.
+
+    A mod that renames its GPS dashboard leaves the old path behind in the
+    interior that had it, and the game dies loading a script that is not there
+    -- the same death as a missing template unit, one step earlier.
+
+    The measured case: the Mercedes-Benz G63's default interior declares
+    `gps_path:"/ui/gps.sii"`, which the mod does not ship, while the vehicle's
+    other interiors declare `gps_path:"/ui/dashboard/w463_g63_gps.sii"`, which it
+    does. So the stale path is repointed at the file the vehicle's own other
+    interiors use, and the GPS view works.
+
+    Where there is no such file to point at -- the vehicle declares one GPS
+    dashboard and it is missing -- the line is dropped instead. A missing GPS
+    view is a small loss; a dashboard the game cannot load is a dead game.
+    """
+    # The value each vehicle's own defs use for a key, where that value exists.
+    used: dict[tuple[str, str], set[str]] = {}
+    for name, text in files.items():
+        if not name.startswith("def/vehicle/") or not name.endswith(".sii"):
+            continue
+        vehicle = _vehicle_dir_prefix(name)
+        for m in re.finditer(r'^\s*(gps_path|dashboard_path)\s*:\s*"([^"]+)"',
+                             text, re.M):
+            path = m.group(2).lstrip("/")
+            if path in files:
+                used.setdefault((vehicle, m.group(1)), set()).add(path)
+
+    for name in list(files):
+        if not name.startswith("def/vehicle/") or not name.endswith(".sii"):
+            continue
+        text = files[name]
+        vehicle = _vehicle_dir_prefix(name)
+        broken = [m.group(2) for m in
+                  re.finditer(r'^\s*(gps_path|dashboard_path)\s*:\s*"([^"]+)"',
+                              text, re.M)
+                  if m.group(2).lstrip("/") not in files]
+        if not broken:
+            continue
+        lines = edit_lines(text)
+        for m in re.finditer(r'^\s*(gps_path|dashboard_path)\s*:\s*"([^"]+)"',
+                             text, re.M):
+            key, old = m.group(1), m.group(2)
+            if old.lstrip("/") in files:
+                continue
+            candidates = used.get((vehicle, key), set())
+            if len(candidates) == 1:
+                new = next(iter(candidates))
+                lines = set_key(lines, key, f'"/{new}"')
+                rep.warn(
+                    f"{name}: {key} pointed at {old}, which this mod does not "
+                    f"ship; repointed it at /{new}, the file the vehicle's own "
+                    f"other parts use"
+                )
+            else:
+                lines = remove_keys(lines, {key})
+                rep.warn(
+                    f"{name}: {key} pointed at {old}, which this mod does not "
+                    f"ship, and the vehicle has no other one to use; the line "
+                    f"was "
+                    f"removed so the game does not die loading a script that is "
+                    f"not there"
+                )
+        files[name] = "\n".join(lines) + "\n"
+
+
+def _vehicle_dir_prefix(name: str) -> str:
+    """The vehicle's own directory inside a def path: def/vehicle/<kind>/<name>/.
+
+    Two path components after `def/vehicle/`, which is where SCS puts the
+    vehicle's directory -- the parts live in subdirectories of it.
+    """
+    parts = name.split("/")
+    if len(parts) >= 4 and parts[0] == "def" and parts[1] == "vehicle":
+        return "/".join(parts[:4]) + "/"
+    return name.rsplit("/", 1)[0] + "/"
+
+
+def _ensure_info_description(lines: list[str],
+                            description: str) -> tuple[list[str], bool]:
+    """Give the vehicle unit the third info[] line the game asks for.
+
+    SCS's own Road Trip vehicles carry three -- brand, series, description --
+    measured on the Mustang 67, F-150 23, Bronco 24 and Victoria 06 in
+    dlc_rt_ford.scs. A truck mod's data unit usually carries two, and the game
+    logs "Missing required accessory information - unit 'vehicle.g63', attribute
+    'info[2]'" for the converted car. The third line is the description, and the
+    body type is what the converter knows about the car.
+
+    The lines are padded to three rather than one short of three, because the
+    game wants the third by name and a unit with one line is still a unit it
+    cannot read. A mod that carries no info[] at all gets the description
+    repeated, which reads oddly in the UI and is rare enough to be worth the
+    alternative of a name the game refuses to show.
+
+    Returns the lines and whether one was added.
+    """
+    out = list(lines)
+    have = len(get_all_indexed(out, "info"))
+    if have >= 3:
+        return out, False
+    anchor = 0
+    for i, line in enumerate(out):
+        m = KEY_RE.match(line)
+        if m and m.group(1) == "info" and m.group(2) is not None:
+            anchor = i + 1
+    if anchor == 0:
+        anchor = unit_body_end(out)
+    for _ in range(3 - have):
+        out.insert(anchor, f'\tinfo[]: "{description}"')
+        anchor += 1
+    return out, True
 
 
 def _parse_band(raw: str) -> str | None:
@@ -3719,6 +4016,12 @@ def convert(
 
         # tags[] goes last, after the fallback[] block, as the reference does
         lines = set_tag(lines, all_tags)
+        # ...and the third info[] line, which the game asks for by name. SCS's
+        # own Road Trip cars carry three (brand, series, description); a truck
+        # mod's data unit carries two, and the game logs "Missing required
+        # accessory information - unit 'vehicle.g63', attribute 'info[2]'".
+        description = _TYPE_DESCRIPTIONS.get(vtype, vtype)
+        lines, added_info = _ensure_info_description(lines, description)
         files[data_path] = "\n".join(lines) + "\n"
         if added:
             rep.action(
@@ -3728,6 +4031,11 @@ def convert(
             rep.action(
                 f"kept {kept} default part(s) the mod already declared via "
                 "fallback[]; the author's choice wins"
+            )
+        if added_info:
+            rep.action(
+                f"added the third info[] line the game asks for: the "
+                f"{description} body type"
             )
 
     # 3. the registration chain. The reference converter writes five files:
@@ -3768,6 +4076,14 @@ def convert(
         "wrote the registration chain: car_dealer, car_desktop, car_company, "
         "truck_desktop, truck_company"
     )
+
+    # 3b. the ui scripts. A dashboard that points at a template unit nobody
+    # ships is a dashboard the game cannot load, and the game dies when it tries
+    # -- so the missing template is written here rather than in the game.
+    _fix_dangling_ui_templates(files, rep)
+    # ...and a dashboard path that points at a script nobody shipped is the same
+    # death one step earlier.
+    _fix_dangling_ui_paths(files, rep)
 
     # manifest -- cars keep the truck category; "Car" is a mod-site convention
     # the game does not read. Whitespace after the colon varies between authors.

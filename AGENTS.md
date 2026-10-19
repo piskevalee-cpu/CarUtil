@@ -20,7 +20,7 @@ ImageMagick is optional and is used only to convert brand logo images.
 | `backend/logo.py` | Image → 256×64 DDS conversion. Uses ImageMagick. |
 | `backend/ui.py` | Banner, colour, Rich output, Questionary menus, and basic fallbacks. |
 | `test_converter.py` | The suite (~5600 lines). Run it before every commit. It resolves the shipped modules' source through its own `SOURCE` table, because they are no longer all in one directory. |
-| `FINDINGS.md` | Research log, §1–§40. **Early sections were wrong; see Corrections.** |
+| `FINDINGS.md` | Research log, §1–§42. **Early sections were wrong; see Corrections.** |
 | `logos/` | 23 brand images, **at the root beside the entry point, not inside `backend/`** — that is where a user is told to drop a replacement, so `brands.py` reaches up with `parent.parent` for it. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
 
 Both launchers are unchanged by the split and must stay that way: `carutil.bat`
@@ -238,6 +238,41 @@ comment trap again.
 one the user named. The mod's own limiter is often above the rev where our shape
 runs out (the CTS-V's 6100 against 5333 at a 4000 rpm power peak), and warning
 only for an explicit `--rev-limit` hid it on every default conversion.
+
+**A converted car must not carry a dashboard the game cannot load.** The game
+loads a dashboard's templates from `ui/template/dashboard_text.<dashboard>.sii`,
+and every unit the script points at has to exist or the whole script fails to
+load and the game **dies**. A mod that copies another truck's dashboard and
+renames the file, but not the template names inside it, leaves the game with
+pointers to nothing — the measured G63 pointed at `txt.daf_2021.gpstime`, a DAF
+unit, and the DAF was not in the install. `_fix_dangling_ui_templates` writes the
+missing units into a file named for the dashboard that needs them, which
+satisfies the per-dashboard rule and the "every template in the mod pool" rule
+alike, so it does not matter which one the game uses. The units keep the names
+the dashboard gives them and take their text from the mod's own templates of the
+same job. **The mod's files are not edited**: a file is added.
+
+**A unit the base game defines cannot be told apart from one nobody defines.**
+So the fix may write a stand-in for a unit the game already had, costing the
+game's own styling of that one element. That is the trade, and the report says
+what was written.
+
+**A `gps_path`/`dashboard_path` that points at a script nobody shipped is the
+same death one step earlier.** The measured G63's default interior declared
+`gps_path:"/ui/gps.sii"`, which the mod does not ship, while the vehicle's other
+interiors declared the dashboard it does — the author renamed the file and left
+the old path behind. `_fix_dangling_ui_paths` repoints such a path at the file
+the vehicle's own other parts use for that key, and drops the line where there
+is none. A missing GPS view is a small loss; a dashboard the game cannot load is
+a dead game.
+
+**The vehicle unit needs three `info[]` lines.** SCS's own Road Trip vehicles
+carry brand, series and description — measured on the Mustang 67, F-150 23, Bronco
+24 and Victoria 06 in `dlc_rt_ford.scs` — and a truck mod's data unit carries
+two, so the game logs "Missing required accessory information - unit
+'vehicle.g63', attribute 'info[2]'". The converter writes the body type as the
+description, and pads to three rather than leaving the unit one short, because
+the game wants `info[2]` by name.
 
 **A test that reaches a prompt without pinning `_tty` will hang the console
 run.** This is not hypothetical: it cost a 900-second timeout, because the suite

@@ -2776,6 +2776,232 @@ def test_idle_torque_is_halved_to_stop_the_car_creeping() -> None:
           before is None, str(before))
 
 
+def test_a_dashboard_that_points_at_nothing_gets_its_template() -> None:
+    """A dashboard the game cannot load takes the game with it.
+
+    The measured case: the Mercedes-Benz G63 (W463 2022) carries the DAF XF's
+    GPS dashboard, so it points at `txt.daf_2021.gpstime` and
+    `txt.daf_2021.gpsspdlimit` -- units from a DAF the mod never ships and the
+    base game does not have either, the DAF's templates shipping with the DAF.
+    The game died with "load_unit_tree() - Failed to load unit tree from file
+    (/ui/dashboard/w463_g63_gps.sii)".
+
+    So the missing template is written, named for the dashboard that needs it,
+    and the mod's own bytes are left alone.
+    """
+    section("a dashboard's missing template is written")
+    import zipfile as _z
+
+    dashboard = (
+        "SiiNunit\n{\n"
+        "ui::window : _nameless.Main {\n"
+        ' text: "<align hstyle=center>%0</align>"\n'
+        " look_template: txt.other_vehicle.gpstime\n"
+        " look_template: txt.other_vehicle.gpsspdlimit\n"
+        "}\n"
+        "}\n"
+    )
+    templates = (
+        "SiiNunit\n{\n"
+        "ui::text_template : txt.car.odo {\n"
+        '\ttext: "<align hstyle=center><font face=/font/big.font '
+        'xscale=7 yscale=7>%0</font></align>"\n'
+        "}\n"
+        "ui::text_template : txt.car.clock {\n"
+        '\ttext: "<align hstyle=center><font face=/font/big.font '
+        'xscale=4 yscale=4>%0</font></align>"\n'
+        "}\n"
+        "}\n"
+    )
+
+    def build(td: str, dash: str) -> Path:
+        mod = synthetic_mod(Path(td) / "mod")
+        (mod / "ui" / "dashboard").mkdir(parents=True, exist_ok=True)
+        (mod / "ui" / "template").mkdir(parents=True, exist_ok=True)
+        (mod / "ui" / "dashboard" / "car_dash.sii").write_text(dash)
+        (mod / "ui" / "template" / "dashboard_text.car.sii").write_text(
+            templates)
+        return mod
+
+    with tempfile.TemporaryDirectory() as td:
+        mod = build(td, dashboard)
+        out = Path(td) / "converted.scs"
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(mod), "--type", "suv", "--brand", "test", "--no-prompt",
+                    "-o", str(out)])
+        finally:
+            C._tty = real_tty
+
+        with _z.ZipFile(out) as z:
+            names = z.namelist()
+            written = "ui/template/dashboard_text.car_dash.sii"
+            check("the dashboard's template file is written", written in names,
+                  str([n for n in names if n.startswith("ui/")]))
+            if written in names:
+                text = z.read(written).decode()
+                check("it defines the unit the dashboard points at",
+                      "ui::text_template : txt.other_vehicle.gpstime" in text,
+                      text)
+                check("and the other one too",
+                      "ui::text_template : txt.other_vehicle.gpsspdlimit"
+                      in text,
+                      text)
+                # gpstime is a clock and gpsspdlimit is a speed, so the two
+                # stand-ins must not be the same one.
+                stand_ins = [l for l in text.splitlines()
+                             if l.strip().startswith("text:")]
+                check("the two stand-ins are the mod's own clock and speed",
+                      len(stand_ins) == 2
+                      and len(set(stand_ins)) == 2
+                      and "xscale=4" in stand_ins[0] + stand_ins[1]
+                      and "xscale=7" in stand_ins[0] + stand_ins[1],
+                      str(stand_ins))
+            check("the mod's own dashboard is byte-identical",
+                  z.read("ui/dashboard/car_dash.sii").decode() == dashboard)
+            check("the mod's own template file is byte-identical",
+                  z.read("ui/template/dashboard_text.car.sii").decode()
+                  == templates)
+
+    # A dashboard whose look_template resolves must be left alone, and no file
+    # written for it.
+    with tempfile.TemporaryDirectory() as td:
+        mod = build(td, dashboard
+                    .replace("txt.other_vehicle.gpstime", "txt.car.clock")
+                    .replace("txt.other_vehicle.gpsspdlimit", "txt.car.odo"))
+        out = Path(td) / "converted.scs"
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(mod), "--type", "suv", "--brand", "test", "--no-prompt",
+                    "-o", str(out)])
+        finally:
+            C._tty = real_tty
+        with _z.ZipFile(out) as z:
+            check("a dashboard that resolves gets no stand-in file",
+                  "ui/template/dashboard_text.car_dash.sii" not in z.namelist(),
+                  str([n for n in z.namelist() if n.startswith("ui/")]))
+
+
+def test_the_vehicle_unit_gets_the_third_info_line() -> None:
+    """The game asks for three info[] lines; a mod's truck unit carries two.
+
+    SCS's own Road Trip vehicles carry brand, series and description -- measured
+    on the Mustang 67, F-150 23, Bronco 24 and Victoria 06 in dlc_rt_ford.scs --
+    and a converted car whose data unit has only the mod's two is logged as
+    "Missing required accessory information - unit 'vehicle.g63', attribute
+    'info[2]'". The third line is the description, and the body type is what the
+    converter knows about the car.
+    """
+    section("the vehicle unit carries three info[] lines")
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod", data_body=[
+            'ui_name: "Test Car"',
+            'info[]: "Testbrand"',
+            'info[]: "Testmodel"',
+        ])
+        out = Path(td) / "converted.scs"
+        text = _data_sii(mod, out, "--type", "suv")
+        infos = get_all_indexed(edit_lines(text), "info")
+        check("the converted car carries three info[] lines", len(infos) == 3,
+              str(infos))
+        check("the third is the body type the user chose", infos[-1:] == ["SUV"],
+              str(infos))
+        check("the mod's own two are untouched",
+              infos[:2] == ["Testbrand", "Testmodel"], str(infos))
+
+    # A mod that already carries three is left exactly as it is.
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod", data_body=[
+            'ui_name: "Test Car"',
+            'info[]: "One"',
+            'info[]: "Two"',
+            'info[]: "Three"',
+        ])
+        out = Path(td) / "converted.scs"
+        text = _data_sii(mod, out, "--type", "suv")
+        infos = get_all_indexed(edit_lines(text), "info")
+        check("a unit that already has three keeps them",
+              infos == ["One", "Two", "Three"], str(infos))
+
+
+def test_a_dashboard_path_that_points_at_nothing_is_repointed() -> None:
+    """A script the mod does not ship is the same death as a missing template.
+
+    The measured case: the Mercedes-Benz G63's default interior declares
+    `gps_path:"/ui/gps.sii"`, which the mod does not ship, while the vehicle's
+    other interiors declare `gps_path:"/ui/dashboard/w463_g63_gps.sii"`, which it
+    does. The stale path is repointed at the file the vehicle's own other parts
+    use; where there is no such file, the line is dropped rather than left to
+    kill the game.
+    """
+    section("a dangling dashboard path is repointed")
+    import zipfile as _z
+
+    def interior(gps: str) -> str:
+        return ("SiiNunit\n{\naccessory_truck_interior : test.interior\n{\n"
+                f'\tdashboard_path:"/ui/dashboard/car_dash.sii"\n'
+                f'\tgps_path:"{gps}"\n'
+                "}\n}\n")
+
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod")
+        vdir = mod / "def" / "vehicle" / "truck" / "test"
+        (vdir / "interior").mkdir(parents=True, exist_ok=True)
+        (vdir / "interior" / "std.sii").write_text(interior("/ui/gps.sii"))
+        (vdir / "interior" / "std_2.sii").write_text(
+            interior("/ui/dashboard/car_dash_gps.sii"))
+        (mod / "ui" / "dashboard").mkdir(parents=True, exist_ok=True)
+        (mod / "ui" / "dashboard" / "car_dash.sii").write_text(
+            "SiiNunit\n{\nui::window : _nameless.Main {\n}\n}\n")
+        (mod / "ui" / "dashboard" / "car_dash_gps.sii").write_text(
+            "SiiNunit\n{\nui::window : _nameless.Main {\n}\n}\n")
+
+        out = Path(td) / "converted.scs"
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(mod), "--type", "suv", "--brand", "test", "--no-prompt",
+                    "-o", str(out)])
+        finally:
+            C._tty = real_tty
+
+        with _z.ZipFile(out) as z:
+            std = z.read("def/vehicle/truck/test/interior/std.sii").decode()
+            check("the stale path is repointed at the file the vehicle uses",
+                  "/ui/dashboard/car_dash_gps.sii" in std, std)
+            check("and the broken one is gone", "/ui/gps.sii" not in std, std)
+            std2 = z.read("def/vehicle/truck/test/interior/std_2.sii").decode()
+            check("the interior that was already right is untouched",
+                  "/ui/dashboard/car_dash_gps.sii" in std2, std2)
+
+    # With no other dashboard to point at, the line goes rather than staying to
+    # kill the game.
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod")
+        vdir = mod / "def" / "vehicle" / "truck" / "test"
+        (vdir / "interior").mkdir(parents=True, exist_ok=True)
+        (vdir / "interior" / "std.sii").write_text(interior("/ui/gps.sii"))
+        (mod / "ui" / "dashboard").mkdir(parents=True, exist_ok=True)
+        (mod / "ui" / "dashboard" / "car_dash.sii").write_text(
+            "SiiNunit\n{\nui::window : _nameless.Main {\n}\n}\n")
+        out = Path(td) / "converted.scs"
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(mod), "--type", "suv", "--brand", "test", "--no-prompt",
+                    "-o", str(out)])
+        finally:
+            C._tty = real_tty
+        with _z.ZipFile(out) as z:
+            std = z.read("def/vehicle/truck/test/interior/std.sii").decode()
+            check("a path with nothing to point at is removed",
+                  "gps_path" not in std, std)
+            check("and the dashboard path that does resolve is kept",
+                  "/ui/dashboard/car_dash.sii" in std, std)
+
+
 def test_prompt_price_never_blocks() -> None:
     section("price prompt never blocks")
     # Force the condition rather than assuming it. Running the suite from a
@@ -5935,6 +6161,9 @@ def main() -> int:
     test_rpm_bands_scale_to_where_the_engine_peaks()
     test_the_rev_limit_cuts_the_curve_and_is_no_longer_asked()
     test_the_peak_rpm_is_held_inside_the_engines_own_range()
+    test_a_dashboard_that_points_at_nothing_gets_its_template()
+    test_a_dashboard_path_that_points_at_nothing_is_repointed()
+    test_the_vehicle_unit_gets_the_third_info_line()
     test_clipping_the_ceiling_costs_torque_and_says_so()
     test_the_shift_point_is_the_band_that_governs_upshifts()
     test_rpm_band_input_is_validated()
