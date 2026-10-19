@@ -2415,6 +2415,41 @@ A unit the base game defines cannot be told apart from one nobody defines, so
 this may write a stand-in for a base-game unit. That costs the game's own styling
 of that one element; the alternative is the game dying.
 
+### Two gaps on the mod's side, and one that is not ours at all
+
+Comparing the original archive with the converted one key by key found nothing
+else the converter rewrites by accident: 556 files byte-identical, 19 changed
+(all of them intended — the car's physics, the rebuilt curve, the dropped truck
+keys, the price scaling, the three fixes above), one dropped
+(`def/vehicle/physics.sii`, deliberately) and twelve added (the registration
+chain, the two logo sets, the template file).
+
+Two references in the mod point at files it does not ship:
+
+- `def/vehicle/f_tire/w463_2022_2.sii` asks for
+  `cakirmods/g63/upg/wheel/tire_2.pmd` and the mod ships `tire2.pmd` — no
+  underscore. The second wheel set has no model.
+- The Cadillac's interior asks for four anims the mod never shipped
+  (`handbrake`, `hazard`, `beacon_st`, `lowbeam_in`), and it is the one that
+  declares them under its own `/vehicle/car/wagan/...` namespace.
+
+And the log's other complaint, `Can not open
+'/material/ui/car_brand_logo/vehicle.mat'`, is **not the G63's**: it came with
+the *Cadillac*, immediately after that car's four missing anims, and the game
+survived it. Every logo we write was found by the Car Dealer (mercedes, cadillac,
+honda, bmw, alongside the base game's dodge, ford and ram), so our logo handling
+is not the cause; the game asked for a brand named "vehicle" that nothing in the
+game, the mods or our output provides.
+
+What is *not* settled: whether the base game has a
+`material/ui/car_brand_logo/vehicle.mat` that our mod's folder could be
+shadowing. The Car Dealer found the base game's ford, dodge and ram *after* ours,
+so the folders do not shadow each other, and a content scan of the 9.4 GB
+`base.scs` found no such file. Answering it properly needs the HashFS **v2**
+reader this project does not have — `hashfs.py` reads v1 and refuses v2, and the
+v2 entry and metadata tables have to be decoded before a file can be read by
+path. That is a day of work on its own and nothing else here needs it.
+
 ### The same mod had a second one, one step earlier
 
 The interior the car actually binds — `stock.sii` — declares
