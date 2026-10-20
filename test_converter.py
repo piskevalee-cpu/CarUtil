@@ -1772,6 +1772,49 @@ def test_an_unquoted_value_with_a_colon_is_not_split() -> None:
           ['\tinfo[]: "V: 8"'])
 
 
+def test_a_def_the_converter_does_not_touch_keeps_its_bytes() -> None:
+    """A file with nothing to fix must come out exactly as it went in.
+
+    The real mods ship wheel parts that end with `}` and no newline, and the
+    suite's fidelity check compares them byte for byte. A rewrite that adds a
+    trailing newline -- or expands a collapsed line -- changes a part the
+    converter had no reason to touch, and that is a regression the synthetic
+    mod cannot show because every file it builds ends with a newline.
+    """
+    section("an untouched def keeps its bytes")
+    body = ('SiiNunit\n{\naccessory_truck_wheel : f_disc.test.std\n{\n'
+            '\tpart_type: factory\n}\n}')            # no trailing newline
+    files = {
+        "def/vehicle/f_disc/std.sii": body,
+        "def/vehicle/truck/testcar/interior/i.sii":
+            'SiiNunit\n{\naccessory_truck_interior : i\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n',
+        "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
+    }
+    rep = C.Report()
+    C._fix_dangling_ui_paths(files, rep)
+    check("a def with nothing to fix is byte-identical",
+          files["def/vehicle/f_disc/std.sii"] == body,
+          repr(files["def/vehicle/f_disc/std.sii"][-20:]))
+    check("and it is not reported as fixed", not rep.warnings, str(rep.warnings))
+
+    # A def that IS fixed is rewritten, trailing newline and all.
+    files2 = {
+        "def/vehicle/truck/testcar/interior/i.sii":
+            'SiiNunit\n{\naccessory_truck_interior : i\n{\n'
+            '\tgps_path: "/ui/gps.sii"\n}\n}\n',
+        "def/vehicle/truck/testcar/interior/j.sii":
+            'SiiNunit\n{\naccessory_truck_interior : j\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n',
+        "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
+    }
+    C._fix_dangling_ui_paths(files2, C.Report())
+    check("a def that is fixed is repointed",
+          "/ui/dashboard/v_gps.sii" in files2[
+              "def/vehicle/truck/testcar/interior/i.sii"],
+          files2["def/vehicle/truck/testcar/interior/i.sii"])
+
+
 def test_an_unreadable_paint_job_does_not_end_the_run() -> None:
     """One paint job we cannot decode must not end the conversion.
 
@@ -1983,7 +2026,8 @@ def test_type_validation() -> None:
         out = Path(td) / "x.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(REF),
-             "--type", "spaceship", "--brand", "vw", "-o", str(out)],
+             "--no-prompt", "--type", "spaceship", "--brand", "vw",
+             "-o", str(out)],
             capture_output=True, text=True,
         )
         check("accepts unlisted type", r.returncode == 0, r.stderr[-200:])
@@ -1999,8 +2043,8 @@ def test_type_validation() -> None:
         out = Path(td) / "e.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(REF),
-             "--type", "suv", "--extra-tags", "pickup,sedan", "--brand", "vw",
-             "-o", str(out)],
+             "--no-prompt", "--type", "suv", "--extra-tags", "pickup,sedan",
+             "--brand", "vw", "-o", str(out)],
             capture_output=True, text=True,
         )
         check("extra-tags accepted", r.returncode == 0, r.stderr[-200:])
@@ -3431,8 +3475,9 @@ def test_mass_override() -> None:
 
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
-             "--type", "suv", "--brand", "p", "--mass", "oops", "-o", str(out)],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "p",
+             "--mass", "oops", "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("bad --mass rejected", r.returncode != 0)
         check("error explains the format", "1150,1050" in r.stderr)
 
@@ -3498,8 +3543,9 @@ def test_mass_cli_forms() -> None:
         # bad inputs rejected
         for bad in ("oops", "1,2,3", "-5"):
             r = subprocess.run(
-                [sys.executable, str(HERE / "carutil.py"), *base, "--mass", bad],
-                capture_output=True, text=True)
+                [sys.executable, str(HERE / "carutil.py"), *base, "--no-prompt",
+                 "--mass", bad],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL)
             check(f"rejects {bad!r}", r.returncode != 0)
 
 
@@ -3526,8 +3572,9 @@ def test_scripted_mode_still_works() -> None:
 
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"),
-             str(PORCHE), "--type", "suv", "--brand", "p", "-o", str(out)],
-            capture_output=True, text=True)
+             str(PORCHE), "--no-prompt", "--type", "suv", "--brand", "p",
+             "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("runs as a script", r.returncode == 0, r.stderr[-200:])
         check("prints DONE", "DONE" in r.stdout)
         check("prints the location", str(out.resolve()) in r.stdout)
@@ -3553,13 +3600,14 @@ def test_missing_required_off_terminal() -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "o.scs"
         r = subprocess.run(
-            [sys.executable, str(HERE / "carutil.py"), str(PORCHE), "-o", str(out)],
+            [sys.executable, str(HERE / "carutil.py"), str(PORCHE), "--no-prompt",
+             "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("demands --type", r.returncode != 0 and "--type" in r.stderr)
 
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
-             "--type", "suv", "-o", str(out)],
+             "--no-prompt", "--type", "suv", "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("demands --brand", r.returncode != 0 and "--brand" in r.stderr)
 
@@ -3593,7 +3641,8 @@ def test_dry_run_writes_nothing() -> None:
         out = Path(td) / "dry.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
-             "--type", "suv", "--brand", "p", "--dry-run", "-o", str(out)],
+             "--no-prompt", "--type", "suv", "--brand", "p", "--dry-run",
+             "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("no file written", not out.exists())
         check("says nothing was written", "nothing was written" in r.stdout)
@@ -3642,8 +3691,9 @@ def test_locked_archive_errors_cleanly() -> None:
         # the tool must fail with guidance, never a traceback
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(locked),
-             "--type", "suv", "--brand", "h", "-o", str(Path(td) / "o.scs")],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "h",
+             "-o", str(Path(td) / "o.scs")],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("exits non-zero", r.returncode != 0)
         check("no traceback", "Traceback" not in r.stderr, r.stderr[-200:])
         check("says flagged encrypted", "flagged encrypted" in r.stderr)
@@ -3662,9 +3712,9 @@ def test_password_unlocks() -> None:
 
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(locked),
-             "--type", "suv", "--brand", "honda", "--password", "secret123",
-             "--mass", "2142", "-o", str(out)],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "honda",
+             "--password", "secret123", "--mass", "2142", "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("correct password converts", r.returncode == 0, r.stderr[-200:])
         check("output written", out.exists())
         if out.exists():
@@ -3674,9 +3724,9 @@ def test_password_unlocks() -> None:
 
         r2 = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(locked),
-             "--type", "suv", "--brand", "h", "--password", "wrongpw",
-             "-o", str(Path(td) / "o2.scs")],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "h",
+             "--password", "wrongpw", "-o", str(Path(td) / "o2.scs")],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("wrong password fails cleanly", r2.returncode != 0)
         check("wrong password: no traceback", "Traceback" not in r2.stderr)
 
@@ -3702,9 +3752,9 @@ def test_zip_wrapper_is_unwrapped() -> None:
         out = Path(td) / "out.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(wrapper),
-             "--type", "sedan", "--brand", "test", "--mass", "1400",
-             "-o", str(out)],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "sedan", "--brand", "test",
+             "--mass", "1400", "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("converts through the wrapper", r.returncode == 0, r.stderr[-200:])
         check("reports the unwrap", "contained a mod archive" in r.stdout)
 
@@ -3868,17 +3918,17 @@ def test_mislabelled_encryption_is_readable() -> None:
         out = Path(td) / "out.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(built),
-             "--type", "suv", "--brand", "honda", "--mass", "2142",
-             "-o", str(out)],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "honda",
+             "--mass", "2142", "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("converts without a password", r.returncode == 0, r.stderr[-200:])
         check("reports the workaround", "data is plain" in r.stdout)
 
         r2 = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(built),
-             "--type", "suv", "--brand", "h", "--strict-encryption",
-             "-o", str(Path(td) / "o2.scs")],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "h",
+             "--strict-encryption", "-o", str(Path(td) / "o2.scs")],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("strict mode refuses cleanly", r2.returncode != 0)
         check("strict: no traceback", "Traceback" not in r2.stderr)
 
@@ -3904,8 +3954,9 @@ def _check_conversion(mod: Path, vtype: str, brand: str, mass: str,
     out = tmp / "out.scs"
     r = subprocess.run(
         [sys.executable, str(HERE / "carutil.py"), str(mod),
-         "--type", vtype, "--brand", brand, "--mass", mass, "-o", str(out)],
-        capture_output=True, text=True)
+         "--no-prompt", "--type", vtype, "--brand", brand, "--mass", mass,
+         "-o", str(out)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL)
     check(f"{mod.name[:28]}: converts", r.returncode == 0, r.stderr[-300:])
     check(f"{mod.name[:28]}: no traceback", "Traceback" not in r.stderr)
     if r.returncode != 0:
@@ -6588,6 +6639,7 @@ def main() -> int:
     test_extra_tags_ignores_an_empty_entry()
     test_an_unquoted_value_with_a_colon_is_not_split()
     test_an_unreadable_paint_job_does_not_end_the_run()
+    test_a_def_the_converter_does_not_touch_keeps_its_bytes()
     test_missing_assets_are_reported()
     test_slug_never_collapses_to_a_bare_number()
     test_vehicle_types()

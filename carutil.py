@@ -1815,6 +1815,7 @@ def _fix_dangling_ui_paths(files: dict[str, str], rep: Report) -> None:
         # drop below removed every occurrence of the key, including the ones
         # that pointed at a file the mod does ship.
         out: list[str] = []
+        changed = False
         for line in lines:
             m = _UI_PATH_RE.match(line)
             if not m:
@@ -1824,6 +1825,7 @@ def _fix_dangling_ui_paths(files: dict[str, str], rep: Report) -> None:
             if old.lstrip("/") in files:
                 out.append(line)
                 continue
+            changed = True
             candidates = used.get((vehicle, key), set())
             if len(candidates) == 1:
                 new = next(iter(candidates))
@@ -1842,6 +1844,12 @@ def _fix_dangling_ui_paths(files: dict[str, str], rep: Report) -> None:
                     f"removed so the game does not die loading a script that is "
                     f"not there"
                 )
+        if not changed:
+            # Nothing to fix, so the file keeps the mod's own bytes -- and its
+            # own lack of a trailing newline. Rewriting a def the converter
+            # has no reason to touch is how a wheel part stops being
+            # byte-identical to the one the mod shipped.
+            continue
         files[name] = "\n".join(out) + "\n"
 
 
@@ -2563,9 +2571,15 @@ def apply_dealer_price(
             scaled[biggest] += drift
 
     for name, val in scaled.items():
-        files[name] = "\n".join(
-            set_key(edit_lines(files[name]), "price", str(val))
-        ) + "\n"
+        lines = edit_lines(files[name])
+        # In place, so the author's comment survives: `price: 1000 # base`
+        # keeps its explanation, which set_key would take with the line. A
+        # price written in the hex-float form has no number to replace in
+        # place, so it falls back to set_key.
+        lines, changed = _set_scalar_in_place(lines, "price", str(val))
+        if not changed:
+            lines = set_key(lines, "price", str(val))
+        files[name] = "\n".join(lines) + "\n"
 
     menu = sorted(((n, p, scaled[n]) for n, p in every.items()
                    if n not in listed), key=lambda r: -r[1])
