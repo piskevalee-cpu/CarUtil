@@ -1404,6 +1404,403 @@ def test_tank_size_is_still_left_to_the_mod() -> None:
           get_key(edit_lines(C.tune_chassis(text, "sedan", None, C.Report())),
                   "tank_size") == "868", text)
 
+    # The presets used to carry a tank_size of their own, which no loop ever
+    # wrote: a configured key that is not a written key is dead code that
+    # reads like a working rule, and it advertised a figure the converter
+    # never applied. The configuration is gone.
+    check("the presets no longer carry a tank size",
+          "tank_size" not in C.car_physics("suv", 2),
+          str(sorted(C.car_physics("suv", 2))))
+    check("and neither does the baseline",
+          "tank_size" not in C._PARATI, str(sorted(C._PARATI)))
+    check("no per-type override carries one either",
+          not any("tank_size" in v for v in C._TUNING.values()),
+          str(C._TUNING))
+
+
+def test_a_price_that_cannot_be_read_does_not_end_the_run() -> None:
+    """A price that is not a bare number must not raise out of the converter.
+
+    `dealer_price()` did `int(float(cur))` with no guard, so a price line
+    carrying a trailing comment, sharing a line with another key, or written
+    in the hex-float form raised an uncaught ValueError and ended the
+    conversion. The guard existed 35 lines later in `apply_dealer_price()`;
+    it just was not in the function that runs first.
+    """
+    section("a price that cannot be read does not end the run")
+    dealer = "def/vehicle/car_dealer/x/y.sii"
+    dealer_text = ('SiiNunit\n{\nvehicle : .car\n{\n}\n}\n'
+                   'vehicle_accessory : .chassis\n{\n'
+                   '\tdata_path: "/def/vehicle/truck/y/chassis.sii"\n}\n')
+
+    def files_with(price_line: str) -> dict:
+        return {
+            dealer: dealer_text,
+            "def/vehicle/truck/y/chassis.sii":
+                "SiiNunit\n{\naccessory_chassis : a\n{\n\t%s\n}\n}\n" % price_line,
+        }
+
+    for label, line, want in (("a trailing comment", "price: 1000 # base", 1000),
+                              ("a collapsed line", 'price: 1000   icon: "x"',
+                               1000),
+                              ("the hex-float form", "price: &459380cd",
+                               4720)):
+        try:
+            total, rows = C.dealer_price(files_with(line), dealer)
+        except Exception as exc:                      # noqa: BLE001
+            check(f"{label} does not raise", False, f"{type(exc).__name__}: {exc}")
+            continue
+        check(f"{label} is read as the number it is",
+              total == want and rows[0][1] == want, f"{total} {rows}")
+
+    # An unreadable price is reported rather than silently counted as zero.
+    rep = C.Report()
+    C.dealer_price(files_with("price: not a number"), dealer, rep)
+    check("an unreadable price is reported",
+          any("cannot read" in w for w in rep.warnings), str(rep.warnings))
+
+    # And the whole run survives one, which is what the crash stopped.
+    #
+    # --no-prompt AND a pinned _tty: the walkthrough prompts are not the only
+    # ones. The synthetic engine declares no rev bands, so the conversion
+    # reaches the rev-band menu, and a menu on a real terminal waits for a
+    # keypress nobody sends. That is the hang this suite is required never to
+    # have, and it is invisible in a piped run.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "mod"
+        synthetic_mod(root)
+        chassis = root / "def" / "vehicle" / "truck" / "testcar" / "chassis" / "xdl.sii"
+        chassis.write_text(chassis.read_text() + "\tprice: 35000 # base price\n")
+        out = Path(td) / "out.scs"
+        crashed = None
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(root), "--type", "sedan", "--brand", "t",
+                    "--no-prompt", "--price", "50000", "-o", str(out)])
+        except SystemExit as exc:
+            crashed = exc
+        finally:
+            C._tty = real_tty
+        check("a conversion with a commented price completes", crashed is None,
+              str(crashed))
+        if crashed is None:
+            check("and the archive is written", out.exists())
+            if out.exists():
+                with zipfile.ZipFile(out) as z:
+                    names = z.namelist()
+                check("and the archive is readable", bool(names),
+                      str(names[:3]))
+
+
+def test_the_requested_kerb_weight_survives_the_axle_count() -> None:
+    """The mass the user asked for is the mass that gets written.
+
+    The mass array used to be padded with a copy of the rear figure, so a
+    3-axle mod came out heavier than the request: --mass 2200 wrote 1150 +
+    1050 + 1050 = 3250 kg, and the engine was tuned for the 2200 that was
+    asked for rather than the 3250 that was written.
+    """
+    section("the requested kerb weight survives the axle count")
+    for axles in (2, 3, 4):
+        cfg = C.car_physics("suv", axles, [1150, 1050])
+        total = sum(int(v) for v in cfg["kerb_weight"])
+        check(f"{axles} axles: the total is the one asked for",
+              total == 2200, f"{cfg['kerb_weight']} = {total}")
+        check(f"{axles} axles: there is one figure per axle",
+              len(cfg["kerb_weight"]) == axles, str(cfg["kerb_weight"]))
+
+    # The front figure the author asked for is kept; the extra axles share
+    # the rear group rather than copying it.
+    cfg = C.car_physics("suv", 3, [1150, 1050])
+    check("the front axle keeps the figure that was asked for",
+          cfg["kerb_weight"][0] == "1150", str(cfg["kerb_weight"]))
+    check("the extra axle shares the rear group",
+          cfg["kerb_weight"][1] == cfg["kerb_weight"][2] == "525",
+          str(cfg["kerb_weight"]))
+
+    # End to end, through the chassis that is actually written.
+    chassis = ("SiiNunit\n{\naccessory_chassis : c\n{\n"
+               "\tkerb_weight[0]: 3000\n\tkerb_weight[1]: 3000\n"
+               "\tkerb_weight[2]: 3000\n}\n}\n")
+    out = C.tune_chassis(chassis, "suv", [1150, 1050], C.Report())
+    written = [int(l.split(":")[1]) for l in out.splitlines()
+               if "kerb_weight" in l]
+    check("the written chassis carries the requested total",
+          sum(written) == 2200, f"{written} = {sum(written)}")
+    check("and it has one figure per axle", len(written) == 3, str(written))
+
+
+def test_a_rev_band_is_never_written_inverted() -> None:
+    """A band whose lower bound is above its upper bound is not a band.
+
+    `rpm_range_power` is (0.70 x peak, 1.20 x peak) and only its top was
+    clamped to the rev limit, so a ceiling below 0.70 x the peak left
+    (3150, 3000) in the engine.
+    """
+    section("a rev band is never written inverted")
+    for peak, limit in ((4500, 3000), (5000, 3000), (6000, 3500), (5000, 2000)):
+        band = C._rpm_range_bands(peak, limit)["rpm_range_power"]
+        lo, hi = (int(v) for v in re.findall(r"\d+", band))
+        check(f"peak {peak}, ceiling {limit}: the band is ordered",
+              lo < hi, band)
+        check(f"peak {peak}, ceiling {limit}: the band stays under the ceiling",
+              hi <= limit, band)
+
+    # The bands that were already right are untouched.
+    check("the reference peak is unchanged",
+          C._rpm_range_bands(5000) == C._RPM_RANGE_DEFAULTS,
+          str(C._rpm_range_bands(5000)))
+    check("a ceiling above the band's top leaves it alone",
+          C._rpm_range_bands(5000, 6100)["rpm_range_power"] == "(3500, 6000)",
+          str(C._rpm_range_bands(5000, 6100)))
+    check("a ceiling inside the band still clamps the top only",
+          C._rpm_range_bands(4000, 3750)["rpm_range_power"] == "(2800, 3750)",
+          str(C._rpm_range_bands(4000, 3750)))
+
+
+def test_a_number_with_a_comment_is_still_a_number() -> None:
+    """A value read back keeps its comment, and the comment must not hide it.
+
+    `get_key()` returns the value as written, so `air_resistance: 1.5 # truck
+    drag` came back as "1.5 # truck drag". `to_float()` raised on that, the
+    `except` in `_is_truck_scale()` swallowed it, and a truck-scale value read
+    as car-sane -- so a 9.4 t chassis was preserved whole. This is the bug
+    `_is_truck_scale`'s own docstring says was fixed for hex floats; only the
+    hex-float half was.
+    """
+    section("a number with a comment is still a number")
+    check("a truck-scale value with a comment is still truck-scale",
+          C._is_truck_scale("air_resistance", "1.5 # truck drag"))
+    check("a truck-scale axle with a comment is still truck-scale",
+          C._is_truck_scale("kerb_weight", ["4720.1 # front"]))
+    check("a hex-float axle with a comment is still truck-scale",
+          C._is_truck_scale("kerb_weight", ["&459380cd # front"]))
+    check("a car-sane value with a comment is still car-sane",
+          not C._is_truck_scale("air_resistance", "0.5 # from the tuner"))
+    check("a value that is not a number is still not one",
+          not C._is_truck_scale("air_resistance", "not a number"))
+
+    # End to end: the annotated truck chassis is corrected, not preserved.
+    chassis = ("SiiNunit\n{\naccessory_chassis : c\n{\n"
+               "\tkerb_weight[0]: 4720.1 # front\n"
+               "\tkerb_weight[1]: 4720.1 # rear\n"
+               "\tair_resistance: 1.5 # truck drag\n}\n}\n")
+    out = C.tune_chassis(chassis, "sedan", None, C.Report())
+    written = [l for l in out.splitlines() if "kerb_weight" in l]
+    check("the annotated truck weight is replaced",
+          written and "4720.1" not in written[0], str(written))
+    drag = [l for l in out.splitlines() if "air_resistance" in l]
+    check("the annotated truck drag is replaced",
+          drag and "1.5" not in drag[0], str(drag))
+
+
+def test_the_shift_point_cannot_invert_a_band() -> None:
+    """A change-up point at or below the band floor is not a band."""
+    section("the shift point cannot invert a band")
+    bands = C._rpm_range_bands(5000, None)
+    shifted = C._set_shift_up(bands, 1000)
+    for key in ("rpm_range_low_gear", "rpm_range_high_gear"):
+        lo, hi = (int(v) for v in re.findall(r"\d+", shifted[key]))
+        check(f"{key} stays ordered", lo < hi, shifted[key])
+    check("a shift point above the floor is used as given",
+          C._set_shift_up(bands, 3000)["rpm_range_high_gear"]
+          == "(1450, 3000)",
+          str(C._set_shift_up(bands, 3000)))
+
+    # And the user is told their point was raised.
+    rep = C.Report()
+    C._report_shift(rep, C._set_shift_up(bands, 1000), 1000)
+    check("a raised shift point is reported",
+          any("raised" in w for w in rep.warnings), str(rep.warnings))
+    rep2 = C.Report()
+    C._report_shift(rep2, C._set_shift_up(bands, 3000), 3000)
+    check("a shift point that was honoured is not reported",
+          not any("raised" in w for w in rep2.warnings), str(rep2.warnings))
+
+
+def test_the_walkthrough_asks_only_what_is_unknown() -> None:
+    """A prompt whose answer is then discarded must not be asked.
+
+    With --power on the command line the walkthrough asked for a 0-60 time,
+    turned the answer into an Nm/t, and passed it to convert() -- where
+    tune_engine() returns from the horsepower branch before it is used. Two
+    different 0-60 answers produced byte-identical engines.
+    """
+    section("the walkthrough asks only what is unknown")
+    import io
+
+    with tempfile.TemporaryDirectory() as td:
+        C._rpm_ranges = C._rpm_range_bands(5000, 6100)
+        mod = synthetic_mod(Path(td) / "mod", extra_defs={
+            "engine/v8.sii": _engine_unit(
+                "torque: 1400", "rpm_limit: 6100",
+                "torque_curve[]: (1500, 0.43)",
+                "torque_curve[]: (3750, 1.0)")})
+        asked: list[str] = []
+        stubs = {
+            "prompt_source": lambda: mod,
+            "prompt_type": lambda: "sedan",
+            "prompt_brand": lambda slug: "test",
+            "prompt_weight": lambda vtype, preset: [1150, 1050],
+            "prompt_power": lambda kerb, bounds=None: (
+                asked.append("power") or (350.0, 5000)),
+            "prompt_peak_rpm": lambda bounds=None: (
+                asked.append("peak") or 5000),
+            "prompt_acceleration": lambda kerb: (
+                asked.append("acceleration") or 5.5),
+            "prompt_price": lambda: 45000,
+        }
+        real_step = C._ui.step
+        saved = {name: getattr(C, name) for name in stubs}
+        real_stdout = sys.stdout
+        try:
+            C.__dict__.update(stubs)
+            C._ui.step = lambda index, total, text: None
+            C._tty = lambda: True
+            sys.stdout = io.StringIO()
+            C.main(["--power", "300", "-o", str(Path(td) / "guided.scs")])
+        finally:
+            sys.stdout = real_stdout
+            for name, fn in saved.items():
+                setattr(C, name, fn)
+            C._ui.step = real_step
+            C._tty = lambda: False
+            C._rpm_ranges = None
+
+        check("the 0-60 question is not asked when --power was given",
+              "acceleration" not in asked, str(asked))
+        check("the peak is asked, because --power does not settle it",
+              "peak" in asked, str(asked))
+        check("the horsepower is not asked again",
+              "power" not in asked, str(asked))
+
+
+def test_every_dangling_dashboard_path_is_repointed() -> None:
+    """A def with two dashboard paths has both of them fixed.
+
+    `set_key()` replaces the LAST matching line, so only the second path in a
+    file was repointed and the first kept pointing at a script nobody ships --
+    the same death the function exists to prevent. And dropping the line
+    removed every occurrence of the key, including ones that were fine.
+    """
+    section("every dangling dashboard path is repointed")
+    files = {
+        "def/vehicle/truck/v/interior/a.sii":
+            'SiiNunit\n{\naccessory_interior : a\n{\n'
+            '\tgps_path: "/ui/gps.sii"\n}\n}\n'
+            'accessory_interior : b\n{\n'
+            '\tgps_path: "/ui/gps.sii"\n}\n}\n',
+        "def/vehicle/truck/v/interior/c.sii":
+            'SiiNunit\n{\naccessory_interior : c\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n',
+        "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
+    }
+    rep = C.Report()
+    C._fix_dangling_ui_paths(files, rep)
+    text = files["def/vehicle/truck/v/interior/a.sii"]
+    check("no path is left pointing at a script nobody ships",
+          "/ui/gps.sii" not in text, text)
+    check("both are repointed at the file the vehicle does ship",
+          text.count("/ui/dashboard/v_gps.sii") == 2, text)
+    check("each one is reported", len(rep.warnings) == 2, str(rep.warnings))
+
+    # A path that IS fine is left alone, even when a sibling is not.
+    files2 = {
+        "def/vehicle/truck/v/interior/a.sii":
+            'SiiNunit\n{\naccessory_interior : a\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n'
+            'accessory_interior : b\n{\n'
+            '\tgps_path: "/ui/gps.sii"\n}\n}\n',
+        "def/vehicle/truck/v/interior/c.sii":
+            'SiiNunit\n{\naccessory_interior : c\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n',
+        "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
+    }
+    C._fix_dangling_ui_paths(files2, C.Report())
+    text2 = files2["def/vehicle/truck/v/interior/a.sii"]
+    check("a path that was already fine is left alone",
+          text2.count("/ui/dashboard/v_gps.sii") == 2, text2)
+
+
+def test_extra_tags_ignores_an_empty_entry() -> None:
+    """A trailing comma in --extra-tags is a typo, not a tag.
+
+    It used to reach `normalise_type("")`, which refused with "error: --type
+    must not be empty" -- an error about a flag the user never passed.
+    """
+    section("--extra-tags ignores an empty entry")
+    for raw in ("suv,", ",suv", "suv, pickup"):
+        tags = ["suv"]
+        ok = True
+        try:
+            for extra in raw.split(","):
+                extra = extra.strip()
+                if not extra:
+                    continue
+                tag = C.job_tag(C.normalise_type(extra))
+                if tag not in tags:
+                    tags.append(tag)
+        except SystemExit as exc:
+            ok = False
+            check(f"{raw!r} is accepted", False, str(exc))
+            continue
+        check(f"{raw!r} is accepted", ok)
+    check("a trailing comma adds nothing",
+          tags == ["suv", "pickup"], str(tags))
+
+
+def test_an_unquoted_value_with_a_colon_is_not_split() -> None:
+    """`name: foo: bar` is one key whose value is "foo", not two pairs.
+
+    The splitter treats an unquoted token followed by a colon as a key, so it
+    split that line and handed the file a key with an empty value. A quoted
+    colon was already handled -- the scanner skips quoted text.
+    """
+    section("an unquoted value with a colon is not split")
+    import sii as _sii
+    line = "\tname: foo: bar"
+    check("the line is returned untouched",
+          _sii.expand_multi_key_lines([line]) == [line],
+          str(_sii.expand_multi_key_lines([line])))
+    check("a collapsed line still splits",
+          _sii.expand_multi_key_lines(['\tprice: 1000   icon: "x"'])
+          == ['\tprice: 1000', '\ticon: "x"'],
+          str(_sii.expand_multi_key_lines(['\tprice: 1000   icon: "x"'])))
+    check("a quoted colon is still one pair",
+          _sii.expand_multi_key_lines(['\tinfo[]: "V: 8"']) ==
+          ['\tinfo[]: "V: 8"'])
+
+
+def test_an_unreadable_paint_job_does_not_end_the_run() -> None:
+    """One paint job we cannot decode must not end the conversion.
+
+    Every other read of a def in discover_parts() catches the SystemExit
+    read_def() raises for a file it cannot decode. The paint-job scan did
+    not, so a single unreadable file ended the run.
+    """
+    section("an unreadable paint job does not end the run")
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "m.scs"
+        vdir = "def/vehicle/truck/testcar/"
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr(vdir + "data.sii",
+                       "SiiNunit\n{\naccessory_truck_data : vehicle.testcar\n"
+                       "{\n}\n}\n")
+            z.writestr(vdir + "paint_job/bad.sii", b"\xff\xfe\x00bad bytes")
+        rep = C.Report()
+        try:
+            parts, part_rep = C.discover_parts(C.ModSource(path), vdir,
+                                                "testcar", "")
+        except SystemExit as exc:
+            check("discover_parts survives an unreadable paint job", False,
+                  str(exc)[:80])
+            return
+        check("discover_parts survives an unreadable paint job", True)
+        check("the unreadable paint job is reported as a gap",
+              any("paint job" in g for g in part_rep.gaps),
+              str(part_rep.gaps))
+
 
 def test_missing_assets_are_reported() -> None:
     """A mod whose defs point at files it does not ship must say so.
@@ -6180,6 +6577,17 @@ def main() -> int:
     test_secondary_torque_is_dropped_for_a_car()
     test_truck_fuel_keys_are_dropped_for_a_car()
     test_tank_size_is_still_left_to_the_mod()
+    # The review findings. Each one is a defect the suite did not catch.
+    test_a_price_that_cannot_be_read_does_not_end_the_run()
+    test_the_requested_kerb_weight_survives_the_axle_count()
+    test_a_rev_band_is_never_written_inverted()
+    test_a_number_with_a_comment_is_still_a_number()
+    test_the_shift_point_cannot_invert_a_band()
+    test_the_walkthrough_asks_only_what_is_unknown()
+    test_every_dangling_dashboard_path_is_repointed()
+    test_extra_tags_ignores_an_empty_entry()
+    test_an_unquoted_value_with_a_colon_is_not_split()
+    test_an_unreadable_paint_job_does_not_end_the_run()
     test_missing_assets_are_reported()
     test_slug_never_collapses_to_a_bare_number()
     test_vehicle_types()

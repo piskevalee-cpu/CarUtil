@@ -99,12 +99,30 @@ def expand_multi_key_lines(lines: list[str]) -> list[str]:
         if len(offsets) < 2 or offsets[0] != len(indent):
             out.append(line)
             continue
+        pieces: list[str] = []
         for n, start in enumerate(offsets):
             end = offsets[n + 1] if n + 1 < len(offsets) else len(line)
             piece = line[start:end].rstrip()
             if piece:
-                out.append((indent or "\t") + piece)
+                pieces.append((indent or "\t") + piece)
+        # A pair with no value means the scanner has mis-read where one pair
+        # ends and the next begins: `name: foo: bar` is ONE key whose value
+        # is "foo", not two pairs, and splitting it hands the file a key with
+        # an empty value. A line like that is one this scanner cannot read
+        # confidently, so it is returned untouched -- which is the rule the
+        # whole function is built on. A quoted colon is not a problem: the
+        # scanner already skips quoted text, so `info[]: "V: 8"` is one pair.
+        if any(_is_empty_pair(piece) for piece in pieces):
+            out.append(line)
+            continue
+        out.extend(pieces)
     return out
+
+
+def _is_empty_pair(piece: str) -> bool:
+    """True if `piece` is a key with no value at all."""
+    m = KEY_RE.match(piece)
+    return m is not None and not m.group(3)
 
 
 def edit_lines(text: str) -> list[str]:
@@ -116,29 +134,68 @@ def edit_lines(text: str) -> list[str]:
     return expand_multi_key_lines(text.splitlines())
 
 
-def to_float(value: str) -> float:
-    """A SII numeric value as a float, hex-float form included.
-
-    SII allows a value written `&459380cd`: a big-endian IEEE-754 single in
-    eight hex digits, which is how the game itself writes some scalars. Plain
-    float() raises ValueError on those, and every caller here wraps float() in
-    `except ValueError: return False` -- so a hex-float kerb_weight read as
-    "not truck-scale" and a 9.4 t truck's chassis was preserved as if it were a
-    car's. A value that cannot be read at all still raises, because pretending
-    it is a number is how a misread becomes a written-out definition.
-    """
-    v = (value or "").strip()
-    if v.startswith("&") and len(v) == 9:
-        return struct.unpack(">f", bytes.fromhex(v[1:]))[0]
-    return float(v)
-
-
 def strip_quotes(value: str) -> str:
     """Return the unquoted payload of a SII scalar."""
     v = value.strip()
     if len(v) >= 2 and v[0] == '"' and v[-1] == '"':
         return v[1:-1]
     return v
+
+
+def comment_start(value: str) -> int:
+    """Index of the trailing comment in a SII value, or -1 when there is none.
+
+    A `#` outside a quoted string starts a comment and runs to the end of the
+    line; one inside a string is part of the value. The rule matters because
+    a value read back from a file keeps its comment, and every numeric read
+    of such a value has to cope with it.
+    """
+    i, n = 0, len(value)
+    while i < n:
+        ch = value[i]
+        if ch == '"':
+            i += 1
+            while i < n:
+                if value[i] == "\\":
+                    i += 2
+                    continue
+                if value[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "#":
+            return i
+        i += 1
+    return -1
+
+
+def to_float(value: str) -> float:
+    """A SII numeric value as a float, hex-float form and comment included.
+
+    SII allows a value written `&459380cd`: a big-endian IEEE-754 single in
+    eight hex digits, which is how the game itself writes some scalars. Plain
+    float() raises ValueError on those, and every caller here wraps float() in
+    `except ValueError: return False` -- so a hex-float kerb_weight read as
+    "not truck-scale" and a 9.4 t truck's chassis was preserved as if it were a
+    car's.
+
+    A value read back from a file also carries its trailing comment, and that
+    is the same bug on the same line: `kerb_weight[0]: 4720.1 # front` raises
+    here, the caller's except swallows it, and the same 9.4 t chassis is
+    preserved. So the comment is cut off before the number is read.
+
+    A value that cannot be read at all still raises, because pretending it is
+    a number is how a misread becomes a written-out definition.
+    """
+    v = (value or "").strip()
+    cut = comment_start(v)
+    if cut >= 0:
+        v = v[:cut].strip()
+    v = strip_quotes(v)
+    if v.startswith("&") and len(v) == 9:
+        return struct.unpack(">f", bytes.fromhex(v[1:]))[0]
+    return float(v)
 
 
 def get_key(lines: list[str], key: str, *, indexed: str | None = None) -> str | None:

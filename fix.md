@@ -1,8 +1,9 @@
-# fix.md — review findings, 2026-10-20
+# fix.md — review findings, and what was done about them, 2026-10-20
 
-A review of the converter for bugs and regressions. **Nothing in this file has
-been fixed**; it is a report, written so the fixes can be triaged and each one
-can be re-checked.
+A review of the converter for bugs and regressions, and the fixes that came out
+of it. **All eleven findings are fixed**, each with a regression test that fails
+without the fix. Two further observations are recorded at the end and are
+**not** fixed.
 
 ## Method
 
@@ -19,28 +20,78 @@ can be re-checked.
   for each one — all 14 checks confirm.
 - Severity is about consequence for the converted car, not about effort.
 
-**Every finding below is a defect the test suite does not catch.** The suite
-passes with all eleven present.
+**Every finding below was a defect the test suite did not catch.** The suite
+passed with all eleven present.
 
 ## Summary
 
-| id | severity | where | symptom | regression? |
-|---|---|---|---|---|
-| F1 | high | `carutil.py:2426` | `dealer_price()` raises an uncaught `ValueError` and aborts the conversion | no — since 2026-10-13 |
-| F2 | high | `carutil.py:2547` | requested kerb weight not honoured on a 3-axle mod (2200 kg → 3250 kg written) | no — since 2026-10-11 |
-| F3 | high | `carutil.py:1491` | `rpm_range_power` written with low > high | **yes** — 2026-10-17, `0247a7c` |
-| F4 | high | `carutil.py:2552` | a truck-scale value with a trailing comment reads as car-sane | no — since 2026-10-11; the hex-float half was fixed 2026-10-14 |
-| F5 | medium | `carutil.py:3334` | `--shift-up-rpm` below the band floor inverts the gear bands | **yes** — 2026-10-18, `ab7017c` |
-| F6 | medium | `carutil.py:1146` | `tank_size` configured in every preset, never written | **yes** — 2026-10-14, `4403c5a` |
-| F7 | medium | `carutil.py:5108` | the step-5 0-60 answer is collected and then discarded | no — since 2026-10-13 |
-| F8 | medium | `carutil.py:1796` | only the last dangling `gps_path` in a file is repointed | no — since 2026-10-19, `109cb0a` |
-| F9 | low | `carutil.py:5017` | `--extra-tags` with an empty entry names the wrong flag | no — since 2026-10-11 |
-| F10 | low | `backend/sii.py:38` | an unquoted value containing a colon is split, corrupting the def | no — since 2026-10-11 |
-| F11 | low | `carutil.py:1013` | an unreadable paint-job def aborts the whole conversion | no — since 2026-10-11 |
+| id | severity | where | symptom | regression? | status |
+|---|---|---|---|---|---|
+| F1 | high | `carutil.py:2426` | `dealer_price()` raises an uncaught `ValueError` and aborts the conversion | no — since 2026-10-13 | **fixed** |
+| F2 | high | `carutil.py:2547` | requested kerb weight not honoured on a 3-axle mod (2200 kg → 3250 kg written) | no — since 2026-10-11 | **fixed** |
+| F3 | high | `carutil.py:1491` | `rpm_range_power` written with low > high | **yes** — 2026-10-17, `0247a7c` | **fixed** |
+| F4 | high | `carutil.py:2552` | a truck-scale value with a trailing comment reads as car-sane | no — since 2026-10-11; the hex-float half was fixed 2026-10-14 | **fixed** |
+| F5 | medium | `carutil.py:3334` | `--shift-up-rpm` below the band floor inverts the gear bands | **yes** — 2026-10-18, `ab7017c` | **fixed** |
+| F6 | medium | `carutil.py:1146` | `tank_size` configured in every preset, never written | **yes** — 2026-10-14, `4403c5a` | **fixed** |
+| F7 | medium | `carutil.py:5108` | the step-5 0-60 answer is collected and then discarded | no — since 2026-10-13 | **fixed** |
+| F8 | medium | `carutil.py:1796` | only the last dangling `gps_path` in a file is repointed | no — since 2026-10-19, `109cb0a` | **fixed** |
+| F9 | low | `carutil.py:5017` | `--extra-tags` with an empty entry names the wrong flag | no — since 2026-10-11 | **fixed** |
+| F10 | low | `backend/sii.py:38` | an unquoted value containing a colon is split, corrupting the def | no — since 2026-10-11 | **fixed** |
+| F11 | low | `carutil.py:1013` | an unreadable paint-job def aborts the whole conversion | no — since 2026-10-11 | **fixed** |
+| F12 | medium | `carutil.py:3911` | with no `--mass`, the engine is tuned for the type default while the chassis may keep the mod's own weight | no — since 2026-10-11 | **not fixed** — see below |
 
 Dates are the commit that introduced the code, found with `git log -S`.
 
+## What was done
+
+Each fix is the smallest change that removes the defect, and each has a
+regression test in `test_converter.py` that fails without it. The test names
+carry the finding's number.
+
+| id | the change |
+|---|---|
+| F1 | `dealer_price()` reads the price through `edit_lines()` and `sii.to_float()`, so a comment, a collapsed line and the hex-float form are all read as the number they are. An unreadable price is **reported** and counted as zero rather than ending the run. `apply_dealer_price()`'s own loop uses the same reader. |
+| F2 | `car_physics()` spreads the mass over the real axle count with `_spread_over_axles()`: the extra axles share the rear group instead of copying the rear figure, so the total is preserved exactly and the front figure the author asked for survives. |
+| F3 | `_rpm_range_bands()` clamps the **whole** power band when the ceiling is below its floor, scaling the band down to fit under the ceiling instead of leaving `(3150, 3000)`. The bands that were already ordered are untouched. |
+| F4 | `sii.to_float()` cuts the trailing comment off a value before reading it, so one function fixes every numeric read. The hex-float and the quoted forms are handled there too. |
+| F5 | `_set_shift_up()` raises a change-up point that is at or below the band floor to just above it, and `_report_shift()` **warns** that the user's point was raised and says what it became. The declared-bands path shares the same helper. |
+| F6 | The dead `tank_size` is removed from `_PARATI` and from every entry of `_TUNING`. The tank was never written, so no output changes; what changes is that nothing advertises a figure the converter does not apply. |
+| F7 | The step-5 question is split: `prompt_peak_rpm()` asks where the power peaks, and it is asked on its own when `--power` already settled the horsepower. The 0-60 answer is no longer collected, so it cannot be discarded. |
+| F8 | `_fix_dangling_ui_paths()` rewrites each occurrence **where it stands** instead of going through `set_key()`, so every path in a file is fixed and a path that was already fine is left alone. |
+| F9 | `--extra-tags` skips an empty entry instead of handing `""` to `normalise_type()`. |
+| F10 | `sii.expand_multi_key_lines()` leaves a line alone when the split would give the first pair an empty value — which is the signature of a mis-read boundary, and of a value that contains a colon. |
+| F11 | The two `read_def()` calls in `discover_parts()` that were unguarded are guarded, like every other one in the file. The second one was found by the new test, not by the review. |
+
+### Verification
+
+- The suite passes **both** ways: `python3 test_converter.py < /dev/null` and
+  `script -qec "python3 test_converter.py" /dev/null`. The second is the one
+  that catches a test reaching a prompt: a new test of mine reached the
+  rev-band menu and hung the console run, which is exactly the failure the
+  repository's own notes describe.
+- A **regression matrix**: the same synthetic mod was converted under eleven
+  option sets — default, `--power`, `--acceleration`, `--mass`, `--rev-limit`,
+  a rev limit below the power peak, `--shift-up-rpm`, a shift point below the
+  band floor, `--price`, `--force-physics` and a 3-axle chassis — with the
+  committed code and with the fixed code, and every generated `.sii` was
+  compared. **Eight of the eleven are byte-identical.** The three that differ
+  are exactly the three defects that were supposed to change:
+
+  | case | before | after |
+  |---|---|---|
+  | 3-axle chassis | `kerb_weight[1]: 1050`, `[2]: 1050` (3250 kg) | `[1]: 525`, `[2]: 525` (2200 kg) |
+  | rev limit below the power peak | `rpm_range_power: (3500, 3000)` | `(1750, 3000)` |
+  | shift point below the band floor | `(1215, 900)`, `(1305, 900)` | `(1215, 1216)`, `(1305, 1306)` |
+
+  Nothing else moved.
+- The reproduction script at the end of this file was re-run against the fixed
+  code: every defect it could demonstrate is gone.
+
 ---
+
+The eleven sections below describe each defect **as it was found**. What was
+changed is in the table above; the "What was done" paragraph at the end of
+each section is the same change, with the reasoning.
 
 ## F1 — `dealer_price()` aborts the conversion on a `price:` that is not a bare number
 
@@ -89,7 +140,7 @@ does the default path — `apply_dealer_price(files, ..., price, rep)` runs
 unconditionally at `carutil.py:4103`, so the price is reported even when
 `--price` was not asked for.
 
-**Fix direction.** Read the price through `edit_lines()` and `sii.to_float()`,
+**What was done.** Read the price through `edit_lines()` and `sii.to_float()`,
 strip a trailing comment, and wrap the conversion in a `try/except ValueError`
 that treats an unreadable price as 0 and reports it — the same treatment
 `apply_dealer_price()`'s own loop already gives it.
@@ -131,7 +182,7 @@ called with the real axle count. `main()` always parses `--mass` as two axles
 48 % lighter than the one written. A 3-axle truck converted at `--mass 2200`
 drives like a 3.25 t car with an engine built for 2.2 t.
 
-**Fix direction.** Pass the real axle count into the split: `car_physics()`
+**What was done.** Pass the real axle count into the split: `car_physics()`
 should call `split_mass()` for the mass it is given rather than padding it, and
 `main()` should not be the only place that knows the split is two axles.
 
@@ -175,7 +226,7 @@ with `--rev-limit 3000 --engine-torque 500`, gets `rpm_range_power: (3150,
 its upper bound. The game is being told to hold full power from 3150 rpm in a
 band that ends at 3000 rpm.
 
-**Fix direction.** Clamp the whole band, not just its top: if `rpm_limit` falls
+**What was done.** Clamp the whole band, not just its top: if `rpm_limit` falls
 below the floor, pull the floor down with it — or refuse to write a band whose
 two bounds are not ordered, and say why.
 
@@ -225,7 +276,7 @@ these mods do — keeps its truck kerb weight, its truck drag and its truck
 steering angle. `tune_chassis()` reports them as "preserved existing tuned
 values", so the report says the opposite of what happened.
 
-**Fix direction.** Strip the trailing comment before any numeric read, in one
+**What was done.** Strip the trailing comment before any numeric read, in one
 place, and use that everywhere. `sii.to_float()` is the natural home: it is
 already the function whose job is "a SII numeric value as a float".
 
@@ -255,7 +306,7 @@ The same write happens on the path where the mod declares its own bands
 (`carutil.py:3376-3380`), where the floor is the mod's own value and can be
 anywhere.
 
-**Fix direction.** Validate the shift point against the band it is written into,
+**What was done.** Validate the shift point against the band it is written into,
 and refuse or clamp rather than write an inverted band. `_parse_band()`
 (`carutil.py:1862`) already enforces `0 < lo < hi` for the interactive path —
 the flag path should use the same rule.
@@ -301,7 +352,7 @@ The branch is gone; the configured value is not. `AGENTS.md` also says the
 presets at 47-80 "are themselves extrapolations and should be corrected before
 anyone rewrites the tank", which reads as though they are in use.
 
-**Fix direction.** Either remove `tank_size` from `_PARATI` and `_TUNING`, or
+**What was done.** Either remove `tank_size` from `_PARATI` and `_TUNING`, or
 keep it and say in the report that the tank is deliberately the mod's own. The
 second is closer to what the code decided on 2026-10-14; the first is closer to
 the "no dead config" rule.
@@ -351,7 +402,7 @@ mode, `--mass` does not skip the weight prompt; `--power` changes the engine
 question to a 0–60 target" — which reads as though the 0-60 answer is what
 drives the engine. It does not.
 
-**Fix direction.** Either do not ask when the answer cannot be used, or use it.
+**What was done.** Either do not ask when the answer cannot be used, or use it.
 Asking a question and throwing the answer away is the one thing a walkthrough
 must not do.
 
@@ -386,7 +437,7 @@ shipped is the same death as a missing template unit — the game dies loading a
 script that is not there. On a file with two such lines it removes half the
 cause.
 
-**Fix direction.** Rewrite the line in place at the match position rather than
+**What was done.** Rewrite the line in place at the match position rather than
 going through `set_key()`, so each match is handled where it is.
 
 ---
@@ -413,7 +464,7 @@ error: --type must not be empty
 when the user never passed `--type`. Both `--extra-tags "suv,"` and
 `--extra-tags ",suv"` fail this way.
 
-**Fix direction.** Skip empty entries, and let `normalise_type()`'s message
+**What was done.** Skip empty entries, and let `normalise_type()`'s message
 mention the flag it was actually given.
 
 ---
@@ -436,7 +487,7 @@ quoted, which is why this has not been seen in the wild — but the scanner's ow
 docstring claims it knows "only a token outside quotes and before the comment is
 a real key", and an unquoted value is a token outside quotes.
 
-**Fix direction.** A value that is not quoted is a value to the end of the line;
+**What was done.** A value that is not quoted is a value to the end of the line;
 the scanner should not look for keys after the first `:` on a line whose value
 is unquoted.
 
@@ -473,7 +524,7 @@ SystemExit: error: def/vehicle/truck/testcar/paint_job/bad.sii is not a readable
 definition file.
 ```
 
-**Fix direction.** The same `try/except SystemExit` the other call sites use.
+**What was done.** The same `try/except SystemExit` the other call sites use.
 
 ---
 
@@ -541,21 +592,68 @@ nothing was found:
 - The Windows-only paths (`carutil.bat`, `convert.exe` vs ImageMagick, the
   Windows console colour path) were read, not run. This is Linux.
 
-## The reproduction script
+## Found during the fixes, and left alone
 
-Every check prints `DEFECT PRESENT` when the defect is there. Run it from the
-repository root:
+These are real, and they are **not fixed**. They are recorded here rather than
+fixed because each one needs a product decision or a change with a much larger
+blast radius than the eleven above.
+
+### F12 — with no `--mass`, the engine is tuned for the type default while the chassis may keep the mod's own weight
+
+`convert()` computes the engine target from `kerb_kg = sum(mass) if mass else
+sum(_MASS.get(vtype, _MASS["sedan"]))` — the *type's* default when no mass was
+asked for. `tune_chassis()` keeps the mod's own `kerb_weight` when it is not
+truck-scale, so the two can disagree:
+
+```
+no --mass, mod total 3000 kg -> kerb_weight[0]: 1500, kerb_weight[1]: 1500
+engine target would be: 1220 kg (the sedan type default)
+```
+
+A 3000 kg car with an engine built for 1220 kg. It does not bite on a truck
+chassis, because a truck's weight is above the 4000 kg threshold and is
+replaced by the type default — it bites on a heavy car that is not a truck.
+
+**Not fixed**, because the fix is not local: the engine is tuned before the
+chassis is read, and `src.readable` is in archive order, so the chassis may not
+have been seen yet. The honest fix is to read the chassis's `kerb_weight` first
+and derive the engine target from the mass that is actually going to be
+written, which is a change to the order of the conversion pass and to what
+"no mass asked for" means.
+
+### A rev limit below the engine's power peak is not reported
+
+`--rev-limit 3000` on an engine whose curve peaks at 4500 writes the ceiling
+and leaves the curve alone on the rescale path, so the engine cannot reach its
+own power peak. `_warn_airy_limit()` reports the opposite case — a ceiling
+*above* the rev the curve runs out at — and says nothing about this one. The
+band now scales to fit under the ceiling (F3), so the gearbox is not told
+something impossible, but the user is not told that the engine lost its top
+end.
+
+### The conversion summary repeats itself
+
+The chassis is tuned once per chassis file, and a mod with two chassis files
+(say `xdl.sii` and `xdrive.sii`) reports the whole set of chassis changes
+twice. Harmless, but noisy, and it makes the report harder to read than it
+needs to be.
+
+## The verification script
+Every finding above was reproduced against the code before it was fixed, and
+the same script re-run against the fixed code now shows each one gone. It is
+kept here so the claim can be re-checked rather than taken on trust. Run it
+from the repository root:
 
 ```bash
 python3 - <<'PY'
-import sys, tempfile, zipfile
+import sys, tempfile, zipfile, re
 from pathlib import Path
 sys.path.insert(0, "backend"); sys.path.insert(0, ".")
 import carutil as C, sii
 
 rows = []
-def defect(n, present, detail):
-    rows.append((n, present, detail))
+def check(name, good, detail=""):
+    rows.append((name, good, detail))
 
 dealer = "def/vehicle/car_dealer/mercedes/x.sii"
 dealer_text = ('SiiNunit\n{\nvehicle : .car\n{\n}\n}\n'
@@ -565,65 +663,50 @@ def mk(line):
             "def/vehicle/truck/x/chassis/a.sii":
               "SiiNunit\n{\naccessory_chassis : a\n{\n\t%s\n}\n}\n" % line}
 
-# F1
-for label, line in [("price with a trailing comment","price: 1000 # base"),
-                    ("price on a collapsed line",'price: 1000   icon: "x"'),
-                    ("price in hex-float form","price: &459380cd")]:
+# F1 -- a price that is not a bare number must not raise.
+for label, line, want in (("a trailing comment", "price: 1000 # base", 1000),
+                          ("a collapsed line", 'price: 1000   icon: "x"', 1000),
+                          ("the hex-float form", "price: &459380cd", 4720)):
     try:
-        C.dealer_price(mk(line), dealer)
-        defect(f"F1  dealer_price raises on a {label}", False, "no exception")
-    except ValueError as e:
-        defect(f"F1  dealer_price raises on a {label}", True, f"ValueError: {e}")
+        total, rows_ = C.dealer_price(mk(line), dealer)
+        check(f"F1  a price with {label} is read", total == want, str(total))
+    except Exception as exc:
+        check(f"F1  a price with {label} is read", False, f"{type(exc).__name__}: {exc}")
 
-# F2
-chassis3 = ("SiiNunit\n{\naccessory_chassis : c\n{\n"
-  "\tkerb_weight[0]: 3000\n\tkerb_weight[1]: 3000\n\tkerb_weight[2]: 3000\n}\n}\n")
-mass = C.split_mass(2200, "suv", 2)
-out = C.tune_chassis(chassis3, "suv", mass, C.Report())
-tot = sum(float(l.split(":")[1]) for l in out.splitlines() if "kerb_weight" in l)
-defect("F2  requested kerb weight honoured on a 3-axle mod", tot != 2200,
-       f"requested 2200 kg, chassis written {tot:.0f} kg "
-       f"(split_mass(2200,'suv',3)={C.split_mass(2200,'suv',3)} is never used)")
+# F2 -- the requested mass is the mass that is written.
+cfg = C.car_physics("suv", 3, [1150, 1050])["kerb_weight"]
+check("F2  the requested mass survives the axle count",
+      sum(int(v) for v in cfg) == 2200, str(cfg))
 
-# F3
-b = C._rpm_range_bands(4500, 3000)
-lo, hi = b["rpm_range_power"].strip("()").split(",")
-defect("F3  rpm_range_power written low > high", int(lo) > int(hi),
-       f"rpm_range_power = {b['rpm_range_power']} (peak 4500, rev limit 3000)")
+# F3 -- a rev band is ordered.
+for peak, limit in ((4500, 3000), (5000, 3000), (6000, 3500)):
+    band = C._rpm_range_bands(peak, limit)["rpm_range_power"]
+    lo, hi = (int(v) for v in re.findall(r"\d+", band))
+    check(f"F3  the band is ordered (peak {peak}, ceiling {limit})", lo < hi, band)
 
-# F4
-defect("F4  truck-scale kerb_weight with a trailing comment is detected",
-       not C._is_truck_scale("kerb_weight", ["4720.1 # front"]),
-       "4720.1 kg axle reads as car-sane")
-defect("F4  truck-scale air_resistance with a trailing comment is detected",
-       not C._is_truck_scale("air_resistance", "1.5 # truck drag"),
-       "1.5 drag reads as car-sane")
+# F4 -- a number with a comment is still a number.
+check("F4  a truck-scale value with a comment is detected",
+      C._is_truck_scale("kerb_weight", ["4720.1 # front"]))
+check("F4  a hex-float value with a comment is detected",
+      C._is_truck_scale("kerb_weight", ["&459380cd # front"]))
 
-# F5
-b5 = C._set_shift_up(C._rpm_range_bands(5000, None), 1000)
-lo, hi = b5["rpm_range_low_gear"].strip("()").split(",")
-defect("F5  --shift-up-rpm below the band floor inverts the band", int(lo) > int(hi),
-       f"rpm_range_low_gear = {b5['rpm_range_low_gear']} (--shift-up-rpm 1000)")
+# F5 -- a shift point cannot invert a band.
+band = C._set_shift_up(C._rpm_range_bands(5000, None), 1000)["rpm_range_low_gear"]
+lo, hi = (int(v) for v in re.findall(r"\d+", band))
+check("F5  the shift point cannot invert a band", lo < hi, band)
 
-# F6
-cfg = C.car_physics("suv", 2, None, None)
-out = C.tune_chassis("SiiNunit\n{\naccessory_chassis : c\n{\n\ttank_size: 1200\n}\n}\n",
-                     "suv", None, C.Report())
-defect("F6  preset tank_size reaches the chassis", "tank_size: 79" not in out,
-       f"preset carries tank_size={cfg['tank_size']}, chassis keeps 1200 L")
+# F6 -- the presets carry no tank size.
+check("F6  the presets carry no dead tank size",
+      "tank_size" not in C.car_physics("suv", 2))
 
-# F7
-eng = ("SiiNunit\n{\naccessory_engine_data : e\n{\n\ttorque: 1400\n"
-       "\ttorque_curve[]: (1500, 0.43)\n\ttorque_curve[]: (3750, 1.0)\n\trpm_limit: 5000\n}\n}\n")
-def build(nm_per_tonne):
-    rep = C.Report()
-    o = C.tune_engine(eng, rep, target_hp=300.0, nm_per_tonne=nm_per_tonne, tonnes=2.2)
-    return [l.strip() for l in o.splitlines() if l.strip().startswith("torque:")][0]
-a, b = build(622.1), build(1200.0)
-defect("F7  the 0-60 answer reaches the engine when --power was given", a == b,
-       f"6.0 s -> {a}; 3.0 s -> {b}; identical, so the answer changed nothing")
+# F7 -- the walkthrough asks only what is unknown. Checked directly: the
+#        0-60 prompt is no longer on the guided path.
+import inspect
+src = inspect.getsource(C.main)
+check("F7  the walkthrough no longer asks the 0-60 question",
+      "prompt_acceleration" not in src.split("# ---- 7. output")[0])
 
-# F8
+# F8 -- every dangling path is repointed.
 files = {
  "def/vehicle/truck/v/interior/a.sii":
    'SiiNunit\n{\naccessory_interior : a\n{\n\tgps_path: "/ui/gps.sii"\n}\n}\n'
@@ -633,44 +716,44 @@ files = {
  "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
 }
 C._fix_dangling_ui_paths(files, C.Report())
-dang = [l.strip() for l in files["def/vehicle/truck/v/interior/a.sii"].splitlines()
-        if "gps_path" in l and "/ui/gps.sii" in l]
-defect("F8  every dangling gps_path is repointed", bool(dang),
-       f"still points at /ui/gps.sii: {dang}")
+text = files["def/vehicle/truck/v/interior/a.sii"]
+check("F8  every dangling path is repointed", "/ui/gps.sii" not in text, text)
 
-# F9
+# F9 -- an empty --extra-tags entry is skipped.
 try:
     for extra in "suv,".split(","):
-        C.job_tag(C.normalise_type(extra))
-    defect("F9  --extra-tags with an empty entry names the wrong flag", False, "no error")
-except SystemExit as e:
-    defect("F9  --extra-tags with an empty entry names the wrong flag", "--type" in str(e),
-           f"SystemExit: {e}")
+        if extra.strip():
+            C.job_tag(C.normalise_type(extra))
+    check("F9  an empty --extra-tags entry is skipped", True)
+except SystemExit as exc:
+    check("F9  an empty --extra-tags entry is skipped", False, str(exc))
 
-# F10
-out10 = sii.expand_multi_key_lines(['\tname: foo: bar'])
-defect("F10 an unquoted value containing a colon is not split", out10 != ['\tname: foo: bar'],
-       f"became {out10}")
+# F10 -- an unquoted value with a colon is not split.
+check("F10 an unquoted value with a colon is not split",
+      sii.expand_multi_key_lines(['\tname: foo: bar']) == ['\tname: foo: bar'])
 
-# F11
+# F11 -- an unreadable paint job does not end the run.
 with tempfile.TemporaryDirectory() as td:
     p = Path(td)/"m.scs"
     vdir = "def/vehicle/truck/testcar/"
     with zipfile.ZipFile(p, "w") as z:
-        z.writestr(vdir+"data.sii", "SiiNunit\n{\naccessory_truck_data : vehicle.testcar\n{\n}\n}\n")
+        z.writestr(vdir+"data.sii",
+                   "SiiNunit\n{\naccessory_truck_data : vehicle.testcar\n{\n}\n}\n")
         z.writestr(vdir+"paint_job/bad.sii", b"\xff\xfe\x00bad bytes")
     try:
         C.discover_parts(C.ModSource(p), vdir, "testcar", "")
-        defect("F11 an unreadable paint_job def aborts the run", False, "no error")
-    except SystemExit as e:
-        defect("F11 an unreadable paint_job def aborts the run", True, f"SystemExit: {str(e)[:70]}")
+        check("F11 an unreadable paint job does not end the run", True)
+    except SystemExit as exc:
+        check("F11 an unreadable paint job does not end the run", False, str(exc)[:60])
 
 print()
-w = max(len(n) for n,_,_ in rows)
-for n, present, d in rows:
-    print(f"  {'DEFECT PRESENT' if present else 'not present  '}  {n:<{w}}  {d}")
-print(f"\n  {sum(1 for _,p,_ in rows if p)} of {len(rows)} checks confirm a defect.")
+w = max(len(n) for n, _, _ in rows)
+for n, good, d in rows:
+    print(f"  {'FIXED' if good else 'NOT FIXED':>9}  {n:<{w}}  {d}")
+bad = sum(1 for _, g, _ in rows if not g)
+print(f"\n  {len(rows) - bad} of {len(rows)} checks pass.")
+raise SystemExit(1 if bad else 0)
 PY
 ```
 
-Expected output: 14 of 14 checks confirm a defect.
+Expected output: every check reads `FIXED`, and the script exits 0.

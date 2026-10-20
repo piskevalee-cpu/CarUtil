@@ -1008,10 +1008,18 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     if pj:
         # Prefer a stock colour. color0 is usually "Custom Color"
         # (stock: false), which is the wrong default for a delivered car.
-        stock = [
-            n for n in pj
-            if re.search(r"\bstock:\s*true\b", src.read_def(n))
-        ]
+        stock = []
+        for n in pj:
+            try:
+                text = src.read_def(n)
+            except SystemExit:
+                # A paint job we cannot decode is skipped, not fatal: every
+                # other read of a def in this file guards the same way, and
+                # one unreadable file must not end the conversion.
+                rep.gap(f"paint job {Path(n).name} could not be read")
+                continue
+            if re.search(r"\bstock:\s*true\b", text):
+                stock.append(n)
         add_accessory("paint_job", "paint", f"/{(stock or pj)[0]}", "paint")
     else:
         rep.gap("no paint_job part; colours will not be selectable")
@@ -1083,7 +1091,13 @@ def discover_parts(src: ModSource, vdir: str, slug: str, asset_root: str) -> tup
     generic_re = re.compile(
         r"^\s*[A-Za-z_][\w.]*\s*:\s*(camera\.\w+\.car)\s*$", re.M)
     for n in src.readable_defs():
-        for unit_name in set(generic_re.findall(src.read_def(n))):
+        try:
+            body = src.read_def(n)
+        except SystemExit:
+            # A def we cannot decode is skipped, not fatal. The conversion
+            # pass reads it again and says so there.
+            continue
+        for unit_name in set(generic_re.findall(body)):
             rep.warn(
                 f"{n} defines '{unit_name}', which the base game also owns. "
                 "The mod's copy will be rejected as a duplicate, leaving the "
@@ -1143,7 +1157,6 @@ _PARATI = {
     "suspension_class": "standard",
     "nominal_voltage": "12.0",
     "air_tank_pressure": "0.0",
-    "tank_size": "47",
 }
 
 # Real-world kerb masses, front/rear split, for scaling. Values are kg and come
@@ -1489,7 +1502,15 @@ def _rpm_range_bands(power_peak_rpm: int | None,
     power = (round(3500 * p / _RPM_RANGE_REFERENCE_RPM),
              round(6000 * p / _RPM_RANGE_REFERENCE_RPM))
     if rpm_limit and power[1] > rpm_limit:
-        power = (power[0], int(rpm_limit))
+        if power[0] < rpm_limit:
+            power = (power[0], int(rpm_limit))
+        else:
+            # The ceiling is below the band's floor, so clamping only the top
+            # would leave (3150, 3000) -- a band whose lower bound is above
+            # its upper bound, written into the engine. Scale the band down
+            # to fit under the ceiling instead, which keeps its shape.
+            scale = rpm_limit / power[1]
+            power = (max(1, int(power[0] * scale)), int(rpm_limit))
 
     return {
         "rpm_range_low_gear": band(1350, 1950),
@@ -1744,6 +1765,12 @@ def _fix_dangling_ui_templates(files: dict[str, str], rep: Report) -> None:
         )
 
 
+# The line a dashboard path is written on. Each occurrence is rewritten where
+# it stands, so a def carrying two of them has both fixed -- set_key() would
+# replace only the last.
+_UI_PATH_RE = re.compile(r'^(\s*)(gps_path|dashboard_path)(\s*:\s*)"([^"]*)"')
+
+
 def _fix_dangling_ui_paths(files: dict[str, str], rep: Report) -> None:
     """Repoint, or drop, a dashboard path that points at a file nobody ships.
 
@@ -1767,40 +1794,47 @@ def _fix_dangling_ui_paths(files: dict[str, str], rep: Report) -> None:
         if not name.startswith("def/vehicle/") or not name.endswith(".sii"):
             continue
         vehicle = _vehicle_dir_prefix(name)
-        for m in re.finditer(r'^\s*(gps_path|dashboard_path)\s*:\s*"([^"]+)"',
-                             text, re.M):
-            path = m.group(2).lstrip("/")
+        for line in edit_lines(text):
+            m = _UI_PATH_RE.match(line)
+            if not m:
+                continue
+            path = m.group(4).lstrip("/")
             if path in files:
-                used.setdefault((vehicle, m.group(1)), set()).add(path)
+                used.setdefault((vehicle, m.group(2)), set()).add(path)
 
     for name in list(files):
         if not name.startswith("def/vehicle/") or not name.endswith(".sii"):
             continue
         text = files[name]
         vehicle = _vehicle_dir_prefix(name)
-        broken = [m.group(2) for m in
-                  re.finditer(r'^\s*(gps_path|dashboard_path)\s*:\s*"([^"]+)"',
-                              text, re.M)
-                  if m.group(2).lstrip("/") not in files]
-        if not broken:
-            continue
         lines = edit_lines(text)
-        for m in re.finditer(r'^\s*(gps_path|dashboard_path)\s*:\s*"([^"]+)"',
-                             text, re.M):
-            key, old = m.group(1), m.group(2)
+        # Each occurrence is rewritten where it stands. set_key() replaces the
+        # LAST matching line, so a def with two gps_path lines -- two units in
+        # one file, which is legal SII -- had only the second one repointed and
+        # kept the dangling pointer this function exists to remove. And the
+        # drop below removed every occurrence of the key, including the ones
+        # that pointed at a file the mod does ship.
+        out: list[str] = []
+        for line in lines:
+            m = _UI_PATH_RE.match(line)
+            if not m:
+                out.append(line)
+                continue
+            key, old = m.group(2), m.group(4)
             if old.lstrip("/") in files:
+                out.append(line)
                 continue
             candidates = used.get((vehicle, key), set())
             if len(candidates) == 1:
                 new = next(iter(candidates))
-                lines = set_key(lines, key, f'"/{new}"')
+                out.append(
+                    f'{m.group(1)}{m.group(2)}{m.group(3)}"/{new}"')
                 rep.warn(
                     f"{name}: {key} pointed at {old}, which this mod does not "
                     f"ship; repointed it at /{new}, the file the vehicle's own "
                     f"other parts use"
                 )
             else:
-                lines = remove_keys(lines, {key})
                 rep.warn(
                     f"{name}: {key} pointed at {old}, which this mod does not "
                     f"ship, and the vehicle has no other one to use; the line "
@@ -1808,7 +1842,7 @@ def _fix_dangling_ui_paths(files: dict[str, str], rep: Report) -> None:
                     f"removed so the game does not die loading a script that is "
                     f"not there"
                 )
-        files[name] = "\n".join(lines) + "\n"
+        files[name] = "\n".join(out) + "\n"
 
 
 def _vehicle_dir_prefix(name: str) -> str:
@@ -2245,6 +2279,24 @@ def prompt_power(mass_kg: float,
             continue
         hp = value
 
+    return hp, prompt_peak_rpm(bounds)
+
+
+def prompt_peak_rpm(bounds: tuple[int, int] | None = None) -> int | None:
+    """Ask where the power should peak, and return that rev.
+
+    Split out of `prompt_power` because `--power` settles the horsepower and
+    not the peak: the walkthrough asks this on its own when the command line
+    already named the horsepower. Asking for a 0-60 time there instead
+    collected an answer the engine never saw -- the horsepower path is the one
+    that runs, and it ignores a torque target.
+
+    `bounds` is the engine's own (idle, limiter); the answer is held inside
+    it, and None falls back to the wide 1000-9000 rpm.
+    """
+    if not _tty():
+        return None
+
     lo, hi = bounds if bounds else (1000, 9000)
     _ui.heading("Where should that power peak?")
     if bounds:
@@ -2257,7 +2309,7 @@ def prompt_power(mass_kg: float,
         try:
             raw = input(_FIELD).strip()
         except (EOFError, KeyboardInterrupt):
-            return hp, None
+            return None
         if not raw:
             print(f"  -> enter a number, e.g. 4500 ({lo} to {hi})")
             continue
@@ -2269,7 +2321,7 @@ def prompt_power(mass_kg: float,
         if not (lo <= value <= hi):
             print(f"  -> between {lo} and {hi} rpm, this engine's own range")
             continue
-        return hp, value
+        return value
 
 
 def prompt_acceleration(mass_kg: float) -> float | None:
@@ -2280,6 +2332,15 @@ def prompt_acceleration(mass_kg: float) -> float | None:
     is. Asking for the time the user actually wants turns the engine target
     from a single fitted constant into a function of the two numbers that
     determine it.
+
+    This is the interactive form of `--acceleration`. The guided walkthrough
+    does not offer it, and that is deliberate: a 0-60 time and a peak
+    horsepower are two ways to target the SAME engine, only one of them can
+    be built, and the horsepower is the preferred one -- it rebuilds the curve
+    on SCS's shape and bounds the top end. The walkthrough asks for the
+    horsepower and for where it peaks, and when the command line already
+    named the horsepower it asks only for the peak. The 0-60 target is
+    available as `--acceleration`.
     """
     if not _tty():
         return None
@@ -2365,27 +2426,27 @@ def prompt_price() -> int | None:
 _TUNING = {
     "sedan":   {},
     "suv":     {"air_resistance": "0.55", "cog_height": "0.72", "sway_bar_stiffness": "0.4",
-                "max_steering_angle": "30", "tank_size": "79",
+                "max_steering_angle": "30",
                 "residual_travel": ["0.10", "0.11"],
                 "suspension_damping_factor": ["0.8", "0.6"],},
     "muscle":  {"air_resistance": "0.37", "cog_height": "0.56", "sway_bar_stiffness": "0.35",
-                "max_steering_angle": "28", "tank_size": "72",
+                "max_steering_angle": "28",
                 "residual_travel": ["0.11", "0.11"],
                 "suspension_damping_factor": ["0.7", "0.5"],},
     "sports":  {"air_resistance": "0.5", "cog_height": "0.52", "sway_bar_stiffness": "0.3",
-                "max_steering_angle": "31", "tank_size": "55",
+                "max_steering_angle": "31",
                 "residual_travel": ["0.093", "0.134"],
                 "suspension_damping_factor": ["0.7", "0.5"],},
     "pickup":  {"air_resistance": "0.596", "cog_height": "0.738", "sway_bar_stiffness": "0.4",
-                "max_steering_angle": "35", "tank_size": "80",
+                "max_steering_angle": "35",
                 "residual_travel": ["0.115", "0.127"],
                 "suspension_damping_factor": ["0.8", "0.6"],},
     "offroad": {"air_resistance": "0.55", "cog_height": "0.72", "sway_bar_stiffness": "0.4",
-                "max_steering_angle": "30", "tank_size": "75",
+                "max_steering_angle": "30",
                 "residual_travel": ["0.10", "0.11"],
                 "suspension_damping_factor": ["0.8", "0.6"],},
     "classic": {"air_resistance": "0.37", "cog_height": "0.56", "sway_bar_stiffness": "0.35",
-                "max_steering_angle": "28", "tank_size": "72",
+                "max_steering_angle": "28",
                 "residual_travel": ["0.11", "0.11"],
                 "suspension_damping_factor": ["0.7", "0.5"],},
 }
@@ -2414,16 +2475,40 @@ def dealer_listed_paths(dealer_text: str) -> list[str]:
     return re.findall(r'data_path:\s*"([^"]+)"', dealer_text)
 
 
-def dealer_price(files: dict, dealer_name: str) -> tuple[int, list[tuple[str, int]]]:
-    """Current dealer total, and the (file, price) breakdown behind it."""
+def dealer_price(files: dict, dealer_name: str,
+                 rep: Report | None = None) -> tuple[int, list[tuple[str, int]]]:
+    """Current dealer total, and the (file, price) breakdown behind it.
+
+    A price that cannot be read -- because the line carries a trailing
+    comment, because it shares a line with another key, or because it is
+    written in the hex-float form -- is reported and counted as zero, rather
+    than ending the run with a ValueError. The guard that used to be missing
+    here is the one `apply_dealer_price` has had all along, 35 lines below.
+
+    `rep` is optional so the function can still be called for its number
+    alone.
+    """
     text = files.get(dealer_name)
     if text is None:
         return 0, []
     rows: list[tuple[str, int]] = []
     for path in dealer_listed_paths(text):
         name = path.lstrip("/")
-        cur = get_key((files.get(name) or "").splitlines(), "price")
-        rows.append((name, int(float(cur)) if cur else 0))
+        body = files.get(name)
+        cur = get_key(edit_lines(body), "price") if body else None
+        if cur is None:
+            rows.append((name, 0))
+            continue
+        try:
+            rows.append((name, int(to_float(cur))))
+        except (TypeError, ValueError):
+            if rep is not None:
+                rep.warn(
+                    f"{name} declares a price this converter cannot read "
+                    f"({cur!r}); it is counted as $0, so the dealer total is "
+                    "understated and the rescale will not be exact"
+                )
+            rows.append((name, 0))
     return sum(p for _, p in rows), rows
 
 
@@ -2446,7 +2531,7 @@ def apply_dealer_price(
     Rounding drift is put on the largest LISTED line, so the dealer total is
     exactly what was asked for.
     """
-    total, rows = dealer_price(files, dealer_name)
+    total, rows = dealer_price(files, dealer_name, rep)
     if target is None:
         rep.action(f"car dealer price: ${total:,} (the mod's own part prices)")
         return total
@@ -2463,8 +2548,8 @@ def apply_dealer_price(
         if cur is None:
             continue
         try:
-            val = int(float(cur))
-        except ValueError:
+            val = int(to_float(cur))
+        except (TypeError, ValueError):
             continue
         if val > 0:
             every[name] = val
@@ -2520,8 +2605,6 @@ def car_physics(
     cfg.update(_TUNING.get(vtype, {}))
     if overrides:
         cfg.update(overrides)
-    kg = mass or _MASS.get(vtype, _MASS["sedan"])
-    cfg["kerb_weight"] = [str(v) for v in kg]
 
     # Extend or trim per-axle arrays to match the vehicle's real axle count.
     # Getting this wrong is the phantom-axle bug described in the HOTFIX notes.
@@ -2541,12 +2624,36 @@ def car_physics(
     ):
         fit(key, default)
 
-    # Mass array scales with axle count too; extra axles get the rear figure.
-    kg = [int(x) for x in cfg["kerb_weight"]]
-    while len(kg) < axles:
-        kg.append(kg[-1] if kg else 0)
-    cfg["kerb_weight"] = [str(v) for v in kg[:axles]]
+    # The mass spreads across the axles too, and the total must not change:
+    # the engine is tuned from the mass that was asked for, so a chassis
+    # written heavier than that is a car with the wrong engine.
+    kg = [int(x) for x in (mass or _MASS.get(vtype, _MASS["sedan"]))]
+    cfg["kerb_weight"] = [str(v) for v in _spread_over_axles(kg, axles)]
     return cfg
+
+
+def _spread_over_axles(kg: list[int], axles: int) -> list[int]:
+    """Spread a weight over `axles` axles without changing its total.
+
+    The extra axles share the REAR group, so a front/rear split the author
+    asked for survives. Copying the rear figure onto each extra axle instead
+    -- which is what this used to do -- makes the car heavier than the weight
+    that was requested: 1150 + 1050 became 1150 + 1050 + 1050 on a 3-axle mod,
+    3250 kg for a 2200 kg request, with the engine tuned for the 2200.
+
+    The total is preserved exactly, so the mass the engine is built against and
+    the mass written to the chassis are the same number.
+    """
+    total = sum(kg)
+    if axles <= 1:
+        return [total]
+    front = kg[0]
+    rear = total - front
+    extra = axles - 2
+    if extra <= 0:
+        return [front, rear]
+    rear_each = rear // (extra + 1)
+    return [front] + [rear_each] * extra + [rear - rear_each * extra]
 
 
 def _is_truck_scale(key: str, current: str | list[str] | None) -> bool:
@@ -2821,6 +2928,11 @@ def tune_chassis(
     # consumption untouched -- makes the complaint worse rather than better.
     # Calibrating both against SCS's own cars needs dlc_rt_ford.scs; see
     # FINDINGS.md 18.
+    #
+    # The presets carried a tank_size for years as well, and no loop ever
+    # wrote it: a configured key that is not a written key is dead code that
+    # reads like a working rule. The value is gone from _PARATI and _TUNING
+    # too, so nothing advertises a tank size the converter does not apply.
     for key in ("air_resistance", "cog_height", "sway_bar_stiffness",
                 "max_steering_angle", "suspension_class", "nominal_voltage",
                 "air_tank_pressure"):
@@ -3327,12 +3439,37 @@ def _set_shift_up(bands: dict[str, str], shift_up_rpm: int) -> dict[str, str]:
     Only the upper bound is the shift point; the lower one is where the gearbox
     will drop back down to. Moving both would change how the box hunts between
     gears, which is a different question from when it changes up.
+
+    A shift point at or below the floor would leave the band inverted --
+    (1350, 1000) -- and a band whose lower bound is above its upper bound is
+    not a band the gearbox can use. The point is raised to just above the
+    floor, and the caller says so, because a shift point the user named and
+    did not get is worth saying out loud.
     """
     out = dict(bands)
     for key in ("rpm_range_low_gear", "rpm_range_high_gear"):
         lo = int(re.findall(r"\d+", out[key])[0])
-        out[key] = f"({lo}, {shift_up_rpm})"
+        out[key] = f"({lo}, {max(shift_up_rpm, lo + 1)})"
     return out
+
+
+def _report_shift(rep: Report, bands: dict[str, str],
+                  shift_up_rpm: int) -> int:
+    """Say where the automatic will change up, and if the point was raised.
+
+    Returns the point that was actually applied, which is not always the one
+    that was asked for.
+    """
+    band = bands.get("rpm_range_high_gear")
+    applied = int(re.findall(r"\d+", band)[1]) if band else shift_up_rpm
+    if applied != shift_up_rpm:
+        rep.warn(
+            f"--shift-up-rpm {shift_up_rpm} is at or below the rev band this "
+            f"engine shifts in, so the change-up point was raised to "
+            f"{applied} rpm. A band whose lower bound is above its upper one "
+            "is not a band the gearbox can use"
+        )
+    return applied
 
 
 def _ensure_rpm_ranges(text: str, rep: Report,
@@ -3373,13 +3510,15 @@ def _ensure_rpm_ranges(text: str, rep: Report,
         # do with changing up at all.
         if shift_up_rpm is None:
             return text
-        for key in ("rpm_range_low_gear", "rpm_range_high_gear"):
-            cur = get_key(lines, key)
-            if cur:
-                lo = int(re.findall(r"\d+", cur)[0])
-                lines = set_key(lines, key, f"({lo}, {shift_up_rpm})")
+        current = {k: get_key(lines, k)
+                   for k in ("rpm_range_low_gear", "rpm_range_high_gear")}
+        current = {k: v for k, v in current.items() if v}
+        shifted = _set_shift_up(current, shift_up_rpm)
+        for key, value in shifted.items():
+            lines = set_key(lines, key, value)
+        applied = _report_shift(rep, shifted, shift_up_rpm)
         rep.action(
-            f"automatic changes up at {shift_up_rpm} rpm, on request: the "
+            f"automatic changes up at {applied} rpm, on request: the "
             f"mod's own bands are kept otherwise, only their upper bound moved"
         )
         return "\n".join(lines) + "\n"
@@ -3394,8 +3533,9 @@ def _ensure_rpm_ranges(text: str, rep: Report,
     bands = _rpm_range_bands(peak, limit)
     if shift_up_rpm is not None:
         bands = _set_shift_up(bands, shift_up_rpm)
+        applied = _report_shift(rep, bands, shift_up_rpm)
         rep.action(
-            f"automatic changes up at {shift_up_rpm} rpm, on request: the "
+            f"automatic changes up at {applied} rpm, on request: the "
             f"default lands near {bands['rpm_range_high_gear']} and SCS's own "
             f"cars measure 0.49x to 0.96x of their peak torque, so which end "
             f"of that range you want is a taste question, not a measurement"
@@ -5014,9 +5154,16 @@ def main(argv: list[str] | None = None) -> int:
         tags = [job_tag(args.vtype)]
         if args.extra_tags:
             for extra in args.extra_tags.split(","):
-                extra = job_tag(normalise_type(extra))
-                if extra not in tags:
-                    tags.append(extra)
+                extra = extra.strip()
+                if not extra:
+                    # A trailing or leading comma is a typo, not a tag. It
+                    # used to reach normalise_type(""), which refused with
+                    # "error: --type must not be empty" -- an error about a
+                    # flag the user never passed.
+                    continue
+                tag = job_tag(normalise_type(extra))
+                if tag not in tags:
+                    tags.append(tag)
         unknown = [t for t in tags if t not in CAR_JOB_TYPES]
         if unknown:
             print("  " + _ui.paint(
@@ -5105,9 +5252,14 @@ def main(argv: list[str] | None = None) -> int:
             if power is None and wanted is None:
                 _ui.step(5, total, "Set the power")
                 power, peak_rpm = prompt_power(kerb, engine_rev_bounds(src))
-            elif wanted is None:
-                _ui.step(5, total, "Set the acceleration")
-                wanted = prompt_acceleration(kerb)
+            elif wanted is None and peak_rpm is None:
+                # --power settled the horsepower. Where it peaks is the one
+                # part of the engine target --power does not answer, so this
+                # asks for it. It used to ask for a 0-60 time here, which
+                # collected an answer the engine never saw: the horsepower
+                # path is the one that runs, and it ignores a torque target.
+                _ui.step(5, total, "Set the power peak")
+                peak_rpm = prompt_peak_rpm(engine_rev_bounds(src))
             if args.price is None:
                 _ui.step(6, total, "Set the price")
                 price = prompt_price()

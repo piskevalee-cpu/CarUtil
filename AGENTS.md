@@ -287,7 +287,8 @@ prompt not running.
 **Flags do not remove the guided prompts.** On a terminal the prompts are
 mandatory: step 4 always asks for the weight and its answer replaces whatever
 `--mass` was parsed to, and step 5 runs unless `--acceleration` was given
-(`--power` alone switches the step-5 prompt from power to acceleration).
+(`--power` settles the horsepower, so step 5 asks only for the rev the power
+should peak at).
 `--price` and `--acceleration` are the only flags that suppress their own
 prompt.
 The "skips steps 4–6" claim that used to sit in `FINDINGS.md` §31, in
@@ -297,17 +298,23 @@ so the claim outlived the behaviour by a long way. Re-read those three places
 whenever the prompt order changes.
 
 **A prompt whose answer is then discarded is a lie — do not ask it.** The step-5
-branch is the case to watch: with `--power` on the command line the walkthrough
-asks for a 0-60 target, turns the answer into an Nm/t and passes it to
-`convert()`, and `tune_engine()` then returns from the `target_hp` branch
-before that Nm/t is ever used. Two different 0-60 answers produce byte-identical
-engines. The comment above the branch claims 0-60 is "only offered when neither
-a `--power` nor a `--acceleration` was given", and the code does not match it;
-`README.md` says `--power` "changes the engine question to a 0-60 target", which
-reads as though the answer drives the engine. It does not. Either do not ask,
-or use the answer — and when a prompt is added or removed, check that the prose
-in `README.md`, in the comment above the branch, and in the branch itself all
-still say the same thing.
+branch is the case to watch, and it was the case for a long time: with `--power`
+on the command line the walkthrough asked for a 0-60 target, turned the answer
+into an Nm/t and passed it to `convert()`, and `tune_engine()` then returned
+from the `target_hp` branch before that Nm/t was ever used. Two different 0-60
+answers produced byte-identical engines. A 0-60 time and a peak horsepower are
+two ways to target the **same** engine, only one of them can be built, and the
+horsepower is the preferred one — it rebuilds the curve on SCS's shape and
+bounds the top end. So the walkthrough asks for the horsepower and for where it
+peaks; when the command line already named the horsepower it asks only for the
+peak, which is the one part of the engine target `--power` does not answer.
+`prompt_peak_rpm()` is that question, split out of `prompt_power()` so it can
+be asked on its own. `prompt_acceleration()` stays as the interactive twin of
+`--acceleration`, which is now the only way to ask for a 0-60 target.
+
+When a prompt is added or removed, check that the prose in `README.md`, in the
+comment above the branch, and in the branch itself all still say the same
+thing.
 
 **Every prompt is the same shape, and every prompt demands a real value.** The
 walkthrough is one shape end to end: a numbered step, a blank line, the question
@@ -491,14 +498,15 @@ adding a band, write the whole band or none of it.
 
 **The mass written to the chassis and the mass the engine is tuned to must be
 the same number, split across the real axle count.** The engine target is
-computed from `sum(mass)` in `convert()`, so the two drift apart the moment
-the chassis is written with a different total. The trap is the extra axle:
-padding the mass array with a copy of the rear figure makes a 3-axle mod
-**heavier** than the one that was asked for — `--mass 2200` writes 1150, 1050
-and 1050, which is 3250 kg — and the engine is then tuned for 2200 kg.
-`split_mass()` already splits a total across N axles without creating or
-losing any (`split_mass(2200, "suv", 3)` gives `[1150, 525, 525]`); it is the
-function to use, and the axle count it is given has to be the mod's real one.
+computed from `sum(mass)` in `convert()`, so the two drift apart the moment the
+chassis is written with a different total. The trap is the extra axle: padding
+the mass array with a copy of the rear figure makes a 3-axle mod **heavier**
+than the one that was asked for — `--mass 2200` wrote 1150, 1050 and 1050, which
+is 3250 kg, and the engine was tuned for the 2200. The extra axles now share
+the rear group instead, so the total is preserved exactly:
+`_spread_over_axles()` does it, and the front figure the author asked for
+survives. `split_mass()` splits a total across N axles the same way; either
+one is fine, as long as the axle count it is given is the mod's real one.
 
 **Car price is not a key in ATS.** The dealer sums the `price:` of every
 accessory its `data_path` lists; SCS's own four Road Trip dealer units declare
@@ -845,15 +853,16 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   preset *and* a branch in `_is_truck_scale`, and no loop ever wrote it — a
   converted car kept its 240–1200 L truck tank for the life of the project.
   When you add a preset key, add it to one of the two loops in `tune_chassis`
-  and add a test that reads it back out of a converted chassis. **This one is
-  still half-done: the branch is gone, the configured value is not.**
-  `_PARATI` and every entry of `_TUNING` still carry a `tank_size` of 47–80 L
-  that no loop writes, so the mod's own tank survives and the presets advertise
-  a figure that is never applied. It was wired in on 2026-10-14 (`0bd3cce`) and
-  reverted the same day (`4403c5a`) because a smaller tank at the truck's
-  untouched consumption rate is a shorter range — the revert was right, but it
-  left the configuration behind. Either remove the configured value or keep it
-  and say in the report that the tank is deliberately the mod's own.
+  and add a test that reads it back out of a converted chassis. **This one was
+  half-done for years: the branch was removed and the configured value was
+  left behind**, so the presets advertised a 47–80 L tank that no loop ever
+  applied. It was wired in on 2026-10-14 (`0bd3cce`) and reverted the same day
+  (`4403c5a`) because a smaller tank at the truck's untouched consumption rate is
+  a shorter range — the revert was right, but it left the configuration behind.
+  The configured value is now gone from `_PARATI` and `_TUNING`, so nothing
+  advertises a tank size the converter does not apply. The tank stays the mod's
+  own; the presets are not the place to correct it, and a future tank rewrite
+  has to move capacity and consumption together.
 - **…and a half-fix is worse than no fix.** `tank_size` was then wired in, and
   that made fuel range *worse*: a mod's 291 L tank became 79 L while its fuel
   consumption — which nothing here touched — stayed at the truck's rate. A
@@ -873,9 +882,11 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   removing puts the car on the same footing as the Mustang. **It still needs an
   in-game range check** — moving toward the reference is not the same as
   calibrated. `tank_size` stays the mod's own; SCS's four cars measure 61–98 L
-  (Mustang 61, Victoria 72, Bronco 79, F-150 98), and the 47–80 L the presets
-  carry are themselves extrapolations that no loop writes — so they should be
-  corrected, or removed, before anyone rewrites the tank.
+  (Mustang 61, Victoria 72, Bronco 79, F-150 98). The presets carried a
+  47–80 L figure that no loop ever wrote, and that dead configuration has been
+  removed — so a future tank rewrite starts from nothing rather than from a
+  number the converter was never applying, and it has to move capacity and
+  consumption together when it does.
 - **HashFS content extraction works, and is how the 657 units were read.** No
   reader, no CityHash: scan the archive for zlib streams, decompress, and match
   on content (`SiiNunit`, or any distinctive key). Enough to answer questions

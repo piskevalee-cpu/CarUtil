@@ -54,12 +54,13 @@ CarUtil.
 
 It asks for the mod, vehicle type, brand, weight, engine target and price, then
 writes the converted archive next to the input. In guided mode, `--mass` does
-not skip the weight prompt; `--power` changes the engine question to a 0–60
-target. `--acceleration` and `--price` skip their respective prompts. The engine
-keeps the mod's own rev limit, as SCS's own cars keep theirs; the one rev
-question is where the power peak goes, and the answer is held between that
-engine's idle and its own limiter. `--rev-limit` is the only way to change the
-ceiling. To avoid all prompts, pass `--no-prompt` and provide the input, `--type`
+not skip the weight prompt; `--power` settles the horsepower, so the walkthrough
+asks only for the rev the power should peak at. `--acceleration` and `--price`
+skip their respective prompts. The engine keeps the mod's own rev limit, as SCS's
+own cars keep theirs; the one rev question is where the power peak goes, and the
+answer is held between that engine's idle and its own limiter. `--rev-limit` is
+the only way to change the ceiling. To avoid all prompts, pass `--no-prompt` and
+provide the input, `--type`
 and `--brand`:
 
 ```bash
