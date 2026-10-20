@@ -5950,7 +5950,7 @@ def test_carutil_is_the_entry_point() -> None:
         f.name for f in HERE.iterdir()
         if f.is_file() and f.suffix in (".py", ".md") and "carutil" not in f.name
         and f.name not in ("test_converter.py", "README.md", "AGENTS.md",
-                           "FINDINGS.md", ".gitignore")
+                           "FINDINGS.md", "fix.md", ".gitignore")
     ]
     check("no unexpected new top-level modules", not leftovers, str(leftovers))
 

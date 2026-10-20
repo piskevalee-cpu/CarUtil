@@ -12,14 +12,14 @@ ImageMagick is optional and is used only to convert brand logo images.
 
 | File | Role |
 |---|---|
-| `carutil.py` | The converter and CLI, and the entry point. Everything of substance lives here (~4700 lines). |
+| `carutil.py` | The converter and CLI, and the entry point. Everything of substance lives here (~5200 lines). |
 | `backend/` | The five helper modules. **It is a `sys.path` entry, not a package** — no `__init__.py`, and every import stays flat (`import brands as _brands`), so a module is still testable on its own with a one-line import. `carutil.py` and the suite each insert it themselves; a new top-level module has to be added to both. |
 | `backend/sii.py` | Parsing/editing helpers for SCS's `.sii` data format. |
 | `backend/hashfs.py` | Reader for SCS's own `SCS#` container (HashFS v1). See below. |
 | `backend/brands.py` | 23 brands (22 named plus the `other` catch-all) and the mapping to each logo file. |
 | `backend/logo.py` | Image → 256×64 DDS conversion. Uses ImageMagick. |
 | `backend/ui.py` | Banner, colour, Rich output, Questionary menus, and basic fallbacks. |
-| `test_converter.py` | The suite (~5600 lines). Run it before every commit. It resolves the shipped modules' source through its own `SOURCE` table, because they are no longer all in one directory. |
+| `test_converter.py` | The suite (~6300 lines). Run it before every commit. It resolves the shipped modules' source through its own `SOURCE` table, because they are no longer all in one directory. |
 | `FINDINGS.md` | Research log, §1–§42. **Early sections were wrong; see Corrections.** |
 | `logos/` | 23 brand images, **at the root beside the entry point, not inside `backend/`** — that is where a user is told to drop a replacement, so `brands.py` reaches up with `parent.parent` for it. **10 of them are not PNGs** — 6 WebP and 4 SVG wear a `.png` extension, which is why `brands.logo_path()` probes several extensions. |
 
@@ -105,8 +105,8 @@ before you touch it.
   `build_brand_logo`'s sanitising. Note the places a count is written out by
   hand: the `>= 16` floor (in **two** tests, `test_brand_selection` and
   `test_every_brand_gets_its_own_vendor`), the `logos/` row above, and the
-  "All N brands" line in `README.md`. They are deliberately not asserted
-  against each other, so adding a brand means updating them all.
+  "There are N listed brands" line in `README.md`. They are deliberately not
+  asserted against each other, so adding a brand means updating them all.
 - Editing `_MASS` or `TYPE_HELP` fails `test_readme_category_table_matches_code`,
   which requires the README row `` | `type` | help | N kg | `` to match exactly.
 - The banner is asserted against `README.md`, as are the spellings `veteran`
@@ -296,6 +296,19 @@ The "skips steps 4–6" claim that used to sit in `FINDINGS.md` §31, in
 so the claim outlived the behaviour by a long way. Re-read those three places
 whenever the prompt order changes.
 
+**A prompt whose answer is then discarded is a lie — do not ask it.** The step-5
+branch is the case to watch: with `--power` on the command line the walkthrough
+asks for a 0-60 target, turns the answer into an Nm/t and passes it to
+`convert()`, and `tune_engine()` then returns from the `target_hp` branch
+before that Nm/t is ever used. Two different 0-60 answers produce byte-identical
+engines. The comment above the branch claims 0-60 is "only offered when neither
+a `--power` nor a `--acceleration` was given", and the code does not match it;
+`README.md` says `--power` "changes the engine question to a 0-60 target", which
+reads as though the answer drives the engine. It does not. Either do not ask,
+or use the answer — and when a prompt is added or removed, check that the prose
+in `README.md`, in the comment above the branch, and in the branch itself all
+still say the same thing.
+
 **Every prompt is the same shape, and every prompt demands a real value.** The
 walkthrough is one shape end to end: a numbered step, a blank line, the question
 as an accent `Rule` (`_ui.heading`), one dim hint (`_ui.hint`), and the answer.
@@ -435,6 +448,20 @@ SII also writes some scalars in **hex-float form** — `kerb_weight[0]:
 `float()` raises, and any caller wrapping that in `except ValueError` will
 judge the value harmless and preserve a truck's worth of mass.
 
+**A value read back carries its trailing comment, so strip it before you
+compare it.** `get_key()` and `get_all_indexed()` return the value *as
+written*: `get_key(lines, "air_resistance")` on `air_resistance: 1.5 # truck
+drag` gives `"1.5 # truck drag"`. Hand that to `to_float()` and it raises, and
+`except (TypeError, ValueError)` turns the raise into "this value is fine" —
+so `_is_truck_scale()` judges a truck-scale value car-sane and the whole
+9.4 t chassis is preserved as though it were a car. This is the **same bug**
+the hex-float note above describes, on the same line, and the hex-float half
+is the only half that was fixed. Strip the comment in one place — `sii.to_float()`
+is the natural home — and use that everywhere. Two symptoms to watch for: a
+value the report calls "preserved existing tuned values" that was actually
+truck-scale, and a `float()` that raises somewhere with a bare `except
+ValueError` around it.
+
 ## Non-obvious constraints
 
 **A converted car cannot have a realistic engine *and* SCS's drag.** SCS ships
@@ -451,6 +478,27 @@ at those values. `--air-resistance` exists because of this.
 2.35:1`, so the engine is in the same 1500-4000 rpm band at 120 mph that it
 uses for 0-60. Any attempt to slow 60-120 with `--peak-power-rpm` will fail and
 will look like a bug in the curve shape. Only drag separates the two phases.
+
+**A rev band is always ordered low < high, and a clamp that only touches one
+end can invert it.** `rpm_range_power` is built as `(0.70 x peak, 1.20 x
+peak)`, so clamping only its *top* to `rpm_limit` produces `(3150, 3000)` the
+moment the ceiling falls below `0.70 x peak` — a band whose lower bound is
+above its upper bound, written into the engine. The same is true of
+`--shift-up-rpm`, which writes `(floor, shift_up_rpm)` with no check that the
+shift point is above the floor. `_parse_band()` already enforces `0 < lo < hi`
+for the interactive path; the flag and clamp paths need the same rule. When
+adding a band, write the whole band or none of it.
+
+**The mass written to the chassis and the mass the engine is tuned to must be
+the same number, split across the real axle count.** The engine target is
+computed from `sum(mass)` in `convert()`, so the two drift apart the moment
+the chassis is written with a different total. The trap is the extra axle:
+padding the mass array with a copy of the rear figure makes a 3-axle mod
+**heavier** than the one that was asked for — `--mass 2200` writes 1150, 1050
+and 1050, which is 3250 kg — and the engine is then tuned for 2200 kg.
+`split_mass()` already splits a total across N axles without creating or
+losing any (`split_mass(2200, "suv", 3)` gives `[1150, 525, 525]`); it is the
+function to use, and the axle count it is given has to be the mod's real one.
 
 **Car price is not a key in ATS.** The dealer sums the `price:` of every
 accessory its `data_path` lists; SCS's own four Road Trip dealer units declare
@@ -688,7 +736,10 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   curve (argmax of `rpm * f`), never from `rpm_limit`, because a high limiter
   with an early peak is not a peak-at-the-limit engine; and clamp the power
   band's top to `rpm_limit`, or 1.20x a 6000 rpm peak asks for power at 7200.
-  Our shape peaks **torque** at 0.75x the power peak. `FINDINGS.md` §38.
+  **Clamp the whole band, though, not just its top** — the floor is 0.70x the
+  peak, so a ceiling below that leaves `(3150, 3000)`, a band whose lower bound
+  is above its upper bound. Our shape peaks **torque** at 0.75x the power peak.
+  `FINDINGS.md` §38.
 - **`rpm_range_*` is the whole bug, and absence is the signal.** Neither CTS
   engine declares `rpm_range_low_gear` / `_high_gear` / `_power`; it is the
   only mod measured that does not, and without them the automatic has no rev
@@ -794,7 +845,15 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   preset *and* a branch in `_is_truck_scale`, and no loop ever wrote it — a
   converted car kept its 240–1200 L truck tank for the life of the project.
   When you add a preset key, add it to one of the two loops in `tune_chassis`
-  and add a test that reads it back out of a converted chassis.
+  and add a test that reads it back out of a converted chassis. **This one is
+  still half-done: the branch is gone, the configured value is not.**
+  `_PARATI` and every entry of `_TUNING` still carry a `tank_size` of 47–80 L
+  that no loop writes, so the mod's own tank survives and the presets advertise
+  a figure that is never applied. It was wired in on 2026-10-14 (`0bd3cce`) and
+  reverted the same day (`4403c5a`) because a smaller tank at the truck's
+  untouched consumption rate is a shorter range — the revert was right, but it
+  left the configuration behind. Either remove the configured value or keep it
+  and say in the report that the tank is deliberately the mod's own.
 - **…and a half-fix is worse than no fix.** `tank_size` was then wired in, and
   that made fuel range *worse*: a mod's 291 L tank became 79 L while its fuel
   consumption — which nothing here touched — stayed at the truck's rate. A
@@ -814,9 +873,9 @@ them, and don't treat `FINDINGS.md` §1–§15 as authoritative.
   removing puts the car on the same footing as the Mustang. **It still needs an
   in-game range check** — moving toward the reference is not the same as
   calibrated. `tank_size` stays the mod's own; SCS's four cars measure 61–98 L
-  (Mustang 61, Victoria 72, Bronco 79, F-150 98), so the presets at 47–80 are
-  themselves extrapolations and should be corrected before anyone rewrites the
-  tank.
+  (Mustang 61, Victoria 72, Bronco 79, F-150 98), and the 47–80 L the presets
+  carry are themselves extrapolations that no loop writes — so they should be
+  corrected, or removed, before anyone rewrites the tank.
 - **HashFS content extraction works, and is how the 657 units were read.** No
   reader, no CityHash: scan the archive for zlib streams, decompress, and match
   on content (`SiiNunit`, or any distinctive key). Enough to answer questions
