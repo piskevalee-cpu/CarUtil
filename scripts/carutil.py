@@ -1297,6 +1297,13 @@ def _ask(prompt: str) -> str:
 # the unit and the sensible range are stated in the hint instead.
 _FIELD = "  "
 
+# The source prompt is the one field that carries a label. It is asking the
+# user to point at a file, and "drop a mod here" says more than a bare field
+# can: it names what to drop, and the arrow says where to type it. The hint
+# the other prompts use is folded into the label, so the step still says
+# everything once.
+_SOURCE_FIELD = "drop a mod (.scs) or unpacked folder here -> "
+
 
 def _confirm(prompt: str) -> bool:
     """Ask a yes/no question; an empty answer accepts the default yes."""
@@ -1310,11 +1317,17 @@ def _confirm(prompt: str) -> bool:
 
 
 def prompt_source() -> Path:
-    """Ask where the mod is."""
+    """Ask where the mod is.
+
+    The one typed field in the walkthrough that carries a label. The user is
+    being asked to point at a file, and "drop a mod here" says what to do in
+    a way a bare field cannot; the arrow says where to type it. The hint the
+    other prompts use is folded into that label, so the step still says
+    everything once.
+    """
     _ui.heading("Where is your mod?")
-    _ui.hint("a .scs archive, or an unpacked mod folder")
     while True:
-        raw = _ask(_FIELD).strip('"').strip("'").strip()
+        raw = _ask(_SOURCE_FIELD).strip('"').strip("'").strip()
         if raw.lower() in ("q", "quit", "exit"):
             raise SystemExit("cancelled")
         if not raw:

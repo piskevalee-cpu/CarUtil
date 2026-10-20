@@ -3121,14 +3121,18 @@ def test_prompts_look_like_the_menus() -> None:
         finally:
             sys.stdout = real_stdout
         check("source: asks its question as a heading",
-              [kind for kind, _ in seen] == ["heading", "hint"], str(seen))
-        check("source: the field itself carries no label",
-              "".join(prompts).strip() == "", repr(prompts))
+              [kind for kind, _ in seen] == ["heading"], str(seen))
+        # The source prompt is the ONE field that carries a label: it asks the
+        # user to point at a file, and "drop a mod here" says more than a bare
+        # field can. Every other typed field stays bare.
+        check("source: the field says what to drop and where to type it",
+              prompts == ["drop a mod (.scs) or unpacked folder here -> "],
+              repr(prompts))
         check("source: no paragraph above the field",
               "\n    " not in source_text, repr(source_text))
 
         # A label is the one thing the shape forbids, so hold the rule itself.
-        check("the bare field is what the prompts pass to input()",
+        check("the bare field is what the other prompts pass to input()",
               C._FIELD.strip() == "" and C._FIELD.isascii(), repr(C._FIELD))
     finally:
         C._tty = real_tty

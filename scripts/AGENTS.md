@@ -331,6 +331,14 @@ typed prompts used to print a four-line paragraph each. That is also why
 before `heading()`: the heading owns the spacing, so every question sits exactly
 one blank line below its step.
 
+**The source prompt is the one field that carries a label**, and it is an
+exception rather than a slip. `prompt_source()` asks the user to point at a
+file, and `drop a mod (.scs) or unpacked folder here ->` says more than a bare
+field can: it names what to drop, and the arrow says where to type it. Its hint
+is folded into that label, so the step still says everything once. Every other
+typed field stays bare, and `test_prompts_look_like_the_menus` holds the rule
+for both halves.
+
 Empty input is an omission, not a request for the default: it re-asks with the
 same message used for a bad value. There are deliberately **no bracketed
 suggestions** in the prompt labels and no "Press Enter for N" lines — the user
