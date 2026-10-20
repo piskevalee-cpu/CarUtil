@@ -2344,3 +2344,149 @@ The fix was not a better method. It was that once the user started reporting a
 number, each change became falsifiable. `game.log.txt` turned out to be readable
 from the start and was only opened after three guesses had already been made and
 two of them committed.
+
+## 41. The G63 killed the game, and the game told us why
+
+A converted Mercedes-Benz G63 (W463 2022) crashed American Truck Simulator. The
+converted mod was in the mod folder, the game had every archive mounted, and the
+log ended like this:
+
+```
+00:03:08.584 : <ERROR> The unit '_nameless.80a1.e318' of type 'ui::text_common'
+                has dangling pointer (to 'txt.daf_2021.gpstime') in the attribute
+                named 'look_template'.
+00:03:08.585 : <ERROR> load_unit_tree() - Failed to load unit tree from file
+                (/ui/dashboard/w463_g63_gps.sii)
+00:03:08.585 : <ERROR> Failed to load ui script '/ui/dashboard/w463_g63_gps.sii'
+```
+
+### It is the mod's own dashboard, and our copy of it is byte-identical
+
+Every file in the source was compared with the converted archive: 490 byte-for-byte
+identical, 85 rewritten (all the definitions the converter tunes), and one
+dropped (`def/vehicle/physics.sii`, deliberately). `ui/dashboard/w463_g63_gps.sii`
+is one of the identical ones. **The conversion did not break it.**
+
+### What the mod points at, and what the base game has
+
+The mod's interiors `stock_2.sii` and `stock_4.sii` declare
+`gps_path:"/ui/dashboard/w463_g63_gps.sii"`, and the cabin the car binds
+declares `conflict_with[]: "stock_3.g63.interior"` and `"stock_4.g63.interior"`, so
+the game loads those interior units and their dashboard.
+
+That dashboard points at `txt.daf_2021.gpstime` and `txt.daf_2021.gpsspdlimit` —
+**DAF XF** units. The mod ships `txt.w463_g63.{temp,odo,fuelr,clock,speed,
+compass,gear,fueld}` and `txt.radio.*`, and no `txt.daf_2021.*` at all. The author
+copied the DAF's GPS dashboard and renamed the file, but not the template names
+inside it.
+
+The DAF is in the base game — `def.scs` carries `model_def : model.daf_2021` — but
+**not this install**: there is no DAF archive beside the other seventy, and the
+DAF's templates ship with the DAF. A full scan of the 9.4 GB `base.scs` found
+neither `txt.daf_2021.gpstime` nor `dashboard_text.daf_2021`, and the game itself,
+with every archive mounted, could not resolve the pointer either.
+
+### Why the truck never crashed
+
+The car shop previews the interior variants and loads their dashboards; the truck
+dealer does not. The conversion did not create the defect, it **exposed** a latent
+one — which is a good reason for the converter to repair it.
+
+### The fix: write the template the dashboard is missing
+
+The game loads a dashboard's templates from `ui/template/dashboard_text.<name>.sii`,
+and the mod has exactly that pair for its main dashboard
+(`w463_g63.sii` / `dashboard_text.w463_g63.sii`) and **not** for the GPS one. The
+converter now finds every `look_template` a dashboard points at that nothing in
+the archive defines, and writes the missing units into
+`ui/template/dashboard_text.<dashboard name>.sii`.
+
+Naming the file after the dashboard that needs it is what makes it work: it
+satisfies the per-dashboard rule and the "every template in the mod pool" rule
+alike, so it does not matter which of the two the game actually uses.
+
+The units are named as the dashboard names them, and their text is copied from the
+mod's own templates of the same job — `gpstime` from `txt.w463_g63.clock`,
+`gpsspdlimit` from `txt.w463_g63.speed` — so the GPS view shows the dashboard's
+own clock and speed rather than a stranger's. The mod's files are untouched: a
+file is added, not edited.
+
+A unit the base game defines cannot be told apart from one nobody defines, so
+this may write a stand-in for a base-game unit. That costs the game's own styling
+of that one element; the alternative is the game dying.
+
+### Two gaps on the mod's side, and one that is not ours at all
+
+Comparing the original archive with the converted one key by key found nothing
+else the converter rewrites by accident: 556 files byte-identical, 19 changed
+(all of them intended — the car's physics, the rebuilt curve, the dropped truck
+keys, the price scaling, the three fixes above), one dropped
+(`def/vehicle/physics.sii`, deliberately) and twelve added (the registration
+chain, the two logo sets, the template file).
+
+Two references in the mod point at files it does not ship:
+
+- `def/vehicle/f_tire/w463_2022_2.sii` asks for
+  `cakirmods/g63/upg/wheel/tire_2.pmd` and the mod ships `tire2.pmd` — no
+  underscore. The second wheel set has no model.
+- The Cadillac's interior asks for four anims the mod never shipped
+  (`handbrake`, `hazard`, `beacon_st`, `lowbeam_in`), and it is the one that
+  declares them under its own `/vehicle/car/wagan/...` namespace.
+
+And the log's other complaint, `Can not open
+'/material/ui/car_brand_logo/vehicle.mat'`, is **not the G63's**: it came with
+the *Cadillac*, immediately after that car's four missing anims, and the game
+survived it. Every logo we write was found by the Car Dealer (mercedes, cadillac,
+honda, bmw, alongside the base game's dodge, ford and ram), so our logo handling
+is not the cause; the game asked for a brand named "vehicle" that nothing in the
+game, the mods or our output provides.
+
+What is *not* settled: whether the base game has a
+`material/ui/car_brand_logo/vehicle.mat` that our mod's folder could be
+shadowing. The Car Dealer found the base game's ford, dodge and ram *after* ours,
+so the folders do not shadow each other, and a content scan of the 9.4 GB
+`base.scs` found no such file. Answering it properly needs the HashFS **v2**
+reader this project does not have — `hashfs.py` reads v1 and refuses v2, and the
+v2 entry and metadata tables have to be decoded before a file can be read by
+path. That is a day of work on its own and nothing else here needs it.
+
+### The same mod had a second one, one step earlier
+
+The interior the car actually binds — `stock.sii` — declares
+`gps_path:"/ui/gps.sii"`, and **the mod does not ship `ui/gps.sii`**. Its
+`stock_2` and `stock_4` interiors declare
+`gps_path:"/ui/dashboard/w463_g63_gps.sii"`, which it does. The author renamed
+the GPS dashboard and left the old path behind in two of the four interiors.
+
+That is the same death one step earlier: a missing *script* rather than a missing
+*unit*. The game had not reached it — it died on the conflict interiors first —
+so it is a crash waiting for whoever opens the GPS view.
+
+The converter now repoints a `gps_path`/`dashboard_path` that points at nothing
+at the file the vehicle's own other parts use for that key, and drops the line
+where there is no such file. A missing GPS view is a small loss; a dashboard the
+game cannot load is a dead game.
+
+## 42. The game asks for a third info[] line, and the mod has two
+
+The same log, earlier:
+
+```
+00:02:06.668 : <ERROR> Missing required accessory information - unit 'vehicle.g63',
+                attribute 'info[2]'.
+```
+
+SCS's own Road Trip vehicles carry **three** `info[]` lines — brand, series,
+description — measured on the Mustang 67, F-150 23, Bronco 24 and Victoria 06 in
+`dlc_rt_ford.scs`:
+
+```
+info[]: "@@brand_ford@@"
+info[]: "@@series_ford_mustang_1967@@"
+info[]: "@@description_ford_mustang_1967@@"
+```
+
+A truck mod's data unit carries two, and the F-150 — SCS's own *truck* — carries
+three as well. The third line is the description, and the converted car now writes
+the body type there. The unit is padded to three rather than left one short,
+because the game wants `info[2]` by name.

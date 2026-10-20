@@ -1403,6 +1403,446 @@ def test_tank_size_is_still_left_to_the_mod() -> None:
           get_key(edit_lines(C.tune_chassis(text, "sedan", None, C.Report())),
                   "tank_size") == "868", text)
 
+    # The presets used to carry a tank_size of their own, which no loop ever
+    # wrote: a configured key that is not a written key is dead code that
+    # reads like a working rule, and it advertised a figure the converter
+    # never applied. The configuration is gone.
+    check("the presets no longer carry a tank size",
+          "tank_size" not in C.car_physics("suv", 2),
+          str(sorted(C.car_physics("suv", 2))))
+    check("and neither does the baseline",
+          "tank_size" not in C._PARATI, str(sorted(C._PARATI)))
+    check("no per-type override carries one either",
+          not any("tank_size" in v for v in C._TUNING.values()),
+          str(C._TUNING))
+
+
+def test_a_price_that_cannot_be_read_does_not_end_the_run() -> None:
+    """A price that is not a bare number must not raise out of the converter.
+
+    `dealer_price()` did `int(float(cur))` with no guard, so a price line
+    carrying a trailing comment, sharing a line with another key, or written
+    in the hex-float form raised an uncaught ValueError and ended the
+    conversion. The guard existed 35 lines later in `apply_dealer_price()`;
+    it just was not in the function that runs first.
+    """
+    section("a price that cannot be read does not end the run")
+    dealer = "def/vehicle/car_dealer/x/y.sii"
+    dealer_text = ('SiiNunit\n{\nvehicle : .car\n{\n}\n}\n'
+                   'vehicle_accessory : .chassis\n{\n'
+                   '\tdata_path: "/def/vehicle/truck/y/chassis.sii"\n}\n')
+
+    def files_with(price_line: str) -> dict:
+        return {
+            dealer: dealer_text,
+            "def/vehicle/truck/y/chassis.sii":
+                "SiiNunit\n{\naccessory_chassis : a\n{\n\t%s\n}\n}\n" % price_line,
+        }
+
+    for label, line, want in (("a trailing comment", "price: 1000 # base", 1000),
+                              ("a collapsed line", 'price: 1000   icon: "x"',
+                               1000),
+                              ("the hex-float form", "price: &459380cd",
+                               4720)):
+        try:
+            total, rows = C.dealer_price(files_with(line), dealer)
+        except Exception as exc:                      # noqa: BLE001
+            check(f"{label} does not raise", False, f"{type(exc).__name__}: {exc}")
+            continue
+        check(f"{label} is read as the number it is",
+              total == want and rows[0][1] == want, f"{total} {rows}")
+
+    # An unreadable price is reported rather than silently counted as zero.
+    rep = C.Report()
+    C.dealer_price(files_with("price: not a number"), dealer, rep)
+    check("an unreadable price is reported",
+          any("cannot read" in w for w in rep.warnings), str(rep.warnings))
+
+    # And the whole run survives one, which is what the crash stopped.
+    #
+    # --no-prompt AND a pinned _tty: the walkthrough prompts are not the only
+    # ones. The synthetic engine declares no rev bands, so the conversion
+    # reaches the rev-band menu, and a menu on a real terminal waits for a
+    # keypress nobody sends. That is the hang this suite is required never to
+    # have, and it is invisible in a piped run.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "mod"
+        synthetic_mod(root)
+        chassis = root / "def" / "vehicle" / "truck" / "testcar" / "chassis" / "xdl.sii"
+        chassis.write_text(chassis.read_text() + "\tprice: 35000 # base price\n")
+        out = Path(td) / "out.scs"
+        crashed = None
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(root), "--type", "sedan", "--brand", "t",
+                    "--no-prompt", "--price", "50000", "-o", str(out)])
+        except SystemExit as exc:
+            crashed = exc
+        finally:
+            C._tty = real_tty
+        check("a conversion with a commented price completes", crashed is None,
+              str(crashed))
+        if crashed is None:
+            check("and the archive is written", out.exists())
+            if out.exists():
+                with zipfile.ZipFile(out) as z:
+                    names = z.namelist()
+                check("and the archive is readable", bool(names),
+                      str(names[:3]))
+
+
+def test_the_requested_kerb_weight_survives_the_axle_count() -> None:
+    """The mass the user asked for is the mass that gets written.
+
+    The mass array used to be padded with a copy of the rear figure, so a
+    3-axle mod came out heavier than the request: --mass 2200 wrote 1150 +
+    1050 + 1050 = 3250 kg, and the engine was tuned for the 2200 that was
+    asked for rather than the 3250 that was written.
+    """
+    section("the requested kerb weight survives the axle count")
+    for axles in (2, 3, 4):
+        cfg = C.car_physics("suv", axles, [1150, 1050])
+        total = sum(int(v) for v in cfg["kerb_weight"])
+        check(f"{axles} axles: the total is the one asked for",
+              total == 2200, f"{cfg['kerb_weight']} = {total}")
+        check(f"{axles} axles: there is one figure per axle",
+              len(cfg["kerb_weight"]) == axles, str(cfg["kerb_weight"]))
+
+    # The front figure the author asked for is kept; the extra axles share
+    # the rear group rather than copying it.
+    cfg = C.car_physics("suv", 3, [1150, 1050])
+    check("the front axle keeps the figure that was asked for",
+          cfg["kerb_weight"][0] == "1150", str(cfg["kerb_weight"]))
+    check("the extra axle shares the rear group",
+          cfg["kerb_weight"][1] == cfg["kerb_weight"][2] == "525",
+          str(cfg["kerb_weight"]))
+
+    # End to end, through the chassis that is actually written.
+    chassis = ("SiiNunit\n{\naccessory_chassis : c\n{\n"
+               "\tkerb_weight[0]: 3000\n\tkerb_weight[1]: 3000\n"
+               "\tkerb_weight[2]: 3000\n}\n}\n")
+    out = C.tune_chassis(chassis, "suv", [1150, 1050], C.Report())
+    written = [int(l.split(":")[1]) for l in out.splitlines()
+               if "kerb_weight" in l]
+    check("the written chassis carries the requested total",
+          sum(written) == 2200, f"{written} = {sum(written)}")
+    check("and it has one figure per axle", len(written) == 3, str(written))
+
+
+def test_a_rev_band_is_never_written_inverted() -> None:
+    """A band whose lower bound is above its upper bound is not a band.
+
+    `rpm_range_power` is (0.70 x peak, 1.20 x peak) and only its top was
+    clamped to the rev limit, so a ceiling below 0.70 x the peak left
+    (3150, 3000) in the engine.
+    """
+    section("a rev band is never written inverted")
+    for peak, limit in ((4500, 3000), (5000, 3000), (6000, 3500), (5000, 2000)):
+        band = C._rpm_range_bands(peak, limit)["rpm_range_power"]
+        lo, hi = (int(v) for v in re.findall(r"\d+", band))
+        check(f"peak {peak}, ceiling {limit}: the band is ordered",
+              lo < hi, band)
+        check(f"peak {peak}, ceiling {limit}: the band stays under the ceiling",
+              hi <= limit, band)
+
+    # The bands that were already right are untouched.
+    check("the reference peak is unchanged",
+          C._rpm_range_bands(5000) == C._RPM_RANGE_DEFAULTS,
+          str(C._rpm_range_bands(5000)))
+    check("a ceiling above the band's top leaves it alone",
+          C._rpm_range_bands(5000, 6100)["rpm_range_power"] == "(3500, 6000)",
+          str(C._rpm_range_bands(5000, 6100)))
+    check("a ceiling inside the band still clamps the top only",
+          C._rpm_range_bands(4000, 3750)["rpm_range_power"] == "(2800, 3750)",
+          str(C._rpm_range_bands(4000, 3750)))
+
+
+def test_a_number_with_a_comment_is_still_a_number() -> None:
+    """A value read back keeps its comment, and the comment must not hide it.
+
+    `get_key()` returns the value as written, so `air_resistance: 1.5 # truck
+    drag` came back as "1.5 # truck drag". `to_float()` raised on that, the
+    `except` in `_is_truck_scale()` swallowed it, and a truck-scale value read
+    as car-sane -- so a 9.4 t chassis was preserved whole. This is the bug
+    `_is_truck_scale`'s own docstring says was fixed for hex floats; only the
+    hex-float half was.
+    """
+    section("a number with a comment is still a number")
+    check("a truck-scale value with a comment is still truck-scale",
+          C._is_truck_scale("air_resistance", "1.5 # truck drag"))
+    check("a truck-scale axle with a comment is still truck-scale",
+          C._is_truck_scale("kerb_weight", ["4720.1 # front"]))
+    check("a hex-float axle with a comment is still truck-scale",
+          C._is_truck_scale("kerb_weight", ["&459380cd # front"]))
+    check("a car-sane value with a comment is still car-sane",
+          not C._is_truck_scale("air_resistance", "0.5 # from the tuner"))
+    check("a value that is not a number is still not one",
+          not C._is_truck_scale("air_resistance", "not a number"))
+
+    # End to end: the annotated truck chassis is corrected, not preserved.
+    chassis = ("SiiNunit\n{\naccessory_chassis : c\n{\n"
+               "\tkerb_weight[0]: 4720.1 # front\n"
+               "\tkerb_weight[1]: 4720.1 # rear\n"
+               "\tair_resistance: 1.5 # truck drag\n}\n}\n")
+    out = C.tune_chassis(chassis, "sedan", None, C.Report())
+    written = [l for l in out.splitlines() if "kerb_weight" in l]
+    check("the annotated truck weight is replaced",
+          written and "4720.1" not in written[0], str(written))
+    drag = [l for l in out.splitlines() if "air_resistance" in l]
+    check("the annotated truck drag is replaced",
+          drag and "1.5" not in drag[0], str(drag))
+
+
+def test_the_shift_point_cannot_invert_a_band() -> None:
+    """A change-up point at or below the band floor is not a band."""
+    section("the shift point cannot invert a band")
+    bands = C._rpm_range_bands(5000, None)
+    shifted = C._set_shift_up(bands, 1000)
+    for key in ("rpm_range_low_gear", "rpm_range_high_gear"):
+        lo, hi = (int(v) for v in re.findall(r"\d+", shifted[key]))
+        check(f"{key} stays ordered", lo < hi, shifted[key])
+    check("a shift point above the floor is used as given",
+          C._set_shift_up(bands, 3000)["rpm_range_high_gear"]
+          == "(1450, 3000)",
+          str(C._set_shift_up(bands, 3000)))
+
+    # And the user is told their point was raised.
+    rep = C.Report()
+    C._report_shift(rep, C._set_shift_up(bands, 1000), 1000)
+    check("a raised shift point is reported",
+          any("raised" in w for w in rep.warnings), str(rep.warnings))
+    rep2 = C.Report()
+    C._report_shift(rep2, C._set_shift_up(bands, 3000), 3000)
+    check("a shift point that was honoured is not reported",
+          not any("raised" in w for w in rep2.warnings), str(rep2.warnings))
+
+
+def test_the_walkthrough_asks_only_what_is_unknown() -> None:
+    """A prompt whose answer is then discarded must not be asked.
+
+    With --power on the command line the walkthrough asked for a 0-60 time,
+    turned the answer into an Nm/t, and passed it to convert() -- where
+    tune_engine() returns from the horsepower branch before it is used. Two
+    different 0-60 answers produced byte-identical engines.
+    """
+    section("the walkthrough asks only what is unknown")
+    import io
+
+    with tempfile.TemporaryDirectory() as td:
+        C._rpm_ranges = C._rpm_range_bands(5000, 6100)
+        mod = synthetic_mod(Path(td) / "mod", extra_defs={
+            "engine/v8.sii": _engine_unit(
+                "torque: 1400", "rpm_limit: 6100",
+                "torque_curve[]: (1500, 0.43)",
+                "torque_curve[]: (3750, 1.0)")})
+        asked: list[str] = []
+        stubs = {
+            "prompt_source": lambda: mod,
+            "prompt_type": lambda: "sedan",
+            "prompt_brand": lambda slug: "test",
+            "prompt_weight": lambda vtype, preset: [1150, 1050],
+            "prompt_power": lambda kerb, bounds=None: (
+                asked.append("power") or (350.0, 5000)),
+            "prompt_peak_rpm": lambda bounds=None: (
+                asked.append("peak") or 5000),
+            "prompt_acceleration": lambda kerb: (
+                asked.append("acceleration") or 5.5),
+            "prompt_price": lambda: 45000,
+        }
+        real_step = C._ui.step
+        saved = {name: getattr(C, name) for name in stubs}
+        real_stdout = sys.stdout
+        try:
+            C.__dict__.update(stubs)
+            C._ui.step = lambda index, total, text: None
+            C._tty = lambda: True
+            sys.stdout = io.StringIO()
+            C.main(["--power", "300", "-o", str(Path(td) / "guided.scs")])
+        finally:
+            sys.stdout = real_stdout
+            for name, fn in saved.items():
+                setattr(C, name, fn)
+            C._ui.step = real_step
+            C._tty = lambda: False
+            C._rpm_ranges = None
+
+        check("the 0-60 question is not asked when --power was given",
+              "acceleration" not in asked, str(asked))
+        check("the peak is asked, because --power does not settle it",
+              "peak" in asked, str(asked))
+        check("the horsepower is not asked again",
+              "power" not in asked, str(asked))
+
+
+def test_every_dangling_dashboard_path_is_repointed() -> None:
+    """A def with two dashboard paths has both of them fixed.
+
+    `set_key()` replaces the LAST matching line, so only the second path in a
+    file was repointed and the first kept pointing at a script nobody ships --
+    the same death the function exists to prevent. And dropping the line
+    removed every occurrence of the key, including ones that were fine.
+    """
+    section("every dangling dashboard path is repointed")
+    files = {
+        "def/vehicle/truck/v/interior/a.sii":
+            'SiiNunit\n{\naccessory_interior : a\n{\n'
+            '\tgps_path: "/ui/gps.sii"\n}\n}\n'
+            'accessory_interior : b\n{\n'
+            '\tgps_path: "/ui/gps.sii"\n}\n}\n',
+        "def/vehicle/truck/v/interior/c.sii":
+            'SiiNunit\n{\naccessory_interior : c\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n',
+        "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
+    }
+    rep = C.Report()
+    C._fix_dangling_ui_paths(files, rep)
+    text = files["def/vehicle/truck/v/interior/a.sii"]
+    check("no path is left pointing at a script nobody ships",
+          "/ui/gps.sii" not in text, text)
+    check("both are repointed at the file the vehicle does ship",
+          text.count("/ui/dashboard/v_gps.sii") == 2, text)
+    check("each one is reported", len(rep.warnings) == 2, str(rep.warnings))
+
+    # A path that IS fine is left alone, even when a sibling is not.
+    files2 = {
+        "def/vehicle/truck/v/interior/a.sii":
+            'SiiNunit\n{\naccessory_interior : a\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n'
+            'accessory_interior : b\n{\n'
+            '\tgps_path: "/ui/gps.sii"\n}\n}\n',
+        "def/vehicle/truck/v/interior/c.sii":
+            'SiiNunit\n{\naccessory_interior : c\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n',
+        "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
+    }
+    C._fix_dangling_ui_paths(files2, C.Report())
+    text2 = files2["def/vehicle/truck/v/interior/a.sii"]
+    check("a path that was already fine is left alone",
+          text2.count("/ui/dashboard/v_gps.sii") == 2, text2)
+
+
+def test_extra_tags_ignores_an_empty_entry() -> None:
+    """A trailing comma in --extra-tags is a typo, not a tag.
+
+    It used to reach `normalise_type("")`, which refused with "error: --type
+    must not be empty" -- an error about a flag the user never passed.
+    """
+    section("--extra-tags ignores an empty entry")
+    for raw in ("suv,", ",suv", "suv, pickup"):
+        tags = ["suv"]
+        ok = True
+        try:
+            for extra in raw.split(","):
+                extra = extra.strip()
+                if not extra:
+                    continue
+                tag = C.job_tag(C.normalise_type(extra))
+                if tag not in tags:
+                    tags.append(tag)
+        except SystemExit as exc:
+            ok = False
+            check(f"{raw!r} is accepted", False, str(exc))
+            continue
+        check(f"{raw!r} is accepted", ok)
+    check("a trailing comma adds nothing",
+          tags == ["suv", "pickup"], str(tags))
+
+
+def test_an_unquoted_value_with_a_colon_is_not_split() -> None:
+    """`name: foo: bar` is one key whose value is "foo", not two pairs.
+
+    The splitter treats an unquoted token followed by a colon as a key, so it
+    split that line and handed the file a key with an empty value. A quoted
+    colon was already handled -- the scanner skips quoted text.
+    """
+    section("an unquoted value with a colon is not split")
+    import sii as _sii
+    line = "\tname: foo: bar"
+    check("the line is returned untouched",
+          _sii.expand_multi_key_lines([line]) == [line],
+          str(_sii.expand_multi_key_lines([line])))
+    check("a collapsed line still splits",
+          _sii.expand_multi_key_lines(['\tprice: 1000   icon: "x"'])
+          == ['\tprice: 1000', '\ticon: "x"'],
+          str(_sii.expand_multi_key_lines(['\tprice: 1000   icon: "x"'])))
+    check("a quoted colon is still one pair",
+          _sii.expand_multi_key_lines(['\tinfo[]: "V: 8"']) ==
+          ['\tinfo[]: "V: 8"'])
+
+
+def test_a_def_the_converter_does_not_touch_keeps_its_bytes() -> None:
+    """A file with nothing to fix must come out exactly as it went in.
+
+    The real mods ship wheel parts that end with `}` and no newline, and the
+    suite's fidelity check compares them byte for byte. A rewrite that adds a
+    trailing newline -- or expands a collapsed line -- changes a part the
+    converter had no reason to touch, and that is a regression the synthetic
+    mod cannot show because every file it builds ends with a newline.
+    """
+    section("an untouched def keeps its bytes")
+    body = ('SiiNunit\n{\naccessory_truck_wheel : f_disc.test.std\n{\n'
+            '\tpart_type: factory\n}\n}')            # no trailing newline
+    files = {
+        "def/vehicle/f_disc/std.sii": body,
+        "def/vehicle/truck/testcar/interior/i.sii":
+            'SiiNunit\n{\naccessory_truck_interior : i\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n',
+        "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
+    }
+    rep = C.Report()
+    C._fix_dangling_ui_paths(files, rep)
+    check("a def with nothing to fix is byte-identical",
+          files["def/vehicle/f_disc/std.sii"] == body,
+          repr(files["def/vehicle/f_disc/std.sii"][-20:]))
+    check("and it is not reported as fixed", not rep.warnings, str(rep.warnings))
+
+    # A def that IS fixed is rewritten, trailing newline and all.
+    files2 = {
+        "def/vehicle/truck/testcar/interior/i.sii":
+            'SiiNunit\n{\naccessory_truck_interior : i\n{\n'
+            '\tgps_path: "/ui/gps.sii"\n}\n}\n',
+        "def/vehicle/truck/testcar/interior/j.sii":
+            'SiiNunit\n{\naccessory_truck_interior : j\n{\n'
+            '\tgps_path: "/ui/dashboard/v_gps.sii"\n}\n}\n',
+        "ui/dashboard/v_gps.sii": "SiiNunit\n{\n}\n",
+    }
+    C._fix_dangling_ui_paths(files2, C.Report())
+    check("a def that is fixed is repointed",
+          "/ui/dashboard/v_gps.sii" in files2[
+              "def/vehicle/truck/testcar/interior/i.sii"],
+          files2["def/vehicle/truck/testcar/interior/i.sii"])
+
+
+def test_an_unreadable_paint_job_does_not_end_the_run() -> None:
+    """One paint job we cannot decode must not end the conversion.
+
+    Every other read of a def in discover_parts() catches the SystemExit
+    read_def() raises for a file it cannot decode. The paint-job scan did
+    not, so a single unreadable file ended the run.
+    """
+    section("an unreadable paint job does not end the run")
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "m.scs"
+        vdir = "def/vehicle/truck/testcar/"
+        with zipfile.ZipFile(path, "w") as z:
+            z.writestr(vdir + "data.sii",
+                       "SiiNunit\n{\naccessory_truck_data : vehicle.testcar\n"
+                       "{\n}\n}\n")
+            z.writestr(vdir + "paint_job/bad.sii", b"\xff\xfe\x00bad bytes")
+        rep = C.Report()
+        try:
+            parts, part_rep = C.discover_parts(C.ModSource(path), vdir,
+                                                "testcar", "")
+        except SystemExit as exc:
+            check("discover_parts survives an unreadable paint job", False,
+                  str(exc)[:80])
+            return
+        check("discover_parts survives an unreadable paint job", True)
+        check("the unreadable paint job is reported as a gap",
+              any("paint job" in g for g in part_rep.gaps),
+              str(part_rep.gaps))
+
 
 def test_missing_assets_are_reported() -> None:
     """A mod whose defs point at files it does not ship must say so.
@@ -1585,7 +2025,8 @@ def test_type_validation() -> None:
         out = Path(td) / "x.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(REF),
-             "--type", "spaceship", "--brand", "vw", "-o", str(out)],
+             "--no-prompt", "--type", "spaceship", "--brand", "vw",
+             "-o", str(out)],
             capture_output=True, text=True,
         )
         check("accepts unlisted type", r.returncode == 0, r.stderr[-200:])
@@ -1601,8 +2042,8 @@ def test_type_validation() -> None:
         out = Path(td) / "e.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(REF),
-             "--type", "suv", "--extra-tags", "pickup,sedan", "--brand", "vw",
-             "-o", str(out)],
+             "--no-prompt", "--type", "suv", "--extra-tags", "pickup,sedan",
+             "--brand", "vw", "-o", str(out)],
             capture_output=True, text=True,
         )
         check("extra-tags accepted", r.returncode == 0, r.stderr[-200:])
@@ -2775,6 +3216,232 @@ def test_idle_torque_is_halved_to_stop_the_car_creeping() -> None:
           before is None, str(before))
 
 
+def test_a_dashboard_that_points_at_nothing_gets_its_template() -> None:
+    """A dashboard the game cannot load takes the game with it.
+
+    The measured case: the Mercedes-Benz G63 (W463 2022) carries the DAF XF's
+    GPS dashboard, so it points at `txt.daf_2021.gpstime` and
+    `txt.daf_2021.gpsspdlimit` -- units from a DAF the mod never ships and the
+    base game does not have either, the DAF's templates shipping with the DAF.
+    The game died with "load_unit_tree() - Failed to load unit tree from file
+    (/ui/dashboard/w463_g63_gps.sii)".
+
+    So the missing template is written, named for the dashboard that needs it,
+    and the mod's own bytes are left alone.
+    """
+    section("a dashboard's missing template is written")
+    import zipfile as _z
+
+    dashboard = (
+        "SiiNunit\n{\n"
+        "ui::window : _nameless.Main {\n"
+        ' text: "<align hstyle=center>%0</align>"\n'
+        " look_template: txt.other_vehicle.gpstime\n"
+        " look_template: txt.other_vehicle.gpsspdlimit\n"
+        "}\n"
+        "}\n"
+    )
+    templates = (
+        "SiiNunit\n{\n"
+        "ui::text_template : txt.car.odo {\n"
+        '\ttext: "<align hstyle=center><font face=/font/big.font '
+        'xscale=7 yscale=7>%0</font></align>"\n'
+        "}\n"
+        "ui::text_template : txt.car.clock {\n"
+        '\ttext: "<align hstyle=center><font face=/font/big.font '
+        'xscale=4 yscale=4>%0</font></align>"\n'
+        "}\n"
+        "}\n"
+    )
+
+    def build(td: str, dash: str) -> Path:
+        mod = synthetic_mod(Path(td) / "mod")
+        (mod / "ui" / "dashboard").mkdir(parents=True, exist_ok=True)
+        (mod / "ui" / "template").mkdir(parents=True, exist_ok=True)
+        (mod / "ui" / "dashboard" / "car_dash.sii").write_text(dash)
+        (mod / "ui" / "template" / "dashboard_text.car.sii").write_text(
+            templates)
+        return mod
+
+    with tempfile.TemporaryDirectory() as td:
+        mod = build(td, dashboard)
+        out = Path(td) / "converted.scs"
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(mod), "--type", "suv", "--brand", "test", "--no-prompt",
+                    "-o", str(out)])
+        finally:
+            C._tty = real_tty
+
+        with _z.ZipFile(out) as z:
+            names = z.namelist()
+            written = "ui/template/dashboard_text.car_dash.sii"
+            check("the dashboard's template file is written", written in names,
+                  str([n for n in names if n.startswith("ui/")]))
+            if written in names:
+                text = z.read(written).decode()
+                check("it defines the unit the dashboard points at",
+                      "ui::text_template : txt.other_vehicle.gpstime" in text,
+                      text)
+                check("and the other one too",
+                      "ui::text_template : txt.other_vehicle.gpsspdlimit"
+                      in text,
+                      text)
+                # gpstime is a clock and gpsspdlimit is a speed, so the two
+                # stand-ins must not be the same one.
+                stand_ins = [l for l in text.splitlines()
+                             if l.strip().startswith("text:")]
+                check("the two stand-ins are the mod's own clock and speed",
+                      len(stand_ins) == 2
+                      and len(set(stand_ins)) == 2
+                      and "xscale=4" in stand_ins[0] + stand_ins[1]
+                      and "xscale=7" in stand_ins[0] + stand_ins[1],
+                      str(stand_ins))
+            check("the mod's own dashboard is byte-identical",
+                  z.read("ui/dashboard/car_dash.sii").decode() == dashboard)
+            check("the mod's own template file is byte-identical",
+                  z.read("ui/template/dashboard_text.car.sii").decode()
+                  == templates)
+
+    # A dashboard whose look_template resolves must be left alone, and no file
+    # written for it.
+    with tempfile.TemporaryDirectory() as td:
+        mod = build(td, dashboard
+                    .replace("txt.other_vehicle.gpstime", "txt.car.clock")
+                    .replace("txt.other_vehicle.gpsspdlimit", "txt.car.odo"))
+        out = Path(td) / "converted.scs"
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(mod), "--type", "suv", "--brand", "test", "--no-prompt",
+                    "-o", str(out)])
+        finally:
+            C._tty = real_tty
+        with _z.ZipFile(out) as z:
+            check("a dashboard that resolves gets no stand-in file",
+                  "ui/template/dashboard_text.car_dash.sii" not in z.namelist(),
+                  str([n for n in z.namelist() if n.startswith("ui/")]))
+
+
+def test_the_vehicle_unit_gets_the_third_info_line() -> None:
+    """The game asks for three info[] lines; a mod's truck unit carries two.
+
+    SCS's own Road Trip vehicles carry brand, series and description -- measured
+    on the Mustang 67, F-150 23, Bronco 24 and Victoria 06 in dlc_rt_ford.scs --
+    and a converted car whose data unit has only the mod's two is logged as
+    "Missing required accessory information - unit 'vehicle.g63', attribute
+    'info[2]'". The third line is the description, and the body type is what the
+    converter knows about the car.
+    """
+    section("the vehicle unit carries three info[] lines")
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod", data_body=[
+            'ui_name: "Test Car"',
+            'info[]: "Testbrand"',
+            'info[]: "Testmodel"',
+        ])
+        out = Path(td) / "converted.scs"
+        text = _data_sii(mod, out, "--type", "suv")
+        infos = get_all_indexed(edit_lines(text), "info")
+        check("the converted car carries three info[] lines", len(infos) == 3,
+              str(infos))
+        check("the third is the body type the user chose", infos[-1:] == ["SUV"],
+              str(infos))
+        check("the mod's own two are untouched",
+              infos[:2] == ["Testbrand", "Testmodel"], str(infos))
+
+    # A mod that already carries three is left exactly as it is.
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod", data_body=[
+            'ui_name: "Test Car"',
+            'info[]: "One"',
+            'info[]: "Two"',
+            'info[]: "Three"',
+        ])
+        out = Path(td) / "converted.scs"
+        text = _data_sii(mod, out, "--type", "suv")
+        infos = get_all_indexed(edit_lines(text), "info")
+        check("a unit that already has three keeps them",
+              infos == ["One", "Two", "Three"], str(infos))
+
+
+def test_a_dashboard_path_that_points_at_nothing_is_repointed() -> None:
+    """A script the mod does not ship is the same death as a missing template.
+
+    The measured case: the Mercedes-Benz G63's default interior declares
+    `gps_path:"/ui/gps.sii"`, which the mod does not ship, while the vehicle's
+    other interiors declare `gps_path:"/ui/dashboard/w463_g63_gps.sii"`, which it
+    does. The stale path is repointed at the file the vehicle's own other parts
+    use; where there is no such file, the line is dropped rather than left to
+    kill the game.
+    """
+    section("a dangling dashboard path is repointed")
+    import zipfile as _z
+
+    def interior(gps: str) -> str:
+        return ("SiiNunit\n{\naccessory_truck_interior : test.interior\n{\n"
+                f'\tdashboard_path:"/ui/dashboard/car_dash.sii"\n'
+                f'\tgps_path:"{gps}"\n'
+                "}\n}\n")
+
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod")
+        vdir = mod / "def" / "vehicle" / "truck" / "test"
+        (vdir / "interior").mkdir(parents=True, exist_ok=True)
+        (vdir / "interior" / "std.sii").write_text(interior("/ui/gps.sii"))
+        (vdir / "interior" / "std_2.sii").write_text(
+            interior("/ui/dashboard/car_dash_gps.sii"))
+        (mod / "ui" / "dashboard").mkdir(parents=True, exist_ok=True)
+        (mod / "ui" / "dashboard" / "car_dash.sii").write_text(
+            "SiiNunit\n{\nui::window : _nameless.Main {\n}\n}\n")
+        (mod / "ui" / "dashboard" / "car_dash_gps.sii").write_text(
+            "SiiNunit\n{\nui::window : _nameless.Main {\n}\n}\n")
+
+        out = Path(td) / "converted.scs"
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(mod), "--type", "suv", "--brand", "test", "--no-prompt",
+                    "-o", str(out)])
+        finally:
+            C._tty = real_tty
+
+        with _z.ZipFile(out) as z:
+            std = z.read("def/vehicle/truck/test/interior/std.sii").decode()
+            check("the stale path is repointed at the file the vehicle uses",
+                  "/ui/dashboard/car_dash_gps.sii" in std, std)
+            check("and the broken one is gone", "/ui/gps.sii" not in std, std)
+            std2 = z.read("def/vehicle/truck/test/interior/std_2.sii").decode()
+            check("the interior that was already right is untouched",
+                  "/ui/dashboard/car_dash_gps.sii" in std2, std2)
+
+    # With no other dashboard to point at, the line goes rather than staying to
+    # kill the game.
+    with tempfile.TemporaryDirectory() as td:
+        mod = synthetic_mod(Path(td) / "mod")
+        vdir = mod / "def" / "vehicle" / "truck" / "test"
+        (vdir / "interior").mkdir(parents=True, exist_ok=True)
+        (vdir / "interior" / "std.sii").write_text(interior("/ui/gps.sii"))
+        (mod / "ui" / "dashboard").mkdir(parents=True, exist_ok=True)
+        (mod / "ui" / "dashboard" / "car_dash.sii").write_text(
+            "SiiNunit\n{\nui::window : _nameless.Main {\n}\n}\n")
+        out = Path(td) / "converted.scs"
+        real_tty = C._tty
+        C._tty = lambda: False
+        try:
+            C.main([str(mod), "--type", "suv", "--brand", "test", "--no-prompt",
+                    "-o", str(out)])
+        finally:
+            C._tty = real_tty
+        with _z.ZipFile(out) as z:
+            std = z.read("def/vehicle/truck/test/interior/std.sii").decode()
+            check("a path with nothing to point at is removed",
+                  "gps_path" not in std, std)
+            check("and the dashboard path that does resolve is kept",
+                  "/ui/dashboard/car_dash.sii" in std, std)
+
+
 def test_prompt_price_never_blocks() -> None:
     section("price prompt never blocks")
     # Force the condition rather than assuming it. Running the suite from a
@@ -2807,8 +3474,9 @@ def test_mass_override() -> None:
 
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
-             "--type", "suv", "--brand", "p", "--mass", "oops", "-o", str(out)],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "p",
+             "--mass", "oops", "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("bad --mass rejected", r.returncode != 0)
         check("error explains the format", "1150,1050" in r.stderr)
 
@@ -2874,8 +3542,9 @@ def test_mass_cli_forms() -> None:
         # bad inputs rejected
         for bad in ("oops", "1,2,3", "-5"):
             r = subprocess.run(
-                [sys.executable, str(HERE / "carutil.py"), *base, "--mass", bad],
-                capture_output=True, text=True)
+                [sys.executable, str(HERE / "carutil.py"), *base, "--no-prompt",
+                 "--mass", bad],
+                capture_output=True, text=True, stdin=subprocess.DEVNULL)
             check(f"rejects {bad!r}", r.returncode != 0)
 
 
@@ -2902,8 +3571,9 @@ def test_scripted_mode_still_works() -> None:
 
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"),
-             str(PORCHE), "--type", "suv", "--brand", "p", "-o", str(out)],
-            capture_output=True, text=True)
+             str(PORCHE), "--no-prompt", "--type", "suv", "--brand", "p",
+             "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("runs as a script", r.returncode == 0, r.stderr[-200:])
         check("prints DONE", "DONE" in r.stdout)
         check("prints the location", str(out.resolve()) in r.stdout)
@@ -2929,13 +3599,14 @@ def test_missing_required_off_terminal() -> None:
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "o.scs"
         r = subprocess.run(
-            [sys.executable, str(HERE / "carutil.py"), str(PORCHE), "-o", str(out)],
+            [sys.executable, str(HERE / "carutil.py"), str(PORCHE), "--no-prompt",
+             "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("demands --type", r.returncode != 0 and "--type" in r.stderr)
 
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
-             "--type", "suv", "-o", str(out)],
+             "--no-prompt", "--type", "suv", "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("demands --brand", r.returncode != 0 and "--brand" in r.stderr)
 
@@ -2969,7 +3640,8 @@ def test_dry_run_writes_nothing() -> None:
         out = Path(td) / "dry.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(PORCHE),
-             "--type", "suv", "--brand", "p", "--dry-run", "-o", str(out)],
+             "--no-prompt", "--type", "suv", "--brand", "p", "--dry-run",
+             "-o", str(out)],
             capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("no file written", not out.exists())
         check("says nothing was written", "nothing was written" in r.stdout)
@@ -3018,8 +3690,9 @@ def test_locked_archive_errors_cleanly() -> None:
         # the tool must fail with guidance, never a traceback
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(locked),
-             "--type", "suv", "--brand", "h", "-o", str(Path(td) / "o.scs")],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "h",
+             "-o", str(Path(td) / "o.scs")],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("exits non-zero", r.returncode != 0)
         check("no traceback", "Traceback" not in r.stderr, r.stderr[-200:])
         check("says flagged encrypted", "flagged encrypted" in r.stderr)
@@ -3038,9 +3711,9 @@ def test_password_unlocks() -> None:
 
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(locked),
-             "--type", "suv", "--brand", "honda", "--password", "secret123",
-             "--mass", "2142", "-o", str(out)],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "honda",
+             "--password", "secret123", "--mass", "2142", "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("correct password converts", r.returncode == 0, r.stderr[-200:])
         check("output written", out.exists())
         if out.exists():
@@ -3050,9 +3723,9 @@ def test_password_unlocks() -> None:
 
         r2 = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(locked),
-             "--type", "suv", "--brand", "h", "--password", "wrongpw",
-             "-o", str(Path(td) / "o2.scs")],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "h",
+             "--password", "wrongpw", "-o", str(Path(td) / "o2.scs")],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("wrong password fails cleanly", r2.returncode != 0)
         check("wrong password: no traceback", "Traceback" not in r2.stderr)
 
@@ -3078,9 +3751,9 @@ def test_zip_wrapper_is_unwrapped() -> None:
         out = Path(td) / "out.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(wrapper),
-             "--type", "sedan", "--brand", "test", "--mass", "1400",
-             "-o", str(out)],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "sedan", "--brand", "test",
+             "--mass", "1400", "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("converts through the wrapper", r.returncode == 0, r.stderr[-200:])
         check("reports the unwrap", "contained a mod archive" in r.stdout)
 
@@ -3244,17 +3917,17 @@ def test_mislabelled_encryption_is_readable() -> None:
         out = Path(td) / "out.scs"
         r = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(built),
-             "--type", "suv", "--brand", "honda", "--mass", "2142",
-             "-o", str(out)],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "honda",
+             "--mass", "2142", "-o", str(out)],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("converts without a password", r.returncode == 0, r.stderr[-200:])
         check("reports the workaround", "data is plain" in r.stdout)
 
         r2 = subprocess.run(
             [sys.executable, str(HERE / "carutil.py"), str(built),
-             "--type", "suv", "--brand", "h", "--strict-encryption",
-             "-o", str(Path(td) / "o2.scs")],
-            capture_output=True, text=True)
+             "--no-prompt", "--type", "suv", "--brand", "h",
+             "--strict-encryption", "-o", str(Path(td) / "o2.scs")],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
         check("strict mode refuses cleanly", r2.returncode != 0)
         check("strict: no traceback", "Traceback" not in r2.stderr)
 
@@ -3280,8 +3953,9 @@ def _check_conversion(mod: Path, vtype: str, brand: str, mass: str,
     out = tmp / "out.scs"
     r = subprocess.run(
         [sys.executable, str(HERE / "carutil.py"), str(mod),
-         "--type", vtype, "--brand", brand, "--mass", mass, "-o", str(out)],
-        capture_output=True, text=True)
+         "--no-prompt", "--type", vtype, "--brand", brand, "--mass", mass,
+         "-o", str(out)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL)
     check(f"{mod.name[:28]}: converts", r.returncode == 0, r.stderr[-300:])
     check(f"{mod.name[:28]}: no traceback", "Traceback" not in r.stderr)
     if r.returncode != 0:
@@ -5719,6 +6393,18 @@ def test_carutil_is_the_entry_point() -> None:
     section("the application lives under scripts/")
     check("carutil.py exists", (HERE / "carutil.py").is_file())
     check("the old name is gone", not (HERE / "convert_to_car.py").exists())
+    # The helpers were moved into backend/ so the directory beside the entry
+    # point holds only the things a user runs or reads. Both halves are
+    # asserted: a module left beside carutil.py would still import, which is
+    # exactly why it needs a check of its own.
+    leftovers = [
+        f.name for f in HERE.iterdir()
+        if f.is_file() and f.suffix in (".py", ".md") and "carutil" not in f.name
+        and f.name not in ("test_converter.py", "AGENTS.md", "FINDINGS.md",
+                           "fix.md")
+    ]
+    check("no unexpected new modules beside the entry point", not leftovers,
+          str(leftovers))
     helpers = ("sii.py", "hashfs.py", "logo.py", "brands.py", "ui.py")
     check("backend/ holds every helper module",
           all((BACKEND / n).is_file() for n in helpers),
@@ -5930,6 +6616,9 @@ def main() -> int:
     test_rpm_bands_scale_to_where_the_engine_peaks()
     test_the_rev_limit_cuts_the_curve_and_is_no_longer_asked()
     test_the_peak_rpm_is_held_inside_the_engines_own_range()
+    test_a_dashboard_that_points_at_nothing_gets_its_template()
+    test_a_dashboard_path_that_points_at_nothing_is_repointed()
+    test_the_vehicle_unit_gets_the_third_info_line()
     test_clipping_the_ceiling_costs_torque_and_says_so()
     test_the_shift_point_is_the_band_that_governs_upshifts()
     test_rpm_band_input_is_validated()
@@ -5946,6 +6635,18 @@ def main() -> int:
     test_secondary_torque_is_dropped_for_a_car()
     test_truck_fuel_keys_are_dropped_for_a_car()
     test_tank_size_is_still_left_to_the_mod()
+    # The review findings. Each one is a defect the suite did not catch.
+    test_a_price_that_cannot_be_read_does_not_end_the_run()
+    test_the_requested_kerb_weight_survives_the_axle_count()
+    test_a_rev_band_is_never_written_inverted()
+    test_a_number_with_a_comment_is_still_a_number()
+    test_the_shift_point_cannot_invert_a_band()
+    test_the_walkthrough_asks_only_what_is_unknown()
+    test_every_dangling_dashboard_path_is_repointed()
+    test_extra_tags_ignores_an_empty_entry()
+    test_an_unquoted_value_with_a_colon_is_not_split()
+    test_an_unreadable_paint_job_does_not_end_the_run()
+    test_a_def_the_converter_does_not_touch_keeps_its_bytes()
     test_missing_assets_are_reported()
     test_slug_never_collapses_to_a_bare_number()
     test_vehicle_types()
