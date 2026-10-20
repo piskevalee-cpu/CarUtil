@@ -39,6 +39,7 @@ passed with all eleven present.
 | F10 | low | `backend/sii.py:38` | an unquoted value containing a colon is split, corrupting the def | no — since 2026-10-11 | **fixed** |
 | F11 | low | `carutil.py:1013` | an unreadable paint-job def aborts the whole conversion | no — since 2026-10-11 | **fixed** |
 | F12 | medium | `carutil.py:3911` | with no `--mass`, the engine is tuned for the type default while the chassis may keep the mod's own weight | no — since 2026-10-11 | **not fixed** — see below |
+| F13 | medium | `carutil.py:3856` | `stall_torque_ratio` has a ceiling but no floor, so a mod declaring a low one keeps it (the G63's 1.00 against SCS's 1.8-2.0) | no — since 2026-10-11 | **not fixed** — see below |
 
 Dates are the commit that introduced the code, found with `git log -S`.
 
@@ -621,6 +622,37 @@ and derive the engine target from the mass that is actually going to be
 written, which is a change to the order of the conversion pass and to what
 "no mass asked for" means.
 
+### F13 — the stall ratio has a ceiling but no floor, so a mod that declares a low one keeps it
+
+`stall_torque_ratio` is the launch multiplier: launch force is
+`torque x first_gear_total x stall_torque_ratio`. The converter guards the
+**ceiling** — anything above 2.0 is replaced, because a diesel figure of 4.50
+multiplied the launch force 2.3x — but there is no floor, so a value below
+SCS's own cars' range is preserved.
+
+The G63 declares **1.00**. SCS's own four Road Trip cars use **1.8-2.0**.
+Launch force is therefore about 45 % of what the game's own cars get from the
+same torque: the car is not violent, but it is slow off the line for what it
+has. The other four mods measured are all fine, because all four declare a
+value in the range or above it:
+
+| mod | declares | converted to |
+|---|---|---|
+| G63 | 1.00 | **1.00 (preserved)** |
+| W223 | 1.953 | 1.953 |
+| BMW M5 | 2.322 | 2.0 |
+| Escalade | 2.412 | 2.0 |
+| Pilot | 4.50 | 2.0 |
+
+**Not fixed**, because it is a product decision and not a bug in the code: the
+value is the mod author's own, the converter's rule is explicitly "preserve
+what is already in range", and a floor would change how every converted car
+launches. The question is whether `stall_torque_ratio` should be required to
+land in SCS's own range on **both** sides, the way `residual_travel` is
+written outright because its truck and car values overlap. A floor of 1.8
+would be the measured answer, but it is a decision about how every car feels,
+and it is the maintainer's to make.
+
 ### A rev limit below the engine's power peak is not reported
 
 `--rev-limit 3000` on an engine whose curve peaks at 4500 writes the ceiling
@@ -637,6 +669,43 @@ The chassis is tuned once per chassis file, and a mod with two chassis files
 (say `xdl.sii` and `xdrive.sii`) reports the whole set of chassis changes
 twice. Harmless, but noisy, and it makes the report harder to read than it
 needs to be.
+
+## Tested on real cars
+
+Three real mods were converted and the results checked the way the game reads
+them, not the way the converter reports them. The cars came from
+`~/Downloads`: the G63, the BMW M5 and the X167 GLS, the last one inside a
+`.zip` wrapper so the unwrap path was exercised too. The base game's own Road
+Trip cars in `dlc_rt_ford.scs` were used as the reference.
+
+Each converted archive was checked for: a valid zip with every entry
+decompressing; every def valid UTF-8 with balanced braces and a recognised
+header; a complete registration chain; the vehicle unit's tags, its three
+`info[]` lines and its fallbacks, every one of which resolves; **nothing
+pointing at a file the archive does not contain** — `data_path`, `gps_path`,
+`dashboard_path`, `texture` and `look_template`; the brand logo as a complete
+dds/mat/tobj triple; every source asset carried over; and the engine, chassis,
+gearbox and tyre values.
+
+| car | input | result |
+|---|---|---|
+| Mercedes-Benz G63 | `.scs` | 12 checks, 0 problems |
+| BMW M5 G90 | `.scs`, index-flagged encryption | 12 checks, 0 problems |
+| Mercedes-Benz X167 GLS | `.zip` wrapping a `.scs` | 12 checks, 0 problems |
+
+Against **SCS's own four Road Trip cars**, every value the converter writes
+sits inside the range they use — `air_resistance` 0.55 against their
+0.37-0.596, `cog_height` 0.72 against 0.52-0.738, `brake_rotor_diameter` 0.302
+against 0.279-0.356, the top gear 2.26 against their 2.258-2.790, the torque
+curve peaking at exactly 1.00 with a `(0, 0)` origin, and `roll_resistance`
+11 and `grip_factor` 1.1 against the base game's own 11-13 and 1.1-1.2. The
+one value outside is the G63's `stall_torque_ratio` — see F13 above.
+
+The G63 also confirms the two defects FINDINGS §41 measured are handled: the
+dashboard's two dangling DAF template units were written into
+`ui/template/dashboard_text.w463_g63_gps.sii`, and the `gps_path` that pointed
+at a script nobody ships was repointed at the dashboard the vehicle's own
+other parts use.
 
 ## The verification script
 Every finding above was reproduced against the code before it was fixed, and
