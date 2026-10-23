@@ -25,6 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -101,6 +102,14 @@ def parse_version(text: str | None) -> tuple[int, int, int] | None:
     return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
+def _format_size(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / 1048576:.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
+
+
 def read_local_version() -> str | None:
     try:
         return (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -130,9 +139,28 @@ def fetch_text(url: str, timeout: float = HTTP_TIMEOUT, limit: int = 4096) -> st
     return data.decode("utf-8", "strict")
 
 
-def _download(url: str, destination: Path) -> None:
+def _content_length(response) -> int:
+    try:
+        value = response.headers.get("Content-Length")
+    except AttributeError:
+        return 0
+    if not value:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _download(
+    url: str, destination: Path, progress: "Progress | None" = None
+) -> None:
     total = 0
+    last_draw = 0.0
     with _open(url, DOWNLOAD_TIMEOUT) as response, destination.open("wb") as handle:
+        expected = _content_length(response)
+        if progress is not None and expected:
+            progress.set_determinate()
         while True:
             chunk = response.read(256 * 1024)
             if not chunk:
@@ -141,8 +169,28 @@ def _download(url: str, destination: Path) -> None:
             if total > MAX_DOWNLOAD:
                 raise UpdateError("the update archive is unexpectedly large")
             handle.write(chunk)
+            if progress is not None:
+                now = time.monotonic()
+                if now - last_draw >= 0.05:
+                    if expected:
+                        progress.update(
+                            total / expected,
+                            f"{_format_size(total)}/{_format_size(expected)}",
+                        )
+                    else:
+                        progress.set_detail(_format_size(total))
+                    last_draw = now
     if total == 0:
         raise UpdateError("the update archive was empty")
+    if progress is not None:
+        # Only record the final figure: finish_spin() draws the 100% line, so
+        # redrawing here would leave the same step on screen twice.
+        if expected:
+            progress.set_detail(
+                f"{_format_size(total)}/{_format_size(expected)}"
+            )
+        else:
+            progress.set_detail(_format_size(total))
 
 
 def is_interactive() -> bool:
@@ -163,6 +211,190 @@ def _confirm(default_yes: bool = True) -> bool:
     if not answer:
         return default_yes
     return answer in ("y", "yes")
+
+
+class Progress:
+    """ASCII progress that reports the work actually finished.
+
+    A terminal gets a redrawn bar or a spinner; a pipe gets one line per
+    completed step, so a redirected run stays readable. No step invents a
+    percentage: a determinate step divides by bytes or files it knows about,
+    and a step whose total cannot be known (the archive size is not advertised
+    by GitHub) shows a spinner with the live byte count instead.
+    """
+
+    BAR = 20
+    FRAMES = ("|", "/", "-", "\\")
+
+    def __init__(self) -> None:
+        self.live = is_interactive()
+        self.index = 0
+        self.total = 0
+        self.label = ""
+        self.detail = ""
+        self.started = time.monotonic()
+        self._width = 0
+        self._last_draw = 0.0
+        self._determinate = False
+        self._lock = threading.Lock()
+        self._spinner_stop: threading.Event | None = None
+        self._spinner_thread: threading.Thread | None = None
+
+    # -- drawing ---------------------------------------------------------
+    def _write(self, text: str) -> None:
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+
+    def _prefix(self) -> str:
+        return f"[{self.index}/{self.total}] " if self.total else ""
+
+    def _draw(self, text: str) -> None:
+        with self._lock:
+            pad = max(0, self._width - len(text))
+            self._write("\r" + text + " " * pad)
+            self._width = len(text)
+
+    def _end_line(self, text: str) -> None:
+        with self._lock:
+            pad = max(0, self._width - len(text))
+            self._write("\r" + text + " " * pad + "\n")
+            self._width = 0
+
+    def _clear(self) -> None:
+        with self._lock:
+            if self._width:
+                self._write("\r" + " " * self._width + "\r")
+                self._width = 0
+
+    def _elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def _render(self, fraction: float) -> str:
+        fraction = min(1.0, max(0.0, fraction))
+        filled = int(fraction * self.BAR + 0.5)
+        bar = "#" * filled + "-" * (self.BAR - filled)
+        detail = self.detail[:16]
+        return (
+            f"{self._prefix()}{self.label[:20]:<20} [{bar}] "
+            f"{fraction * 100:3.0f}% {detail:<16} {self._elapsed():5.1f}s"
+        )
+
+    # -- indefinite steps -------------------------------------------------
+    def _spin(self, stop: threading.Event) -> None:
+        frame = 0
+        while not stop.wait(0.1):
+            detail = f" {self.detail}" if self.detail else ""
+            self._draw(
+                f"{self._prefix()}{self.label[:20]:<20}{detail} "
+                f"{self.FRAMES[frame % len(self.FRAMES)]} "
+                f"{self._elapsed():5.1f}s"
+            )
+            frame += 1
+
+    def _stop_spinner(self) -> None:
+        if self._spinner_stop is not None:
+            self._spinner_stop.set()
+        if self._spinner_thread is not None:
+            self._spinner_thread.join(timeout=1.0)
+        self._spinner_stop = None
+        self._spinner_thread = None
+
+    def set_detail(self, detail: str) -> None:
+        """Update the live counter of an indefinite step."""
+        self.detail = detail
+
+    def set_determinate(self) -> None:
+        """A step that started unknown now has a real denominator."""
+        self._stop_spinner()
+        self._determinate = True
+        if self.live:
+            self._draw(self._render(0.0))
+
+    # -- public steps -----------------------------------------------------
+    def begin(self, index: int, total: int, label: str) -> None:
+        self._stop_spinner()
+        self.index, self.total, self.label = index, total, label
+        self.detail = ""
+        self.started = time.monotonic()
+        self._last_draw = 0.0
+        self._determinate = True
+        if self.live:
+            self._draw(self._render(0.0))
+
+    def begin_spin(self, index: int, total: int, label: str) -> None:
+        self._stop_spinner()
+        self.index, self.total, self.label = index, total, label
+        self.detail = ""
+        self.started = time.monotonic()
+        self._determinate = False
+        if not self.live:
+            return
+        self._spinner_stop = threading.Event()
+        self._spinner_thread = threading.Thread(
+            target=self._spin, args=(self._spinner_stop,), daemon=True
+        )
+        self._spinner_thread.start()
+
+    def update(self, fraction: float, detail: str = "") -> None:
+        self.detail = detail
+        # finish() owns the completed line, so the last update only records
+        # its detail instead of painting a second 100% line.
+        if not self.live or not self._determinate or fraction >= 1.0:
+            return
+        now = time.monotonic()
+        if now - self._last_draw < 0.05:
+            return
+        self._last_draw = now
+        self._draw(self._render(fraction))
+
+    def finish(self, detail: str | None = None) -> None:
+        if detail is not None:
+            self.detail = detail
+        if not self.live:
+            self._log_done(self.detail)
+            return
+        self._last_draw = 0.0
+        self._end_line(self._render(1.0))
+
+    def finish_spin(self, detail: str | None = None) -> None:
+        self._stop_spinner()
+        if detail is not None:
+            self.detail = detail
+        if self._determinate:
+            self.finish()
+            return
+        if not self.live:
+            self._log_done(self.detail)
+            return
+        text = (
+            f"{self._prefix()}{self.label[:20]:<20} done "
+            f"{self._elapsed():5.1f}s"
+        )
+        if self.detail:
+            text += f" ({self.detail})"
+        self._end_line(text)
+
+    def _log_done(self, detail: str = "") -> None:
+        extra = f" ({detail})" if detail else ""
+        say(
+            f"{self._prefix()}{self.label} done in "
+            f"{self._elapsed():.1f}s{extra}"
+        )
+
+    def stop(self) -> None:
+        """End the check spinner without claiming a step completed."""
+        self._stop_spinner()
+        if self.live:
+            self._clear()
+
+    def abort(self) -> None:
+        """Clear a failed step; the caller prints the error."""
+        self._stop_spinner()
+        if self.live:
+            self._clear()
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +593,9 @@ def _validate_members(archive: zipfile.ZipFile) -> tuple[str, list[zipfile.ZipIn
     return tops.pop(), archive.infolist()
 
 
-def _stage_archive(zip_path: Path, staging: Path) -> str:
+def _stage_archive(
+    zip_path: Path, staging: Path, progress: "Progress | None" = None
+) -> str:
     try:
         archive = zipfile.ZipFile(zip_path)
     except (OSError, zipfile.BadZipFile) as exc:
@@ -369,12 +603,12 @@ def _stage_archive(zip_path: Path, staging: Path) -> str:
 
     with archive:
         top, members = _validate_members(archive)
-        # Validate the sizes before testzip() decompresses every member: a
-        # small archive can otherwise expand without bound before the size
-        # check in _validate_members is ever reached.
-        bad = archive.testzip()
-        if bad is not None:
-            raise UpdateError(f"the update archive is damaged at {bad!r}")
+        files = [member for member in members if not member.is_dir()]
+        # read() verifies the member's CRC, so a damaged entry is named here
+        # without a second full pass over the archive. Sizes are the
+        # compressed bytes actually read, which is the work this step does.
+        total = sum(member.compress_size for member in files)
+        done = 0
         for member in members:
             rel = PurePosixPath(member.filename).relative_to(top)
             if member.is_dir():
@@ -392,6 +626,13 @@ def _stage_archive(zip_path: Path, staging: Path) -> str:
             elif suffix == ".sh":
                 data = data.replace(b"\r\n", b"\n")
             target.write_bytes(data)
+            done += member.compress_size
+            if progress is not None:
+                fraction = done / total if total else 1.0
+                progress.update(
+                    fraction,
+                    f"{_format_size(done)}/{_format_size(total)}",
+                )
 
     for required in REQUIRED:
         if not (staging / required).is_file():
@@ -522,7 +763,9 @@ def recover_interrupted_update() -> None:
     _clean_state_dir()
 
 
-def _apply_staging(staging: Path) -> None:
+def _apply_staging(
+    staging: Path, progress: "Progress | None" = None
+) -> None:
     files = [path for path in staging.rglob("*") if path.is_file()]
     overwritten: list[str] = []
     added: list[str] = []
@@ -539,6 +782,37 @@ def _apply_staging(staging: Path) -> None:
         else:
             added.append(relative.as_posix())
 
+    backup_sizes: dict[str, int] = {}
+    for relative in overwritten:
+        try:
+            backup_sizes[relative] = (ROOT / relative).stat().st_size
+        except OSError:
+            backup_sizes[relative] = 0
+    write_total = 0
+    for source, _ in plans:
+        try:
+            write_total += source.stat().st_size
+        except OSError:
+            pass
+    total_work = sum(backup_sizes.values()) + write_total
+    total_files = len(overwritten) + len(plans)
+    done_work = 0
+    done_files = 0
+
+    def report() -> None:
+        if progress is None:
+            return
+        if total_work:
+            progress.update(
+                done_work / total_work,
+                f"{_format_size(done_work)}/{_format_size(total_work)}",
+            )
+        else:
+            progress.update(
+                done_files / total_files if total_files else 1.0,
+                f"{done_files}/{total_files} files",
+            )
+
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     backup = STATE_DIR / f"backup-{int(time.time())}-{os.getpid()}"
     try:
@@ -548,6 +822,9 @@ def _apply_staging(staging: Path) -> None:
             destination = backup / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, destination)
+            done_work += backup_sizes[relative]
+            done_files += 1
+            report()
 
         payload = {
             "backup": str(backup),
@@ -573,6 +850,9 @@ def _apply_staging(staging: Path) -> None:
             else:
                 os.chmod(temporary, 0o644)
             os.replace(temporary, target)
+            done_work += len(data)
+            done_files += 1
+            report()
     except Exception as exc:
         if not _restore(overwritten, added, backup):
             say("Warning: the update failed and could not fully restore the old files.")
@@ -606,17 +886,17 @@ def _requirements_text() -> str:
         return ""
 
 
-def _sync_requirements(before: str) -> None:
+def _sync_requirements(before: str) -> tuple[bool, str]:
+    """Install changed requirements. Returns (ok, what happened)."""
     after = _requirements_text()
     if before == after:
-        return
+        return True, "no changes"
     if os.name == "nt":
         python = ROOT / "scripts/.venv/Scripts/python.exe"
     else:
         python = ROOT / "scripts/.venv/bin/python"
     if not python.is_file():
-        return
-    say("Updating Python packages...")
+        return True, "no venv yet"
     try:
         proc = subprocess.run(
             [str(python), "-m", "pip", "install", "-r",
@@ -628,34 +908,51 @@ def _sync_requirements(before: str) -> None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        say(f"Warning: Python packages were not updated: {exc}")
-        return
+        return False, str(exc)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        say("Warning: Python packages were not updated"
-            + (f": {detail[-1]}" if detail else "."))
+        return False, detail[-1] if detail else "pip failed"
+    return True, "updated"
 
 
-def apply_zip(result: Result) -> str:
+def apply_zip(result: Result, progress: Progress | None = None) -> str:
+    progress = progress or Progress()
     before = _requirements_text()
     with tempfile.TemporaryDirectory(prefix="carutil-update-") as temporary:
         root = Path(temporary)
         archive = root / "update.zip"
         staging = root / "staging"
         staging.mkdir()
-        _download(ZIP_URL, archive)
-        _stage_archive(archive, staging)
+        progress.begin_spin(1, 4, "Downloading archive")
+        _download(ZIP_URL, archive, progress)
+        progress.finish_spin()
+        progress.begin(2, 4, "Verifying archive")
+        _stage_archive(archive, staging, progress)
+        progress.finish()
         version = _stage_version(staging, result.remote)
-        _apply_staging(staging)
-    _sync_requirements(before)
+        progress.begin(3, 4, "Installing files")
+        _apply_staging(staging, progress)
+        progress.finish()
+    progress.begin_spin(4, 4, "Python packages")
+    ok, detail = _sync_requirements(before)
+    progress.finish_spin(detail)
+    if not ok:
+        say(f"Warning: Python packages were not updated: {detail}")
     _clean_bytecode()
     return version
 
 
-def apply_git_update() -> str:
+def apply_git_update(progress: Progress | None = None) -> str:
+    progress = progress or Progress()
     before = _requirements_text()
+    progress.begin_spin(1, 2, "Applying update")
     version = apply_git()
-    _sync_requirements(before)
+    progress.finish_spin(version)
+    progress.begin_spin(2, 2, "Python packages")
+    ok, detail = _sync_requirements(before)
+    progress.finish_spin(detail)
+    if not ok:
+        say(f"Warning: Python packages were not updated: {detail}")
     _clean_bytecode()
     return version
 
@@ -675,10 +972,10 @@ def check_update() -> Result:
     return check_zip()
 
 
-def apply_update(result: Result) -> str:
+def apply_update(result: Result, progress: Progress | None = None) -> str:
     if (ROOT / ".git").exists():
-        return apply_git_update()
-    return apply_zip(result)
+        return apply_git_update(progress)
+    return apply_zip(result, progress)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -704,17 +1001,23 @@ def main(argv: list[str] | None = None) -> int:
     if not args.check and os.environ.get("CARUTIL_SKIP_UPDATE") == "1":
         return EXIT_CURRENT
 
+    checker = Progress()
+    checker.begin_spin(0, 0, "Checking for updates")
     try:
         result = check_update()
     except OfflineError:
+        checker.stop()
         say("No internet connection; could not check for updates.")
         return EXIT_OFFLINE if args.check else EXIT_CURRENT
     except UpdateError as exc:
+        checker.stop()
         say(f"Could not check for updates: {exc}")
         return EXIT_FAILED if args.check else EXIT_CURRENT
     except Exception as exc:
+        checker.stop()
         say(f"Could not check for updates: {exc}")
         return EXIT_FAILED if args.check else EXIT_CURRENT
+    checker.stop()
 
     if result.status == "current":
         if args.check or result.local != "unknown":
@@ -740,16 +1043,20 @@ def main(argv: list[str] | None = None) -> int:
         say("Continuing without updating.")
         return EXIT_CURRENT
 
+    updater = Progress()
     try:
-        version = apply_update(result)
+        version = apply_update(result, updater)
     except OfflineError:
+        updater.abort()
         say("No internet connection; the update was not installed.")
         return EXIT_CURRENT
     except (UpdateError, OSError) as exc:
+        updater.abort()
         say(f"Update failed: {exc}")
         say("CarUtil will continue with the current version.")
         return EXIT_CURRENT
     except Exception as exc:
+        updater.abort()
         say(f"Update failed: {exc}")
         say("CarUtil will continue with the current version.")
         return EXIT_CURRENT

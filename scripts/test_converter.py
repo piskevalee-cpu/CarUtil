@@ -5373,6 +5373,64 @@ def test_update() -> None:
     check("an SSH refusal is not reported as offline",
           not UP._git_offline("Permission denied (publickey)"))
 
+    # The bar is drawn from the work actually reported, and a redirected run
+    # gets a single summary line instead of carriage-return animation.
+    real_interactive = UP.is_interactive
+    real_progress_stdout = sys.stdout
+    try:
+        UP.is_interactive = lambda: True
+        out = io.StringIO()
+        sys.stdout = out
+        bar = UP.Progress()
+        bar.begin(2, 4, "Verifying archive")
+        bar.update(0.5, "1.0/2.0 MB")
+        bar.finish("2.0/2.0 MB")
+    finally:
+        UP.is_interactive = real_interactive
+        sys.stdout = real_progress_stdout
+    live = out.getvalue()
+    check("a live step draws a half-full bar",
+          "50%" in live and "##########----------" in live, repr(live))
+    check("a live step is redrawn in place", "\r" in live, repr(live[:40]))
+    check("a live step reports elapsed time",
+          re.search(r"\d+\.\d+s", live) is not None, repr(live))
+    check("a live step keeps its step counter", "[2/4]" in live, repr(live))
+    check("a live step ends its line", live.endswith("\n"), repr(live[-20:]))
+
+    # The last progress update and the finish must not draw the completed
+    # line twice; finish() owns 100%.
+    try:
+        UP.is_interactive = lambda: True
+        out = io.StringIO()
+        sys.stdout = out
+        once = UP.Progress()
+        once.begin(1, 2, "Installing files")
+        once.update(1.0, "2.0/2.0 MB")
+        once.finish()
+    finally:
+        UP.is_interactive = real_interactive
+        sys.stdout = real_progress_stdout
+    completed = out.getvalue()
+    check("a completed step is drawn once",
+          completed.count("100%") == 1, repr(completed))
+
+    try:
+        UP.is_interactive = lambda: False
+        out = io.StringIO()
+        sys.stdout = out
+        quiet = UP.Progress()
+        quiet.begin(1, 3, "Downloading archive")
+        quiet.update(0.5, "1.0/2.0 MB")
+        quiet.finish("2.0 MB")
+    finally:
+        UP.is_interactive = real_interactive
+        sys.stdout = real_progress_stdout
+    piped = out.getvalue()
+    check("a piped run logs one completed step",
+          piped.count("\n") == 1 and "[1/3]" in piped and "done" in piped,
+          repr(piped))
+    check("a piped run has no redraw", "\r" not in piped, repr(piped))
+
     # Compare ZIP versions with the network replaced.
     real_read = UP.read_local_version
     real_fetch = UP.fetch_text

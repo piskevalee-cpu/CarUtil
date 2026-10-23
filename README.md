@@ -170,6 +170,10 @@ The check is skipped when CarUtil is run through `scripts/carutil.py` directly.
 - **Offline:** the launcher prints `No internet connection; could not check for
   updates.` and continues with the installed version.
 
+On a terminal the installer shows each step (`[2/4] Verifying archive`) with an
+ASCII bar or spinner, the bytes or files done, and the elapsed seconds. When the
+output is redirected, the animation is replaced by one line per finished step.
+
 To skip the check for a scripted or CI run:
 
 ```bash
@@ -212,5 +216,5 @@ The guided run displays:
  \_____\__,_|_|   \____/ \__|_|_|
 
         CarUtil -- ATS Road Trip car converter
-                       v2.0.0
+                       v2.0.1
 ```
