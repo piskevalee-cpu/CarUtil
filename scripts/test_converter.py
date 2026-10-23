@@ -5153,6 +5153,20 @@ def test_ui() -> None:
     check("banner is ascii only", banner.isascii())
     check("banner mentions CarUtil", "CarUtil" in banner)
 
+    # VERSION is the one source of truth; the banner must quote it rather than
+    # carrying a second copy that drifts.
+    version_file = ROOT / "VERSION"
+    if not version_file.exists():
+        check("VERSION file exists", False, str(version_file))
+    else:
+        version = version_file.read_text(encoding="utf-8").strip()
+        check("VERSION is MAJOR.MINOR.PATCH with single-digit minor/patch",
+              re.fullmatch(r"\d+\.[0-9]\.[0-9]", version) is not None, version)
+        check("ui reads VERSION from the repository root",
+              U.VERSION == version, f"{U.VERSION!r} != {version!r}")
+        check("the banner shows the shipped version",
+              f"v{version}" in banner, version)
+
     # The README quotes the banner; if the art changes, the sample must too.
     readme = ROOT / "README.md"
     if readme.exists():
@@ -5331,6 +5345,335 @@ def test_ui() -> None:
             control.select_next()          # move off the suggested row
             check("one lit row, and it is the row under the cursor",
                   lit_rows() == ["Sedan"], str(lit_rows()))
+
+
+def test_update() -> None:
+    """The updater is network-free in tests and never blocks a launch."""
+    section("automatic updates")
+    import builtins
+    import update as UP
+
+    check("VERSION parser accepts 2.0.9",
+          UP.parse_version("2.0.9") == (2, 0, 9))
+    check("VERSION parser accepts a multi-digit major",
+          UP.parse_version("10.0.0") == (10, 0, 0))
+    check("VERSION parser accepts a v prefix",
+          UP.parse_version("v2.1.0") == (2, 1, 0))
+    check("VERSION parser rejects two-digit minor/patch",
+          UP.parse_version("2.10.0") is None
+          and UP.parse_version("2.0.10") is None)
+    check("VERSION parser rejects pre-release text",
+          UP.parse_version("2.0.0-beta") is None)
+    check("a DNS failure is reported as offline",
+          UP._git_offline("fatal: unable to access: Could not resolve host"))
+    check("a proxy failure is reported as offline",
+          UP._git_offline("fatal: unable to access: Could not resolve proxy"))
+    check("a credential failure is not reported as offline",
+          not UP._git_offline("fatal: Authentication failed for repo"))
+    check("an SSH refusal is not reported as offline",
+          not UP._git_offline("Permission denied (publickey)"))
+
+    # Compare ZIP versions with the network replaced.
+    real_read = UP.read_local_version
+    real_fetch = UP.fetch_text
+    try:
+        UP.read_local_version = lambda: "2.0.9"
+        UP.fetch_text = lambda *a, **k: "2.1.0\n"
+        result = UP.check_zip()
+        check("a newer remote VERSION is an update",
+              result.status == "available" and result.remote == "2.1.0",
+              repr(result))
+        UP.fetch_text = lambda *a, **k: "2.0.9\n"
+        check("an equal VERSION is current", UP.check_zip().status == "current")
+        UP.fetch_text = lambda *a, **k: "2.0.8\n"
+        check("an older remote VERSION is not a downgrade",
+              UP.check_zip().status == "current")
+        UP.fetch_text = lambda *a, **k: "2.0.10\n"
+        try:
+            UP.check_zip()
+            malformed = False
+        except UP.UpdateError:
+            malformed = True
+        check("a malformed remote VERSION is refused", malformed)
+    finally:
+        UP.read_local_version = real_read
+        UP.fetch_text = real_fetch
+
+    # Offline and non-interactive runs must print and return, never prompt.
+    real_check = UP.check_update
+    real_interactive = UP.is_interactive
+    real_marker = UP.MARKER
+    real_stdout = sys.stdout
+    # A developer environment with the skip flag set must not turn the
+    # "does not prompt" check into a false pass.
+    real_skip = os.environ.pop("CARUTIL_SKIP_UPDATE", None)
+    with tempfile.TemporaryDirectory() as td:
+        UP.MARKER = Path(td) / "in-progress.json"
+        try:
+            UP.check_update = lambda: (_ for _ in ()).throw(
+                UP.OfflineError("dns"))
+            out = io.StringIO()
+            sys.stdout = out
+            try:
+                rc = UP.main(["--check"])
+            finally:
+                sys.stdout = real_stdout
+            check("an offline check exits 20", rc == 20, str(rc))
+            check("offline says no internet connection",
+                  "No internet connection" in out.getvalue(), out.getvalue())
+            out = io.StringIO()
+            sys.stdout = out
+            try:
+                rc = UP.main(["--auto"])
+            finally:
+                sys.stdout = real_stdout
+            check("an offline launch does not stop CarUtil", rc == 0, str(rc))
+
+            UP.check_update = lambda: UP.Result("available", "2.0.9", "2.1.0")
+            out = io.StringIO()
+            sys.stdout = out
+            try:
+                rc = UP.main(["--check"])
+            finally:
+                sys.stdout = real_stdout
+            check("an available check exits 10", rc == 10, str(rc))
+            check("the check names both versions",
+                  "2.0.9" in out.getvalue() and "2.1.0" in out.getvalue(),
+                  out.getvalue())
+
+            UP.is_interactive = lambda: False
+            out = io.StringIO()
+            sys.stdout = out
+            try:
+                rc = UP.main(["--auto"])
+            finally:
+                sys.stdout = real_stdout
+            check("a non-interactive run does not install", rc == 0, str(rc))
+            check("a non-interactive run explains how to update",
+                  "Run CarUtil from a terminal" in out.getvalue(),
+                  out.getvalue())
+        finally:
+            UP.check_update = real_check
+            UP.is_interactive = real_interactive
+            UP.MARKER = real_marker
+            if real_skip is not None:
+                os.environ["CARUTIL_SKIP_UPDATE"] = real_skip
+
+    real_input = builtins.input
+    try:
+        builtins.input = lambda prompt="": ""
+        check("the update prompt defaults to yes", UP._confirm() is True)
+        builtins.input = lambda prompt="": "n"
+        check("the update prompt accepts no", UP._confirm() is False)
+    finally:
+        builtins.input = real_input
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td)
+
+        # A valid archive: the top-level folder is stripped, and line endings
+        # are normalised to the repository's .gitattributes.
+        good = base / "good.zip"
+        payload = {
+            "VERSION": "2.1.0\n",
+            "carutil.sh": "#!/bin/sh\r\necho hi\r\n",
+            "carutil.bat": "@echo off\necho hi\n",
+            "scripts/carutil.py": "# new\n",
+            "scripts/update.py": "# new updater\n",
+            "scripts/backend/sii.py": "# new\n",
+            "scripts/requirements.txt": "questionary==2.1.1\n",
+            "scripts/logos/custom.png": b"archive-logo",
+        }
+        with zipfile.ZipFile(good, "w") as z:
+            for name, data in payload.items():
+                z.writestr("CarUtil-main/" + name, data)
+        staging = base / "staging"
+        staging.mkdir()
+        top = UP._stage_archive(good, staging)
+        check("the archive's top-level folder is stripped",
+              top == "CarUtil-main", top)
+        bat = (staging / "carutil.bat").read_bytes()
+        sh = (staging / "carutil.sh").read_bytes()
+        check("batch files are staged with CRLF",
+              b"\r\n" in bat and b"\n" not in bat.replace(b"\r\n", b""))
+        check("shell files are staged with LF", b"\r\n" not in sh)
+
+        # Path traversal and symlinks must be refused before extraction.
+        bad = base / "bad.zip"
+        with zipfile.ZipFile(bad, "w") as z:
+            z.writestr("CarUtil-main/../evil", b"x")
+        try:
+            UP._stage_archive(bad, base / "bad-stage")
+            traversal = False
+        except UP.UpdateError:
+            traversal = True
+        check("archive path traversal is refused", traversal)
+
+        link = base / "link.zip"
+        with zipfile.ZipFile(link, "w") as z:
+            info = zipfile.ZipInfo("CarUtil-main/evil")
+            info.external_attr = 0o120777 << 16
+            z.writestr(info, b"target")
+        try:
+            UP._stage_archive(link, base / "link-stage")
+            symlink = False
+        except UP.UpdateError:
+            symlink = True
+        check("archive symlinks are refused", symlink)
+
+        # Apply into a fake install. The venv and a user logo must survive.
+        install = base / "install"
+        (install / "scripts/.venv").mkdir(parents=True)
+        (install / "scripts/logos").mkdir(parents=True)
+        (install / "VERSION").write_text("2.0.0\n", encoding="utf-8")
+        (install / "scripts/carutil.py").write_text("old\n", encoding="utf-8")
+        (install / "scripts/.venv/keep").write_text("venv\n", encoding="utf-8")
+        (install / "scripts/logos/custom.png").write_bytes(b"user-logo")
+
+        real_root, real_state, real_marker = UP.ROOT, UP.STATE_DIR, UP.MARKER
+        UP.ROOT = install
+        UP.STATE_DIR = install / ".carutil-update"
+        UP.MARKER = UP.STATE_DIR / "in-progress.json"
+        try:
+            UP._apply_staging(staging)
+        finally:
+            UP.ROOT, UP.STATE_DIR, UP.MARKER = (
+                real_root, real_state, real_marker)
+        check("the staged version is installed",
+              (install / "VERSION").read_text(encoding="utf-8").strip()
+              == "2.1.0")
+        check("a tracked file is replaced",
+              (install / "scripts/carutil.py").read_text(encoding="utf-8")
+              == "# new\n")
+        check("the venv is preserved",
+              (install / "scripts/.venv/keep").read_text(encoding="utf-8")
+              == "venv\n")
+        check("an existing custom logo is preserved",
+              (install / "scripts/logos/custom.png").read_bytes()
+              == b"user-logo")
+        check("a successful apply removes its rollback marker",
+              not (install / ".carutil-update/in-progress.json").exists())
+
+        # A failure half-way must restore the old tree and remove new files.
+        broken = base / "broken"
+        (broken / "scripts").mkdir(parents=True)
+        (broken / "VERSION").write_text("2.0.0\n", encoding="utf-8")
+        (broken / "scripts/carutil.py").write_text("old\n", encoding="utf-8")
+        UP.ROOT = broken
+        UP.STATE_DIR = broken / ".carutil-update"
+        UP.MARKER = UP.STATE_DIR / "in-progress.json"
+        real_replace = UP.os.replace
+        calls = []
+
+        def fail_second(source, target):
+            calls.append(target)
+            if len(calls) == 2:
+                raise OSError("simulated write failure")
+            return real_replace(source, target)
+
+        UP.os.replace = fail_second
+        try:
+            try:
+                UP._apply_staging(staging)
+                failed = False
+            except UP.UpdateError:
+                failed = True
+        finally:
+            UP.os.replace = real_replace
+            UP.ROOT, UP.STATE_DIR, UP.MARKER = (
+                real_root, real_state, real_marker)
+        check("a failed apply is reported", failed)
+        check("a failed apply restores the old version",
+              (broken / "VERSION").read_text(encoding="utf-8").strip()
+              == "2.0.0")
+        check("a failed apply restores the old file",
+              (broken / "scripts/carutil.py").read_text(encoding="utf-8")
+              == "old\n")
+        check("a failed apply removes files it had added",
+              not (broken / "carutil.sh").exists())
+
+        # If the rollback itself cannot write, the marker and backup must
+        # survive so the next launch can retry instead of losing the old files.
+        stuck = base / "stuck"
+        (stuck / "scripts").mkdir(parents=True)
+        (stuck / "VERSION").write_text("2.0.0\n", encoding="utf-8")
+        (stuck / "scripts/carutil.py").write_text("old\n", encoding="utf-8")
+        UP.ROOT = stuck
+        UP.STATE_DIR = stuck / ".carutil-update"
+        UP.MARKER = UP.STATE_DIR / "in-progress.json"
+        real_copy2 = UP.shutil.copy2
+        real_replace = UP.os.replace
+        calls = []
+
+        def fail_second_replace(source, target):
+            calls.append(target)
+            if len(calls) == 2:
+                raise OSError("simulated write failure")
+            return real_replace(source, target)
+
+        def fail_restore_copy(source, destination, *args, **kwargs):
+            if ".carutil-update" in str(source):
+                raise OSError("simulated locked file")
+            return real_copy2(source, destination, *args, **kwargs)
+
+        UP.os.replace = fail_second_replace
+        UP.shutil.copy2 = fail_restore_copy
+        try:
+            try:
+                UP._apply_staging(staging)
+                failed = False
+            except UP.UpdateError:
+                failed = True
+        finally:
+            UP.os.replace = real_replace
+            UP.shutil.copy2 = real_copy2
+        check("a failed rollback is reported", failed)
+        check("a failed rollback keeps its marker",
+              (stuck / ".carutil-update/in-progress.json").is_file())
+        try:
+            UP.recover_interrupted_update()
+        finally:
+            UP.ROOT, UP.STATE_DIR, UP.MARKER = (
+                real_root, real_state, real_marker)
+        check("the next run restores the old version",
+              (stuck / "VERSION").read_text(encoding="utf-8").strip()
+              == "2.0.0")
+        check("the next run restores the old file",
+              (stuck / "scripts/carutil.py").read_text(encoding="utf-8")
+              == "old\n")
+        check("recovery removes its state folder",
+              not (stuck / ".carutil-update").exists())
+
+        # A marker that points outside the state folder must not be obeyed.
+        outside = base / "outside"
+        outside.mkdir()
+        (outside / "VERSION").write_text("9.9.9\n")
+        state = base / "unsafe"
+        state.mkdir()
+        (state / "in-progress.json").write_text(
+            '{"backup": "%s", "overwritten": ["VERSION"], "added": []}'
+            % outside, encoding="utf-8")
+        UP.ROOT = base / "unsafe-install"
+        UP.STATE_DIR = state
+        UP.MARKER = state / "in-progress.json"
+        try:
+            UP.recover_interrupted_update()
+        finally:
+            UP.ROOT, UP.STATE_DIR, UP.MARKER = (
+                real_root, real_state, real_marker)
+        check("a marker naming an outside backup is ignored",
+              not (base / "unsafe-install/VERSION").exists())
+
+    shell = (ROOT / "carutil.sh").read_text(encoding="utf-8")
+    batch = (ROOT / "carutil.bat").read_text(encoding="utf-8")
+    ignores = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    check("the shell launcher checks for updates",
+          "scripts/update.py --auto" in shell)
+    check("the batch launcher checks for updates",
+          "scripts\\update.py --auto" in batch)
+    check("the batch launcher runs from an unlockable copy",
+          "CARUTIL_SHADOWED" in batch and "%TEMP%\\CarUtil" in batch)
+    check("updater state is gitignored", "/.carutil-update/" in ignores)
 
 
 def test_torque_for_time() -> None:
@@ -6404,18 +6747,19 @@ def test_carutil_is_the_entry_point() -> None:
     leftovers = [
         f.name for f in HERE.iterdir()
         if f.is_file() and f.suffix in (".py", ".md") and "carutil" not in f.name
-        and f.name not in ("test_converter.py", "AGENTS.md", "FINDINGS.md",
-                           "fix.md")
+        and f.name not in ("test_converter.py", "update.py", "AGENTS.md",
+                           "FINDINGS.md", "fix.md")
     ]
     check("no unexpected new modules beside the entry point", not leftovers,
           str(leftovers))
+    check("update.py is beside the entry point", (HERE / "update.py").is_file())
     helpers = ("sii.py", "hashfs.py", "logo.py", "brands.py", "ui.py")
     check("backend/ holds every helper module",
           all((BACKEND / n).is_file() for n in helpers),
           str(sorted(p.name for p in BACKEND.iterdir())))
-    expected_root = {"README.md", "carutil.sh", "carutil.bat", "scripts"}
+    expected_root = {"README.md", "VERSION", "carutil.sh", "carutil.bat", "scripts"}
     visible_root = {p.name for p in ROOT.iterdir() if not p.name.startswith(".")}
-    check("the root contains only the README, launchers and scripts/",
+    check("the root contains only the README, VERSION, launchers and scripts/",
           visible_root == expected_root, str(sorted(visible_root)))
 
     # logos/ stays beside the entry point, outside backend/.
@@ -6658,6 +7002,7 @@ def main() -> int:
     test_brand_logo()
     test_brand_selection()
     test_ui()
+    test_update()
     test_stated_engine_torque()
     test_engine_curve_peak_excludes_secondary()
     test_tune_engine_rescales_inflated_output()

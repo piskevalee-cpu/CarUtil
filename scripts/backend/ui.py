@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 try:
     import questionary as _questionary
@@ -174,7 +175,23 @@ def rule(char: str = "-", width: int = 62) -> str:
     return char * width
 
 
-BANNER = r"""
+def _read_version() -> str:
+    """The shipped version, from the repository-root VERSION file.
+
+    A missing file is a packaging mistake, but it must not stop the program
+    from starting: the banner says "unknown" rather than taking the CLI down.
+    """
+    try:
+        return (Path(__file__).resolve().parents[2] / "VERSION").read_text(
+            encoding="utf-8"
+        ).strip()
+    except OSError:
+        return "unknown"
+
+
+VERSION = _read_version()
+
+BANNER = rf"""
   _____           _    _ _   _ _
  / ____|         | |  | | | (_) |
 | |     __ _ _ __| |  | | |_ _| |
@@ -183,6 +200,7 @@ BANNER = r"""
  \_____\__,_|_|   \____/ \__|_|_|
 
         CarUtil -- ATS Road Trip car converter
+                       v{VERSION}
 """
 
 

@@ -19,3 +19,6 @@ scripts/logos/*.dds
 # Scratch
 *.log
 *.tmp
+
+# Updater state and rollback data
+/.carutil-update/

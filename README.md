@@ -154,6 +154,34 @@ replacement and uses the mod's logo or a placeholder. An explicitly provided
 `--brand-logo` requires ImageMagick. There are 23 listed brands, including
 `other`.
 
+## Updates
+
+`carutil.sh` and `carutil.bat` check for a newer version before starting. If one
+is available, they ask before installing it; pressing Enter accepts the update.
+The check is skipped when CarUtil is run through `scripts/carutil.py` directly.
+
+- **Git clone:** only the `main` branch is updated automatically, with a
+  fast-forward merge. A working tree with local changes, local commits, or a
+  different branch is left alone and the reason is printed.
+- **ZIP install:** the latest `main` archive is downloaded and overlaid.
+  `scripts/.venv/` is preserved, and existing files in `scripts/logos/` are
+  left alone so custom brand images survive. A failed update restores the
+  previous files.
+- **Offline:** the launcher prints `No internet connection; could not check for
+  updates.` and continues with the installed version.
+
+To skip the check for a scripted or CI run:
+
+```bash
+CARUTIL_SKIP_UPDATE=1 bash carutil.sh
+```
+
+To check manually without installing anything:
+
+```bash
+python3 scripts/update.py --check
+```
+
 ## Tests
 
 Run the test suite with:
@@ -184,4 +212,5 @@ The guided run displays:
  \_____\__,_|_|   \____/ \__|_|_|
 
         CarUtil -- ATS Road Trip car converter
+                       v2.0.0
 ```

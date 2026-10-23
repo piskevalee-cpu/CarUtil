@@ -1,6 +1,21 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+
+rem cmd.exe locks a running .bat, so update from a copy in %TEMP%. The install
+rem copy stays replaceable while this window keeps running the copy.
+if defined CARUTIL_SHADOWED goto :have_home
+set "CARUTIL_HOME=%~dp0"
+if /i "%~dp0"=="%TEMP%\CarUtil\" goto :have_home
+if not exist "%TEMP%\CarUtil" mkdir "%TEMP%\CarUtil" >nul 2>&1
+copy /y "%~f0" "%TEMP%\CarUtil\carutil.bat" >nul 2>&1
+if errorlevel 1 goto :have_home
+set "CARUTIL_SHADOWED=1"
+cd /d "%TEMP%\CarUtil"
+call "%TEMP%\CarUtil\carutil.bat"
+exit /b %ERRORLEVEL%
+
+:have_home
+cd /d "%CARUTIL_HOME%"
 
 echo.
 echo CarUtil setup
@@ -40,6 +55,8 @@ if errorlevel 1 (
     set "CARUTIL_EXIT=1"
     goto :done
 )
+
+if not "%CARUTIL_SKIP_UPDATE%"=="1" if exist "scripts\update.py" %PYTHON% scripts\update.py --auto
 
 call :check_imagemagick
 

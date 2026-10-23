@@ -2,8 +2,8 @@
 
 Guidance for AI agents working in this repository. Read this before editing
 anything; most of it is knowledge that cost real debugging time to acquire.
-The project root contains only `README.md`, `carutil.sh`, `carutil.bat`, and
-this `scripts/` directory (apart from Git metadata and its config files).
+The project root contains `README.md`, `VERSION`, `carutil.sh`, `carutil.bat`,
+and this `scripts/` directory (apart from Git metadata and its config files).
 
 ## What this is
 
@@ -15,6 +15,7 @@ ImageMagick is optional and is used only to convert brand logo images.
 | File | Role |
 |---|---|
 | `carutil.py` | The converter and CLI, and the entry point. Everything of substance lives here (~5200 lines). |
+| `update.py` | Stdlib-only update checker and installer. The launchers run it before the venv exists, so it must not import `carutil.py`, `ui.py`, or the UI packages. |
 | `backend/` | The five helper modules. **It is a `sys.path` entry, not a package** — no `__init__.py`, and every import stays flat (`import brands as _brands`), so a module is still testable on its own with a one-line import. `carutil.py` and the suite each insert it themselves; a new top-level module has to be added to both. |
 | `backend/sii.py` | Parsing/editing helpers for SCS's `.sii` data format. |
 | `backend/hashfs.py` | Reader for SCS's own `SCS#` container (HashFS v1). See below. |
@@ -82,6 +83,61 @@ fixture directory missing one mod (e.g. no `porsche-cayenne/`) previously killed
 the whole run partway through, because `main()` signals a missing input with
 `SystemExit`, which `@guard` did not catch. It now skips, so an incomplete
 fixture directory is safe but silently reduces coverage — check the skip list.
+
+## Versioning
+
+`VERSION` at the repository root is the single source of truth. `ui.py` reads it
+for the CLI banner; do not hardcode a second copy in the code, README, or tests.
+
+**Every commit increments the version by `0.0.1`.** Components are numeric
+`MAJOR.MINOR.PATCH`, with ten units in each minor and patch component (`0`–`9`).
+The carry is decimal, not semver's unbounded patch:
+
+```
+2.0.0 -> 2.0.1 -> ... -> 2.0.9 -> 2.1.0 -> ... -> 2.9.9 -> 3.0.0
+```
+
+- Bump `VERSION` once, in the same commit as the change.
+- A docs-only or test-only commit still bumps it.
+- When `PATCH` is `9`, the next commit increments `MINOR` and resets `PATCH` to
+  `0`; when `MINOR` is `9`, the next commit increments `MAJOR` and resets both.
+- `MAJOR` may grow past one digit at `9.9.9 -> 10.0.0`; `MINOR` and `PATCH`
+  never do.
+- No pre-release or build suffixes: the updater compares numeric components.
+
+The baseline is `2.0.0`, set by the commit that introduced versioning. The next
+commit after that is `2.0.1`. `test_ui` asserts that `VERSION` is valid, that
+the banner shows it, and that `README.md` quotes the current banner.
+
+## Updating
+
+`carutil.sh` and `carutil.bat` run `python3 scripts/update.py --auto` after the
+Python version check and before ImageMagick, the venv, or the conversion. The
+check must never block a conversion: `--auto` exits 0 even when the network is
+down, the user declines, or the apply fails.
+
+- **Git clones** are updated only on `main`, only with a clean tracked working
+  tree, and only with `git merge --ff-only`. A dirty tree, local commits, a
+  detached HEAD, or a diverged branch is skipped with a message; never reset,
+  stash, or force.
+- **ZIP installs** download the `main` archive, validate every member (no
+  `..`, absolute paths, or symlinks), stage it, and overlay it. Existing
+  `scripts/logos/` files are preserved so user-supplied brand art survives.
+  Every overwritten file is backed up under `.carutil-update/`; a failure
+  restores it, and an interrupted apply is recovered on the next run.
+- **The launchers must stay thin.** Windows locks a running `.bat`, so
+  `carutil.bat` copies itself to `%TEMP%\CarUtil\` and runs that copy. Do not
+  remove `CARUTIL_SHADOWED`/`CARUTIL_HOME`: without the copy the updater cannot
+  replace the launcher.
+- `CARUTIL_SKIP_UPDATE=1` disables the automatic check. `python3 scripts/update.py
+  --check` reports without installing; exit 10 means an update is available.
+- `CARUTIL_UPDATE_REPO` (default `piskevalee-cpu/CarUtil`) and
+  `CARUTIL_UPDATE_BRANCH` (default `main`) point the updater at a fork or a
+  test copy. The Git path still requires that branch locally.
+
+**Updater tests must not touch the network or prompt.** Patch `check_update`,
+`fetch_text`, or `_git` and drive the pure helpers; a test that reaches `input()`
+without pinning the terminal state will hang a console run.
 
 ## The suite asserts on source text, not only behaviour
 

@@ -186,6 +186,10 @@ if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'; 
     exit 1
 fi
 
+if [[ "${CARUTIL_SKIP_UPDATE:-0}" != "1" && -f scripts/update.py ]]; then
+    python3 scripts/update.py --auto
+fi
+
 if ! imagemagick_available; then
     echo "ImageMagick is optional; it converts the bundled brand logos."
     if ask_yes_no "Install ImageMagick now?" yes; then
